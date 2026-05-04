@@ -1,0 +1,25 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          # Prefer a user PAT or GitHub App token so the release PR (and the
+          # tag created on its merge) trigger downstream `pull_request` and
+          # `push` workflows — actions taken with the default `GITHUB_TOKEN`
+          # do not chain workflow events. Falls back to GITHUB_TOKEN when
+          # the secret is unset, in which case the release PR will not get
+          # CI and the cut tag will NOT trigger `docker.yml` (so the semver
+          # image tags `:X.Y.Z` / `:X.Y` / `:X` / `:latest` will not be
+          # published until someone re-pushes the tag manually).
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}

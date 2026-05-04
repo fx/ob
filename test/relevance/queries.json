@@ -1,0 +1,35 @@
+[
+  {
+    "query": "promote Alice to Principal next year",
+    "expectedPath": "self/tasks.md",
+    "mode": "hybrid",
+    "note": "Required (change 0008): hybrid mode must put the verbatim line top-1."
+  },
+  {
+    "query": "BFF architecture cross-team adoption",
+    "expectedPath": "entities/Alice Example.md",
+    "note": "Top-3 should contain a chunk whose headingPath mentions cross-team work."
+  },
+  {
+    "query": "daily routine morning",
+    "expectedPath": "self/habits.md",
+    "note": "Top-5 should contain a chunk from the user's task / habits file."
+  },
+  {
+    "query": "deeply nested heading prose",
+    "expectedPath": "guides/long-form.md",
+    "note": "Sanity test that the prose splitter still works."
+  },
+  {
+    "query": "Acmetown",
+    "expectedPath": "entities/Alice.md",
+    "mode": "fts",
+    "note": "Change 0008 — proper-noun query that fts wins (paired with the vector-mode counterpart below)."
+  },
+  {
+    "query": "Acmetown",
+    "expectedPath": "entities/Alice.md",
+    "mode": "vector",
+    "note": "Change 0008 — same query in vector mode; under the fake hash embedder this fails to surface the right path, contrasting with the fts case."
+  }
+]

@@ -1,0 +1,38 @@
+{
+  "name": "ob",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "scripts": {
+    "dev": "bun --watch src/server.ts",
+    "start": "bun src/server.ts",
+    "test": "bun test --timeout 30000",
+    "test:cov": "bun test --coverage --timeout 30000 && bun test/check-coverage.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check && hadolint Dockerfile",
+    "lint:fix": "biome check --write && hadolint Dockerfile",
+    "format": "biome format --write"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.2.0",
+    "@lancedb/lancedb": "0.27.2",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "chokidar": "5.0.0",
+    "gray-matter": "4.0.3",
+    "hono": "4.6.14",
+    "remark": "15.0.1",
+    "remark-frontmatter": "5.0.0",
+    "remark-gfm": "4.0.1",
+    "unist-util-visit": "5.1.0",
+    "zod": "3.24.1",
+    "zod-to-json-schema": "3.24.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "@types/bun": "1.1.14",
+    "typescript": "5.7.2"
+  }
+}

@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.gitignore'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.gitignore'
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Pinned to mise.toml — bump in lockstep.
+          bun-version: 1.3.13
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+
+      - name: Install hadolint
+        # GitHub-hosted runners execute steps as the unprivileged `runner`
+        # user, so writes into /usr/local/bin require sudo (this matches the
+        # README's local install recipe). The .sha256 file is published with
+        # each hadolint release; verifying it before install protects against
+        # a tampered or truncated download.
+        run: |
+          tmp=$(mktemp -d)
+          base=https://github.com/hadolint/hadolint/releases/download/v2.12.0
+          curl --fail -sSL -o "$tmp/hadolint-Linux-x86_64" "$base/hadolint-Linux-x86_64"
+          curl --fail -sSL -o "$tmp/hadolint-Linux-x86_64.sha256" "$base/hadolint-Linux-x86_64.sha256"
+          (cd "$tmp" && sha256sum -c hadolint-Linux-x86_64.sha256)
+          sudo mv "$tmp/hadolint-Linux-x86_64" /usr/local/bin/hadolint
+          sudo chmod +x /usr/local/bin/hadolint
+
+      - run: bun install --frozen-lockfile
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Typecheck
+        run: bunx tsc --noEmit
+
+      - name: Test (with coverage)
+        run: bun run test:cov
+
+      - name: Upload coverage reports to Codecov
+        if: always()
+        continue-on-error: true
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: fx/ob

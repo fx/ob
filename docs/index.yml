@@ -1,0 +1,96 @@
+# Documentation Index
+# Auto-updated by /spec-writer and /project-management skills
+
+specs:
+  - name: architecture
+    path: specs/architecture/
+    description: Single-process Bun server topology, runtime, config, container, and standing testing/lint conventions.
+    status: active
+  - name: obsidian-sync
+    path: specs/obsidian-sync/
+    description: Auth-token bootstrap and per-vault obsidian-headless child-process supervision.
+    status: active
+  - name: vault-indexer
+    path: specs/vault-indexer/
+    description: Chokidar watcher, Markdown chunker, embedding providers, and per-vault LanceDB store.
+    status: active
+  - name: rest-api
+    path: specs/rest-api/
+    description: Vault-scoped HTTP CRUD over arbitrary files plus natural-language search over Markdown.
+    status: active
+  - name: mcp-server
+    path: specs/mcp-server/
+    description: MCP HTTP/SSE server exposing the same surface as REST as MCP tools and resources.
+    status: active
+
+changes:
+  - id: "0001"
+    name: project-scaffold
+    path: changes/0001-project-scaffold.md
+    description: Bun + TypeScript + Biome + bun test scaffold, env-driven config, logger, /healthz server, and base Dockerfile.
+    spec: architecture
+    status: complete
+    depends_on: []
+  - id: "0002"
+    name: obsidian-supervisor
+    path: changes/0002-obsidian-supervisor.md
+    description: Auth-token bootstrap and per-vault ob sync supervisor with crash-restart and SIGTERM handling.
+    spec: obsidian-sync
+    status: complete
+    depends_on: ["0001"]
+  - id: "0003"
+    name: vault-indexer
+    path: changes/0003-vault-indexer.md
+    description: Watcher, chunker, embedding providers (Transformers.js + OpenAI), and LanceDB store with initial scan.
+    spec: vault-indexer
+    status: complete
+    depends_on: ["0002"]
+  - id: "0004"
+    name: rest-api
+    path: changes/0004-rest-api.md
+    description: Hono routes for vault status, document CRUD, and search, with shared service layer and JSON error model.
+    spec: rest-api
+    status: complete
+    depends_on: ["0003"]
+  - id: "0005"
+    name: mcp-server
+    path: changes/0005-mcp-server.md
+    description: Streamable HTTP MCP transport at /mcp and the nine tools mirroring REST, sharing the service layer.
+    spec: mcp-server
+    status: complete
+    depends_on: ["0004"]
+  - id: "0006"
+    name: production-image
+    path: changes/0006-production-image.md
+    description: Production-grade single Docker image with pinned versions, rootless user, tini, healthcheck, and run docs.
+    spec: architecture
+    status: complete
+    depends_on: ["0005"]
+  - id: "0007"
+    name: indexer-relevance
+    path: changes/0007-indexer-relevance.md
+    description: Flat-list-aware chunker + embed_text column composing path/heading-path with body; pipeline-version sidecar drives full re-embed on chunker upgrade.
+    spec: vault-indexer
+    status: complete
+    depends_on: ["0006"]
+  - id: "0008"
+    name: search-relevance
+    path: changes/0008-search-relevance.md
+    description: Hybrid retrieval (vector + LanceDB FTS via RRF), per-path MMR diversification, score threshold; new mode/threshold/mmrLambda/maxPerPath knobs propagate through REST and MCP.
+    spec: vault-indexer
+    status: complete
+    depends_on: ["0007"]
+  - id: "0009"
+    name: ci-test-suite
+    path: changes/0009-ci-test-suite.md
+    description: GitHub Actions CI workflow that runs Biome + hadolint, tsc --noEmit, and bun test --coverage on every PR and push to main.
+    spec: architecture
+    status: complete
+    depends_on: ["0006"]
+  - id: "0010"
+    name: release-and-image-publishing
+    path: changes/0010-release-and-image-publishing.md
+    description: release-please-driven semver tags + CHANGELOG and Docker image build/publish to ghcr.io with semver + sha-channel tags. Gated by 0009's CI.
+    spec: architecture
+    status: complete
+    depends_on: ["0009"]
