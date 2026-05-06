@@ -26,11 +26,13 @@ import { ensureAuthToken } from "./bootstrap.ts";
 import { type ChildBackoff, type CrashLoop, VaultChild, type VaultStatus } from "./child.ts";
 import { type SetupBackoff, SetupPermanentError, ensureVaultSetup } from "./setup.ts";
 import { type Spawner, realSpawner } from "./spawn.ts";
+import { SyncConfigPermanentError, applyVaultSyncConfig } from "./syncconfig.ts";
 
 export type { VaultState, VaultStatus } from "./child.ts";
 export type { SpawnHandle, SpawnOpts, Spawner } from "./spawn.ts";
 export { AuthMissingError } from "./bootstrap.ts";
 export { SetupPermanentError, SetupTransientError } from "./setup.ts";
+export { SyncConfigPermanentError } from "./syncconfig.ts";
 
 export interface Supervisor {
   list(): VaultStatus[];
@@ -179,6 +181,41 @@ export async function startSupervisor(cfg: Config, deps: SupervisorDeps): Promis
           vault: v.slug,
           error: msg,
           permanent: e instanceof SetupPermanentError,
+        });
+        child.markFailed(msg);
+        continue;
+      }
+      if (initState.stopped) return;
+      // Apply `ob sync-config` (env-var → flag bridge) BEFORE spawning the
+      // continuous sync child. When no `OB_SYNC_*` vars are set this is a
+      // logged no-op; otherwise it spawns once with the spec-ordered argv
+      // and respects the same retry envelope as `ensureVaultSetup`. A
+      // permanent failure marks the vault `failed` and the `sync` child
+      // is NEVER spawned.
+      try {
+        await applyVaultSyncConfig(
+          {
+            name: v.name,
+            slug: v.slug,
+            path: vaultPath,
+            ...(v.e2eePassword !== undefined ? { e2eePassword: v.e2eePassword } : {}),
+          },
+          {
+            spawner,
+            sleep,
+            ...(deps.setupBackoff !== undefined ? { backoff: deps.setupBackoff } : {}),
+            ...(deps.obBin !== undefined ? { obBin: deps.obBin } : {}),
+            shouldStop: () => initState.stopped,
+          },
+          log,
+          cfg.syncConfigEnv,
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log.error("vault sync-config permanently failed", {
+          vault: v.slug,
+          error: msg,
+          permanent: e instanceof SyncConfigPermanentError,
         });
         child.markFailed(msg);
         continue;
