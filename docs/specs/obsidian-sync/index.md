@@ -65,7 +65,7 @@ This spec defines how the `ob` server bootstraps credentials, configures one or 
 
 ### Sync configuration bootstrap
 
-- After `sync-setup` completes (or is skipped because the vault is already configured) and before `ob sync --continuous` is spawned, the supervisor MUST invoke `ob sync-config --path <dir>` with flags derived from environment variables.
+- After `sync-setup` completes (or is skipped because the vault is already configured) and before `ob sync --continuous` is spawned, the supervisor MUST evaluate the `OB_SYNC_*` env vars and invoke `ob sync-config --path <dir>` with flags derived from them only when at least one mapped var is set. When every `OB_SYNC_*` var is unset, the supervisor MUST NOT invoke `sync-config` and MUST proceed directly to spawning the continuous sync child.
 - The mapping from env var to `ob sync-config` flag MUST be:
 
   | Env var | CLI flag |
