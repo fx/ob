@@ -12,6 +12,7 @@ function baseConfig(over: Partial<Config> = {}): Config {
     embeddingProvider: "transformers",
     embeddingModel: "Xenova/all-MiniLM-L6-v2",
     logLevel: "error",
+    syncConfigEnv: {},
     ...over,
   };
   return cfg;

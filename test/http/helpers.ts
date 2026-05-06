@@ -57,6 +57,7 @@ export async function makeHttpFixture(label = "http"): Promise<HttpFixture> {
     embeddingProvider: "transformers",
     embeddingModel: "x",
     logLevel: "error",
+    syncConfigEnv: {},
   };
 
   const indexer = await startIndexer(cfg, {

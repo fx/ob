@@ -354,3 +354,38 @@ describe("loadConfig — port / host / log level / provider", () => {
     expect(cfg.openaiBaseUrl).toBe("https://api.example/v1");
   });
 });
+
+describe("loadConfig — OB_SYNC_* plumbing", () => {
+  test("syncConfigEnv defaults to an empty object when no OB_SYNC_* vars are set", () => {
+    const cfg = loadConfig({ OBSIDIAN_AUTH_TOKEN: TOKEN, VAULTS_JSON: '[{"name":"v"}]' });
+    expect(cfg.syncConfigEnv).toEqual({});
+  });
+
+  test("syncConfigEnv carries through validated OB_SYNC_* values", () => {
+    const cfg = loadConfig({
+      OBSIDIAN_AUTH_TOKEN: TOKEN,
+      VAULTS_JSON: '[{"name":"v"}]',
+      OB_SYNC_FILE_TYPES: "image,audio,pdf,video,unsupported",
+      OB_SYNC_MODE: "bidirectional",
+    });
+    expect(cfg.syncConfigEnv.fileTypes).toBe("image,audio,pdf,video,unsupported");
+    expect(cfg.syncConfigEnv.mode).toBe("bidirectional");
+    expect(cfg.syncConfigEnv.deviceName).toBeUndefined();
+  });
+
+  test("loadConfig surfaces OB_SYNC_* validation as ConfigError (exit 78)", () => {
+    let err: unknown;
+    try {
+      loadConfig({
+        OBSIDIAN_AUTH_TOKEN: TOKEN,
+        VAULTS_JSON: '[{"name":"v"}]',
+        OB_SYNC_MODE: "push-only",
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as ConfigError).exitCode).toBe(78);
+    expect((err as ConfigError).message).toContain("OB_SYNC_MODE");
+  });
+});

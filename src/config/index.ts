@@ -15,6 +15,26 @@ export interface VaultConfig {
   readonly e2eePassword?: string;
 }
 
+/**
+ * Resolved `OB_SYNC_*` env vars used by `applyVaultSyncConfig` to build the
+ * `ob sync-config` argv. Each field is `string | undefined`:
+ *
+ * - `undefined` — the env var was unset; the corresponding flag MUST be
+ *   omitted entirely (preserves on-disk value).
+ * - `""` (empty string) — the env var was set to an empty string; the flag
+ *   MUST be passed verbatim with an empty value (matches upstream "empty to
+ *   clear" semantic).
+ * - any non-empty string — the value to pass to the flag verbatim.
+ */
+export interface SyncConfigEnv {
+  readonly fileTypes?: string;
+  readonly excludedFolders?: string;
+  readonly mode?: string;
+  readonly conflictStrategy?: string;
+  readonly deviceName?: string;
+  readonly configs?: string;
+}
+
 export interface Config {
   /**
    * Value of `OBSIDIAN_AUTH_TOKEN`. OPTIONAL at the env layer because the
@@ -33,6 +53,12 @@ export interface Config {
   readonly openaiApiKey?: string;
   readonly openaiBaseUrl?: string;
   readonly logLevel: LogLevel;
+  /**
+   * Resolved `OB_SYNC_*` env vars (validated). All fields default to
+   * `undefined` when the corresponding env var is unset; the supervisor
+   * skips `ob sync-config` entirely when every field is `undefined`.
+   */
+  readonly syncConfigEnv: SyncConfigEnv;
 }
 
 /**
@@ -160,6 +186,98 @@ function parseProvider(raw: string): EmbeddingProvider {
   );
 }
 
+const VALID_SYNC_FILE_TYPES: readonly string[] = ["image", "audio", "pdf", "video", "unsupported"];
+const VALID_SYNC_MODES: readonly string[] = ["bidirectional", "pull-only", "mirror-remote"];
+const VALID_SYNC_CONFLICT_STRATEGIES: readonly string[] = ["merge", "conflict"];
+const VALID_SYNC_CONFIGS: readonly string[] = [
+  "app",
+  "appearance",
+  "appearance-data",
+  "hotkey",
+  "core-plugin",
+  "core-plugin-data",
+  "community-plugin",
+  "community-plugin-data",
+];
+
+/**
+ * Validate a comma-separated list against an enum's allowed tokens. Whitespace
+ * around tokens is trimmed before validation; the *value* still flows through
+ * to the CLI verbatim because upstream `ob` accepts whitespace in lists.
+ *
+ * Empty strings are intentionally rejected here only when there is at least
+ * one non-empty token that is invalid; the wholly-empty value (`""`) is
+ * accepted by the caller and forwarded as the upstream "empty to clear"
+ * sentinel.
+ */
+function validateCsvSubset(varName: string, raw: string, allowed: readonly string[]): void {
+  if (raw === "") return;
+  const tokens = raw.split(",").map((t) => t.trim());
+  for (const tok of tokens) {
+    if (tok === "" || !allowed.includes(tok)) {
+      throw new ConfigError(
+        `${varName} must be a comma-separated subset of ${allowed.join("|")} (or empty), got token "${tok}"`,
+      );
+    }
+  }
+}
+
+function validateEnum(varName: string, raw: string, allowed: readonly string[]): void {
+  if (raw === "") return;
+  if (!allowed.includes(raw)) {
+    throw new ConfigError(
+      `${varName} must be one of ${allowed.join("|")} (or empty), got "${raw}"`,
+    );
+  }
+}
+
+/**
+ * Resolve and validate the `OB_SYNC_*` env-var family. Returns a
+ * `SyncConfigEnv` whose fields are either `undefined` (var unset → skip
+ * flag), `""` (var set to empty → "empty to clear"), or a verbatim value.
+ *
+ * Throws `ConfigError` (exit 78) on any invalid enum value, naming the
+ * offending var and the acceptable values.
+ */
+export function loadSyncConfigEnv(env: Record<string, string | undefined>): SyncConfigEnv {
+  const fileTypes = env.OB_SYNC_FILE_TYPES;
+  if (fileTypes !== undefined) {
+    validateCsvSubset("OB_SYNC_FILE_TYPES", fileTypes, VALID_SYNC_FILE_TYPES);
+  }
+  const mode = env.OB_SYNC_MODE;
+  if (mode !== undefined) {
+    validateEnum("OB_SYNC_MODE", mode, VALID_SYNC_MODES);
+  }
+  const conflictStrategy = env.OB_SYNC_CONFLICT_STRATEGY;
+  if (conflictStrategy !== undefined) {
+    validateEnum("OB_SYNC_CONFLICT_STRATEGY", conflictStrategy, VALID_SYNC_CONFLICT_STRATEGIES);
+  }
+  const configs = env.OB_SYNC_CONFIGS;
+  if (configs !== undefined) {
+    validateCsvSubset("OB_SYNC_CONFIGS", configs, VALID_SYNC_CONFIGS);
+  }
+  const excludedFolders = env.OB_SYNC_EXCLUDED_FOLDERS;
+  const deviceName = env.OB_SYNC_DEVICE_NAME;
+
+  // Build the result object so `JSON.stringify` and equality checks see only
+  // the fields that were actually present in `env`.
+  const out: {
+    fileTypes?: string;
+    excludedFolders?: string;
+    mode?: string;
+    conflictStrategy?: string;
+    deviceName?: string;
+    configs?: string;
+  } = {};
+  if (fileTypes !== undefined) out.fileTypes = fileTypes;
+  if (excludedFolders !== undefined) out.excludedFolders = excludedFolders;
+  if (mode !== undefined) out.mode = mode;
+  if (conflictStrategy !== undefined) out.conflictStrategy = conflictStrategy;
+  if (deviceName !== undefined) out.deviceName = deviceName;
+  if (configs !== undefined) out.configs = configs;
+  return out;
+}
+
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const tokenRaw = env.OBSIDIAN_AUTH_TOKEN;
   // OBSIDIAN_AUTH_TOKEN is OPTIONAL at the env layer. A pre-existing
@@ -205,6 +323,8 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
 
   const logLevel: LogLevel = env.LOG_LEVEL !== undefined ? parseLevel(env.LOG_LEVEL) : "info";
 
+  const syncConfigEnv = loadSyncConfigEnv(env);
+
   const cfg: Config = {
     // Trimmed token, or `undefined` when unset/whitespace-only —
     // `ensureAuthToken` falls back to the on-disk file in that case.
@@ -218,6 +338,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     ...(openaiApiKey !== undefined ? { openaiApiKey } : {}),
     ...(openaiBaseUrl !== undefined ? { openaiBaseUrl } : {}),
     logLevel,
+    syncConfigEnv,
   };
   return cfg;
 }
