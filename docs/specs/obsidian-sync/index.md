@@ -63,6 +63,60 @@ This spec defines how the `ob` server bootstraps credentials, configures one or 
 - **THEN** `sync-setup` is NOT invoked
 - **AND** `ob sync --continuous` is spawned directly
 
+### Sync configuration bootstrap
+
+- After `sync-setup` completes (or is skipped because the vault is already configured) and before `ob sync --continuous` is spawned, the supervisor MUST invoke `ob sync-config --path <dir>` with flags derived from environment variables.
+- The mapping from env var to `ob sync-config` flag MUST be:
+
+  | Env var | CLI flag |
+  |---|---|
+  | `OB_SYNC_FILE_TYPES` | `--file-types <value>` |
+  | `OB_SYNC_EXCLUDED_FOLDERS` | `--excluded-folders <value>` |
+  | `OB_SYNC_MODE` | `--mode <value>` |
+  | `OB_SYNC_CONFLICT_STRATEGY` | `--conflict-strategy <value>` |
+  | `OB_SYNC_DEVICE_NAME` | `--device-name <value>` |
+  | `OB_SYNC_CONFIGS` | `--configs <value>` |
+
+- If an env var is unset, the corresponding flag MUST NOT be passed. The upstream default or the value persisted by `ob` from a prior run MUST be preserved.
+- If an env var is set to the empty string, the empty string MUST be passed verbatim to honor the upstream "empty to clear" semantic.
+- `OB_SYNC_*` env-var values MUST apply identically to every configured vault. Per-vault overrides are out of scope.
+- The supervisor MUST validate enum-typed env vars before spawning any `ob` child:
+  - `OB_SYNC_MODE` MUST be one of `bidirectional`, `pull-only`, `mirror-remote`, or empty.
+  - `OB_SYNC_CONFLICT_STRATEGY` MUST be one of `merge`, `conflict`, or empty.
+  - `OB_SYNC_FILE_TYPES` MUST be a comma-separated subset of `image,audio,pdf,video,unsupported`, or empty.
+  - `OB_SYNC_CONFIGS` MUST be a comma-separated subset of `app,appearance,appearance-data,hotkey,core-plugin,core-plugin-data,community-plugin,community-plugin-data`, or empty.
+  - Any invalid value MUST cause startup to fail with `VaultConfigError` (exit 78) before any vault is touched.
+- `OB_SYNC_EXCLUDED_FOLDERS` and `OB_SYNC_DEVICE_NAME` values MUST be passed verbatim; the supervisor MUST NOT validate folder existence or device-name format.
+- `sync-config` MUST be invoked at most once per vault per startup. The supervisor MUST NOT re-invoke it while the continuous sync child is running.
+- `sync-config` non-zero exits MUST be retried with exponential backoff (initial 1s, factor 2, cap 60s, max 5 attempts) before marking the vault `failed`. A `sync-config` failure on one vault MUST NOT block other vaults.
+
+#### Scenario: Enable unsupported file types
+
+- **GIVEN** `OB_SYNC_FILE_TYPES=image,audio,pdf,video,unsupported` and a fresh vault `v`
+- **WHEN** the supervisor starts
+- **THEN** the order of operations for `v` is: `ob sync-setup` → `ob sync-config --path /data/vaults/v --file-types image,audio,pdf,video,unsupported` → `ob sync --continuous --path /data/vaults/v`
+
+#### Scenario: All sync-config vars unset
+
+- **GIVEN** none of the `OB_SYNC_*` env vars are set
+- **WHEN** the supervisor starts vault `v`
+- **THEN** `ob sync-config` MUST NOT be invoked for `v`
+- **AND** the upstream defaults / values persisted from prior runs are left unchanged
+
+#### Scenario: Clear excluded folders
+
+- **GIVEN** `OB_SYNC_EXCLUDED_FOLDERS=` (set, empty string)
+- **WHEN** the supervisor starts vault `v`
+- **THEN** `ob sync-config --path /data/vaults/v --excluded-folders ""` is invoked exactly once
+- **AND** any previously configured excluded folders are cleared
+
+#### Scenario: Invalid mode rejected at startup
+
+- **GIVEN** `OB_SYNC_MODE=push-only` (not a valid mode)
+- **WHEN** the process starts
+- **THEN** the process exits 78 with a message naming the offending var and value
+- **AND** no `ob` child has been spawned
+
 ### Sync supervision
 
 - For each configured vault, the supervisor MUST maintain exactly one running `ob sync --continuous --path <dir>` child process.
@@ -127,6 +181,7 @@ src/obsidian/
   index.ts          # public Supervisor factory + types
   bootstrap.ts      # auth_token bootstrap
   setup.ts          # `ob sync-setup` orchestration with backoff
+  syncconfig.ts     # `ob sync-config` env-var → flag mapping + validation
   child.ts          # spawn + log-tag + restart loop for one vault
   status.ts         # parse `ob sync-status` output
 ```
@@ -145,13 +200,15 @@ src/obsidian/
 | `VaultConfigError` | invalid `VAULTS_JSON` | exit 78 |
 | `SetupTransientError` | `ob sync-setup` non-zero, attempt < 5 | retry with backoff |
 | `SetupPermanentError` | `ob sync-setup` non-zero, attempt ≥ 5 | mark vault `failed` |
+| `SyncConfigTransientError` | `ob sync-config` non-zero, attempt < 5 | retry with backoff |
+| `SyncConfigPermanentError` | `ob sync-config` non-zero, attempt ≥ 5 | mark vault `failed` |
 | `SyncCrashLoop` | ≥ 10 crashes in 5 min | mark vault `failed` |
 
 ## Constraints
 
 - The supervisor MUST NOT call `ob login`, `ob logout`, or `ob sync-create-remote` (creating remote vaults is a user action, not a server action).
 - The supervisor MUST NOT shell-interpolate vault names; arguments MUST go through array-form spawn.
-- Per-vault sync mode (`bidirectional` / `pull-only` / `mirror-remote`) MUST default to whatever `ob` defaults to. Overriding it is OUT OF SCOPE for v1 and tracked as a future change.
+- Sync settings (mode, file types, excluded folders, conflict strategy, configs, device name) are configured via `OB_SYNC_*` env vars applied identically to every vault (see [Sync configuration bootstrap](#sync-configuration-bootstrap)). Per-vault overrides are out of scope.
 
 ## Open Questions
 
@@ -168,3 +225,4 @@ src/obsidian/
 |------|--------|----------|
 | 2026-05-03 | Initial spec created | — |
 | 2026-05-03 | Align `/readyz` semantics with Architecture spec: strict 200-only-if-all-ready (replaces the prior "200 if any vault healthy" wording). | [Change 0002](../../changes/0002-obsidian-supervisor.md) |
+| 2026-05-06 | Add Sync-configuration-bootstrap requirements: env-var-driven `ob sync-config` step between `sync-setup` and `sync --continuous`, with `OB_SYNC_*` mapping, validation, and retry semantics. Lifts the prior "Per-vault sync mode override is out of scope for v1" constraint. | [Change 0011](../../changes/0011-sync-config-bootstrap.md) |

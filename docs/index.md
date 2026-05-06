@@ -24,3 +24,4 @@
 | 0008 | [search-relevance](changes/0008-search-relevance.md) | [vault-indexer](specs/vault-indexer/) | complete | 0007 |
 | 0009 | [ci-test-suite](changes/0009-ci-test-suite.md) | [architecture](specs/architecture/) | complete | 0006 |
 | 0010 | [release-and-image-publishing](changes/0010-release-and-image-publishing.md) | [architecture](specs/architecture/) | complete | 0009 |
+| 0011 | [sync-config-bootstrap](changes/0011-sync-config-bootstrap.md) | [obsidian-sync](specs/obsidian-sync/) | draft | — |
