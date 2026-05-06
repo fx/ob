@@ -46,6 +46,22 @@ this table mirrors it for convenience.
 | `OPENAI_API_KEY` | when `EMBEDDING_PROVIDER=openai` | API key. |
 | `OPENAI_BASE_URL` | no | Override OpenAI base URL (for OpenAI-compatible endpoints). |
 | `LOG_LEVEL` | no | `trace`, `debug`, `info`, `warn`, `error`. Default `info`. |
+| `OB_SYNC_FILE_TYPES` | no | Comma-separated subset of `image,audio,pdf,video,unsupported` passed to `ob sync-config --file-types`. Empty string clears the list (sync everything). Unset preserves the on-disk value. |
+| `OB_SYNC_EXCLUDED_FOLDERS` | no | Forwarded verbatim to `ob sync-config --excluded-folders`. Empty string clears. |
+| `OB_SYNC_MODE` | no | One of `bidirectional`, `pull-only`, `mirror-remote`. Forwarded to `ob sync-config --mode`. Empty string clears. |
+| `OB_SYNC_CONFLICT_STRATEGY` | no | One of `merge`, `conflict`. Forwarded to `ob sync-config --conflict-strategy`. Empty string clears. |
+| `OB_SYNC_DEVICE_NAME` | no | Forwarded verbatim to `ob sync-config --device-name`. Empty string clears. |
+| `OB_SYNC_CONFIGS` | no | Comma-separated subset of `app,appearance,appearance-data,hotkey,core-plugin,core-plugin-data,community-plugin,community-plugin-data`. Forwarded to `ob sync-config --configs`. Empty string clears. |
+
+The `OB_SYNC_*` family runs `ob sync-config` once per vault between
+`ob sync-setup` and `ob sync --continuous`. Unset vars omit the
+corresponding flag entirely (preserving whatever was on disk); empty
+strings forward verbatim as the upstream "empty to clear" sentinel; if
+every `OB_SYNC_*` var is unset the call is skipped. Invalid enum values
+fail fast with exit 78 before any vault is touched. For example,
+`-e OB_SYNC_FILE_TYPES=image,audio,pdf,video,unsupported` keeps the
+default attachment types AND syncs everything else (the typical fix for
+"my `.json`/`.txt`/`.docx` files are missing in the cloud").
 
 ### First-run latency
 
