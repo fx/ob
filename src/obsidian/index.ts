@@ -22,9 +22,10 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config } from "../config/index.ts";
 import type { Logger } from "../log.ts";
+import type { Backoff } from "./backoff.ts";
 import { ensureAuthToken } from "./bootstrap.ts";
 import { type ChildBackoff, type CrashLoop, VaultChild, type VaultStatus } from "./child.ts";
-import { type SetupBackoff, SetupPermanentError, ensureVaultSetup } from "./setup.ts";
+import { SetupPermanentError, ensureVaultSetup } from "./setup.ts";
 import { type Spawner, realSpawner } from "./spawn.ts";
 import { SyncConfigPermanentError, applyVaultSyncConfig } from "./syncconfig.ts";
 
@@ -48,7 +49,7 @@ export interface SupervisorDeps {
   readonly mkdir?: (path: string, opts: { recursive: true; mode: number }) => Promise<void>;
   readonly homeDir?: string;
   readonly xdgConfigHome?: string;
-  readonly setupBackoff?: SetupBackoff;
+  readonly setupBackoff?: Backoff;
   readonly childBackoff?: ChildBackoff;
   readonly crashLoop?: CrashLoop;
   readonly obBin?: string;
@@ -186,12 +187,6 @@ export async function startSupervisor(cfg: Config, deps: SupervisorDeps): Promis
         continue;
       }
       if (initState.stopped) return;
-      // Apply `ob sync-config` (env-var → flag bridge) BEFORE spawning the
-      // continuous sync child. When no `OB_SYNC_*` vars are set this is a
-      // logged no-op; otherwise it spawns once with the spec-ordered argv
-      // and respects the same retry envelope as `ensureVaultSetup`. A
-      // permanent failure marks the vault `failed` and the `sync` child
-      // is NEVER spawned.
       try {
         await applyVaultSyncConfig(
           {
@@ -202,12 +197,12 @@ export async function startSupervisor(cfg: Config, deps: SupervisorDeps): Promis
           },
           {
             spawner,
+            logger: log,
             sleep,
             ...(deps.setupBackoff !== undefined ? { backoff: deps.setupBackoff } : {}),
             ...(deps.obBin !== undefined ? { obBin: deps.obBin } : {}),
             shouldStop: () => initState.stopped,
           },
-          log,
           cfg.syncConfigEnv,
         );
       } catch (e) {

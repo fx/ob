@@ -150,7 +150,7 @@ describe("buildSyncConfigArgs — multi-flag ordering", () => {
 describe("applyVaultSyncConfig — no-op path", () => {
   test("returns immediately and does NOT spawn when no vars are set", async () => {
     const sp = createFakeSpawner();
-    await applyVaultSyncConfig(FAKE_VAULT, { spawner: sp, sleep: noSleep }, silentLog, {});
+    await applyVaultSyncConfig(FAKE_VAULT, { spawner: sp, logger: silentLog, sleep: noSleep }, {});
     expect(sp.calls).toHaveLength(0);
   });
 });
@@ -159,9 +159,13 @@ describe("applyVaultSyncConfig — happy paths", () => {
   test("spawns once with the built argv on first-try success", async () => {
     const sp = createFakeSpawner();
     sp.enqueue({ exitCode: 0 });
-    await applyVaultSyncConfig(FAKE_VAULT, { spawner: sp, sleep: noSleep }, silentLog, {
-      fileTypes: "image",
-    });
+    await applyVaultSyncConfig(
+      FAKE_VAULT,
+      { spawner: sp, logger: silentLog, sleep: noSleep },
+      {
+        fileTypes: "image",
+      },
+    );
     expect(sp.calls).toHaveLength(1);
     expect(sp.calls[0]?.cmd).toBe("ob");
     expect(sp.calls[0]?.args).toEqual(["sync-config", "--path", "/p", "--file-types", "image"]);
@@ -172,8 +176,7 @@ describe("applyVaultSyncConfig — happy paths", () => {
     sp.enqueue({ exitCode: 0 });
     await applyVaultSyncConfig(
       FAKE_VAULT,
-      { spawner: sp, sleep: noSleep, obBin: "/custom/ob" },
-      silentLog,
+      { spawner: sp, logger: silentLog, sleep: noSleep, obBin: "/custom/ob" },
       { mode: "bidirectional" },
     );
     expect(sp.calls[0]?.cmd).toBe("/custom/ob");
@@ -189,9 +192,13 @@ describe("applyVaultSyncConfig — retries", () => {
     const sleep = async (ms: number): Promise<void> => {
       sleeps.push(ms);
     };
-    await applyVaultSyncConfig(FAKE_VAULT, { spawner: sp, sleep }, silentLog, {
-      fileTypes: "image",
-    });
+    await applyVaultSyncConfig(
+      FAKE_VAULT,
+      { spawner: sp, logger: silentLog, sleep },
+      {
+        fileTypes: "image",
+      },
+    );
     expect(sp.calls).toHaveLength(2);
     expect(sleeps).toEqual([1_000]); // initial backoff between attempt 1 and 2
   });
@@ -221,9 +228,11 @@ describe("applyVaultSyncConfig — retries", () => {
         };
       },
     };
-    await applyVaultSyncConfig(FAKE_VAULT, { spawner: customSpawner, sleep: noSleep }, silentLog, {
-      mode: "bidirectional",
-    });
+    await applyVaultSyncConfig(
+      FAKE_VAULT,
+      { spawner: customSpawner, logger: silentLog, sleep: noSleep },
+      { mode: "bidirectional" },
+    );
     expect(calls).toHaveLength(2);
   });
 
@@ -232,9 +241,13 @@ describe("applyVaultSyncConfig — retries", () => {
     for (let i = 0; i < 5; i++) sp.enqueue({ exitCode: 1 });
     let err: unknown;
     try {
-      await applyVaultSyncConfig(FAKE_VAULT, { spawner: sp, sleep: noSleep }, silentLog, {
-        fileTypes: "image",
-      });
+      await applyVaultSyncConfig(
+        FAKE_VAULT,
+        { spawner: sp, logger: silentLog, sleep: noSleep },
+        {
+          fileTypes: "image",
+        },
+      );
     } catch (e) {
       err = e;
     }
@@ -253,10 +266,10 @@ describe("applyVaultSyncConfig — retries", () => {
         FAKE_VAULT,
         {
           spawner: sp,
+          logger: silentLog,
           sleep: noSleep,
           backoff: { initialMs: 0, factor: 1, capMs: 0, maxAttempts: 2 },
         },
-        silentLog,
         { fileTypes: "image" },
       );
     } catch (e) {
@@ -272,8 +285,7 @@ describe("applyVaultSyncConfig — cancellation", () => {
     const sp = createFakeSpawner();
     await applyVaultSyncConfig(
       FAKE_VAULT,
-      { spawner: sp, sleep: noSleep, shouldStop: () => true },
-      silentLog,
+      { spawner: sp, logger: silentLog, sleep: noSleep, shouldStop: () => true },
       { fileTypes: "image" },
     );
     expect(sp.calls).toHaveLength(0);
@@ -288,9 +300,11 @@ describe("applyVaultSyncConfig — cancellation", () => {
       // Allow the first call (before attempt 1), reject the second (before attempt 2).
       return attemptsSeen > 1;
     };
-    await applyVaultSyncConfig(FAKE_VAULT, { spawner: sp, sleep: noSleep, shouldStop }, silentLog, {
-      fileTypes: "image",
-    });
+    await applyVaultSyncConfig(
+      FAKE_VAULT,
+      { spawner: sp, logger: silentLog, sleep: noSleep, shouldStop },
+      { fileTypes: "image" },
+    );
     expect(sp.calls).toHaveLength(1);
   });
 });

@@ -1,26 +1,17 @@
 /**
  * `ob sync-config` orchestration.
  *
- * Translates the validated `SyncConfigEnv` (resolved by the config layer)
- * into an `ob sync-config` argv and runs it once per vault, mirroring the
- * retry/backoff envelope `ensureVaultSetup` uses for `ob sync-setup`.
- *
- * Per the change doc:
- * - An **unset** field means "omit the flag entirely" (preserve on-disk value).
- * - An **empty-string** field is forwarded verbatim as the upstream
- *   "empty to clear" sentinel.
- * - When *every* field is unset, this module is a no-op — `buildSyncConfigArgs`
- *   returns `null` and `applyVaultSyncConfig` returns immediately without
- *   spawning a child.
- *
- * The flag order matches the spec table: file-types, excluded-folders, mode,
- * conflict-strategy, device-name, configs. The order is observable to tests
- * and is part of this module's contract.
+ * Translates `SyncConfigEnv` into an `ob sync-config` argv with two
+ * load-bearing semantics: an **unset** field omits the flag (preserve
+ * on-disk value); an **empty-string** field is forwarded verbatim
+ * (upstream "empty to clear" sentinel). Flag order matches the spec
+ * table and is part of this module's contract.
  */
 
 import type { SyncConfigEnv } from "../config/index.ts";
 import type { Logger } from "../log.ts";
-import { DEFAULT_BACKOFF, type SetupBackoff, type SetupVault, backoffDelay } from "./setup.ts";
+import { type Backoff, DEFAULT_BACKOFF, drain, runWithBackoff } from "./backoff.ts";
+import type { SetupVault } from "./setup.ts";
 import type { Spawner } from "./spawn.ts";
 
 /**
@@ -41,8 +32,9 @@ export class SyncConfigPermanentError extends Error {
 
 export interface SyncConfigDeps {
   readonly spawner: Spawner;
+  readonly logger: Logger;
   readonly sleep: (ms: number) => Promise<void>;
-  readonly backoff?: SetupBackoff;
+  readonly backoff?: Backoff;
   readonly obBin?: string;
   /**
    * Cooperative cancellation predicate. Polled at every yield point so the
@@ -53,17 +45,10 @@ export interface SyncConfigDeps {
 
 /**
  * Build the `ob sync-config` argv for `vaultPath`. Returns `null` when every
- * field of `env` is `undefined` (no `OB_SYNC_*` var was set; the call is a
- * no-op and MUST be skipped).
+ * field of `env` is `undefined` (the call is a no-op and MUST be skipped).
  *
- * Otherwise returns `["sync-config", "--path", vaultPath, ...flags]` with one
- * `--<flag> <value>` pair per set field. `value` is forwarded verbatim — an
- * empty string yields `["...", "--excluded-folders", ""]` (the upstream
- * "empty to clear" sentinel).
- *
- * Flag order matches the spec table and is part of the public contract:
- * file-types → excluded-folders → mode → conflict-strategy → device-name →
- * configs.
+ * Flag order is part of the public contract: file-types → excluded-folders →
+ * mode → conflict-strategy → device-name → configs.
  */
 export function buildSyncConfigArgs(env: SyncConfigEnv, vaultPath: string): string[] | null {
   const args: string[] = [];
@@ -75,18 +60,6 @@ export function buildSyncConfigArgs(env: SyncConfigEnv, vaultPath: string): stri
   if (env.configs !== undefined) args.push("--configs", env.configs);
   if (args.length === 0) return null;
   return ["sync-config", "--path", vaultPath, ...args];
-}
-
-async function drain(stream: ReadableStream<Uint8Array>): Promise<void> {
-  const reader = stream.getReader();
-  try {
-    while (true) {
-      const { done } = await reader.read();
-      if (done) return;
-    }
-  } finally {
-    reader.releaseLock();
-  }
 }
 
 /** Run `ob sync-config` once. Returns the child's exit code. */
@@ -101,21 +74,17 @@ async function runSyncConfigOnce(
 }
 
 /**
- * Apply `ob sync-config` to a vault, with the same retry envelope as
- * `ensureVaultSetup`: max 5 attempts, 1s/×2/cap 60s, throws treated as
- * transient (-1 exit).
- *
- * No-op when `env` has no fields set: logs once at info and returns.
+ * Apply `ob sync-config` to a vault using the shared retry envelope. No-op
+ * when `env` has no fields set: logs once at info and returns.
  */
 export async function applyVaultSyncConfig(
   vault: SetupVault,
   deps: SyncConfigDeps,
-  log: Logger,
   env: SyncConfigEnv,
 ): Promise<void> {
   const argv = buildSyncConfigArgs(env, vault.path);
   if (argv === null) {
-    log.info("skipping sync-config (no OB_SYNC_* vars set)", { vault: vault.slug });
+    deps.logger.info("skipping sync-config (no OB_SYNC_* vars set)", { vault: vault.slug });
     return;
   }
 
@@ -123,39 +92,16 @@ export async function applyVaultSyncConfig(
   const backoff = deps.backoff ?? DEFAULT_BACKOFF;
   const shouldStop = deps.shouldStop ?? ((): boolean => false);
 
-  let lastExit = -1;
-  for (let attempt = 1; attempt <= backoff.maxAttempts; attempt++) {
-    if (shouldStop()) {
-      log.info("sync-config cancelled by stop signal", { vault: vault.slug, attempt });
-      return;
-    }
-    log.info("running sync-config", { vault: vault.slug, attempt });
-    let code: number;
-    try {
-      code = await runSyncConfigOnce(deps.spawner, obBin, argv);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      log.warn("sync-config threw — treating as transient failure", {
-        vault: vault.slug,
-        attempt,
-        error: msg,
-      });
-      // Synthesize a non-zero "exit" so the loop falls through to backoff
-      // identical to a real non-zero exit.
-      code = -1;
-    }
-    if (code === 0) {
-      log.info("sync-config succeeded", { vault: vault.slug, attempt });
-      return;
-    }
-    lastExit = code;
-    log.warn("sync-config failed", { vault: vault.slug, attempt, exitCode: code });
+  const result = await runWithBackoff({
+    opName: "sync-config",
+    vaultSlug: vault.slug,
+    attempt: () => runSyncConfigOnce(deps.spawner, obBin, argv),
+    backoff,
+    sleep: deps.sleep,
+    logger: deps.logger,
+    shouldStop,
+  });
 
-    if (attempt < backoff.maxAttempts) {
-      const delay = backoffDelay(backoff, attempt - 1);
-      log.info("sync-config backing off", { vault: vault.slug, delayMs: delay });
-      await deps.sleep(delay);
-    }
-  }
-  throw new SyncConfigPermanentError(backoff.maxAttempts, vault.name, lastExit);
+  if (result.ok === true || result.ok === "cancelled") return;
+  throw new SyncConfigPermanentError(backoff.maxAttempts, vault.name, result.lastExit);
 }

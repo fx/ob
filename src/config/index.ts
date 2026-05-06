@@ -8,6 +8,18 @@
 
 export type EmbeddingProvider = "transformers" | "openai";
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
+export type SyncMode = "bidirectional" | "pull-only" | "mirror-remote";
+export type SyncConflictStrategy = "merge" | "conflict";
+export type SyncFileType = "image" | "audio" | "pdf" | "video" | "unsupported";
+export type SyncConfigKey =
+  | "app"
+  | "appearance"
+  | "appearance-data"
+  | "hotkey"
+  | "core-plugin"
+  | "core-plugin-data"
+  | "community-plugin"
+  | "community-plugin-data";
 
 export interface VaultConfig {
   readonly name: string;
@@ -186,10 +198,16 @@ function parseProvider(raw: string): EmbeddingProvider {
   );
 }
 
-const VALID_SYNC_FILE_TYPES: readonly string[] = ["image", "audio", "pdf", "video", "unsupported"];
-const VALID_SYNC_MODES: readonly string[] = ["bidirectional", "pull-only", "mirror-remote"];
-const VALID_SYNC_CONFLICT_STRATEGIES: readonly string[] = ["merge", "conflict"];
-const VALID_SYNC_CONFIGS: readonly string[] = [
+const VALID_SYNC_FILE_TYPES: readonly SyncFileType[] = [
+  "image",
+  "audio",
+  "pdf",
+  "video",
+  "unsupported",
+];
+const VALID_SYNC_MODES: readonly SyncMode[] = ["bidirectional", "pull-only", "mirror-remote"];
+const VALID_SYNC_CONFLICT_STRATEGIES: readonly SyncConflictStrategy[] = ["merge", "conflict"];
+const VALID_SYNC_CONFIGS: readonly SyncConfigKey[] = [
   "app",
   "appearance",
   "appearance-data",
@@ -200,18 +218,25 @@ const VALID_SYNC_CONFIGS: readonly string[] = [
   "community-plugin-data",
 ];
 
-/**
- * Validate a comma-separated list against an enum's allowed tokens. Whitespace
- * around tokens is trimmed before validation; the *value* still flows through
- * to the CLI verbatim because upstream `ob` accepts whitespace in lists.
- *
- * Empty strings are intentionally rejected here only when there is at least
- * one non-empty token that is invalid; the wholly-empty value (`""`) is
- * accepted by the caller and forwarded as the upstream "empty to clear"
- * sentinel.
- */
-function validateCsvSubset(varName: string, raw: string, allowed: readonly string[]): void {
-  if (raw === "") return;
+function parseSyncMode(raw: string): string {
+  // Empty string is the upstream "empty to clear" sentinel — pass through.
+  if (raw === "") return raw;
+  if ((VALID_SYNC_MODES as readonly string[]).includes(raw)) return raw;
+  throw new ConfigError(
+    `OB_SYNC_MODE must be one of ${VALID_SYNC_MODES.join("|")} (or empty), got "${raw}"`,
+  );
+}
+
+function parseSyncConflictStrategy(raw: string): string {
+  if (raw === "") return raw;
+  if ((VALID_SYNC_CONFLICT_STRATEGIES as readonly string[]).includes(raw)) return raw;
+  throw new ConfigError(
+    `OB_SYNC_CONFLICT_STRATEGY must be one of ${VALID_SYNC_CONFLICT_STRATEGIES.join("|")} (or empty), got "${raw}"`,
+  );
+}
+
+function parseCsvSubset(varName: string, raw: string, allowed: readonly string[]): string {
+  if (raw === "") return raw;
   const tokens = raw.split(",").map((t) => t.trim());
   for (const tok of tokens) {
     if (tok === "" || !allowed.includes(tok)) {
@@ -220,15 +245,15 @@ function validateCsvSubset(varName: string, raw: string, allowed: readonly strin
       );
     }
   }
+  return raw;
 }
 
-function validateEnum(varName: string, raw: string, allowed: readonly string[]): void {
-  if (raw === "") return;
-  if (!allowed.includes(raw)) {
-    throw new ConfigError(
-      `${varName} must be one of ${allowed.join("|")} (or empty), got "${raw}"`,
-    );
-  }
+function parseSyncFileTypes(raw: string): string {
+  return parseCsvSubset("OB_SYNC_FILE_TYPES", raw, VALID_SYNC_FILE_TYPES);
+}
+
+function parseSyncConfigs(raw: string): string {
+  return parseCsvSubset("OB_SYNC_CONFIGS", raw, VALID_SYNC_CONFIGS);
 }
 
 /**
@@ -240,42 +265,26 @@ function validateEnum(varName: string, raw: string, allowed: readonly string[]):
  * offending var and the acceptable values.
  */
 export function loadSyncConfigEnv(env: Record<string, string | undefined>): SyncConfigEnv {
-  const fileTypes = env.OB_SYNC_FILE_TYPES;
-  if (fileTypes !== undefined) {
-    validateCsvSubset("OB_SYNC_FILE_TYPES", fileTypes, VALID_SYNC_FILE_TYPES);
-  }
-  const mode = env.OB_SYNC_MODE;
-  if (mode !== undefined) {
-    validateEnum("OB_SYNC_MODE", mode, VALID_SYNC_MODES);
-  }
-  const conflictStrategy = env.OB_SYNC_CONFLICT_STRATEGY;
-  if (conflictStrategy !== undefined) {
-    validateEnum("OB_SYNC_CONFLICT_STRATEGY", conflictStrategy, VALID_SYNC_CONFLICT_STRATEGIES);
-  }
-  const configs = env.OB_SYNC_CONFIGS;
-  if (configs !== undefined) {
-    validateCsvSubset("OB_SYNC_CONFIGS", configs, VALID_SYNC_CONFIGS);
-  }
+  const fileTypes =
+    env.OB_SYNC_FILE_TYPES !== undefined ? parseSyncFileTypes(env.OB_SYNC_FILE_TYPES) : undefined;
+  const mode = env.OB_SYNC_MODE !== undefined ? parseSyncMode(env.OB_SYNC_MODE) : undefined;
+  const conflictStrategy =
+    env.OB_SYNC_CONFLICT_STRATEGY !== undefined
+      ? parseSyncConflictStrategy(env.OB_SYNC_CONFLICT_STRATEGY)
+      : undefined;
+  const configs =
+    env.OB_SYNC_CONFIGS !== undefined ? parseSyncConfigs(env.OB_SYNC_CONFIGS) : undefined;
   const excludedFolders = env.OB_SYNC_EXCLUDED_FOLDERS;
   const deviceName = env.OB_SYNC_DEVICE_NAME;
 
-  // Build the result object so `JSON.stringify` and equality checks see only
-  // the fields that were actually present in `env`.
-  const out: {
-    fileTypes?: string;
-    excludedFolders?: string;
-    mode?: string;
-    conflictStrategy?: string;
-    deviceName?: string;
-    configs?: string;
-  } = {};
-  if (fileTypes !== undefined) out.fileTypes = fileTypes;
-  if (excludedFolders !== undefined) out.excludedFolders = excludedFolders;
-  if (mode !== undefined) out.mode = mode;
-  if (conflictStrategy !== undefined) out.conflictStrategy = conflictStrategy;
-  if (deviceName !== undefined) out.deviceName = deviceName;
-  if (configs !== undefined) out.configs = configs;
-  return out;
+  return {
+    ...(fileTypes !== undefined ? { fileTypes } : {}),
+    ...(excludedFolders !== undefined ? { excludedFolders } : {}),
+    ...(mode !== undefined ? { mode } : {}),
+    ...(conflictStrategy !== undefined ? { conflictStrategy } : {}),
+    ...(deviceName !== undefined ? { deviceName } : {}),
+    ...(configs !== undefined ? { configs } : {}),
+  };
 }
 
 export function loadConfig(env: Record<string, string | undefined>): Config {
