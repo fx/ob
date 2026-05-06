@@ -57,19 +57,29 @@ export interface RunWithBackoffArgs {
 
 export type RunWithBackoffResult =
   | { ok: true }
-  | { ok: false; lastExit: number }
+  | { ok: false; lastExit: number; lastError?: string }
   | { ok: "cancelled" };
+
+/**
+ * Granularity (ms) at which the stop-aware backoff sleep wakes to re-check
+ * `shouldStop()`. Bounds shutdown latency during a long backoff window.
+ */
+const STOP_POLL_SLICE_MS = 250;
 
 /**
  * Run `attempt()` up to `backoff.maxAttempts` times with capped exponential
  * backoff. Returns:
  * - `{ ok: true }` on the first attempt that exits 0
  * - `{ ok: "cancelled" }` if `shouldStop()` trips at the top of any iteration
- * - `{ ok: false, lastExit }` after every attempt failed
+ *   OR during the backoff sleep window
+ * - `{ ok: false, lastExit, lastError? }` after every attempt failed; `lastError`
+ *   carries the most recent thrown value (stringified) so callers can surface
+ *   the original ENOENT / launch-time message instead of a bare "-1" exit
  */
 export async function runWithBackoff(args: RunWithBackoffArgs): Promise<RunWithBackoffResult> {
   const { opName, vaultSlug, attempt, backoff, sleep, logger, shouldStop } = args;
   let lastExit = -1;
+  let lastError: string | undefined;
   for (let i = 1; i <= backoff.maxAttempts; i++) {
     if (shouldStop()) {
       logger.info(`${opName} cancelled by stop signal`, { vault: vaultSlug, attempt: i });
@@ -81,6 +91,7 @@ export async function runWithBackoff(args: RunWithBackoffArgs): Promise<RunWithB
       code = await attempt();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      lastError = msg;
       logger.warn(`${opName} threw — treating as transient failure`, {
         vault: vaultSlug,
         attempt: i,
@@ -100,8 +111,22 @@ export async function runWithBackoff(args: RunWithBackoffArgs): Promise<RunWithB
     if (i < backoff.maxAttempts) {
       const delay = backoffDelay(backoff, i - 1);
       logger.info(`${opName} backing off`, { vault: vaultSlug, delayMs: delay });
-      await sleep(delay);
+      // Slice the backoff sleep so a stop signal arriving mid-window aborts
+      // promptly instead of holding `stop()` open for up to `capMs` ms.
+      let remaining = delay;
+      while (remaining > 0) {
+        if (shouldStop()) {
+          logger.info(`${opName} cancelled by stop signal`, {
+            vault: vaultSlug,
+            attempt: i + 1,
+          });
+          return { ok: "cancelled" };
+        }
+        const slice = Math.min(remaining, STOP_POLL_SLICE_MS);
+        await sleep(slice);
+        remaining -= slice;
+      }
     }
   }
-  return { ok: false, lastExit };
+  return { ok: false, lastExit, ...(lastError !== undefined ? { lastError } : {}) };
 }

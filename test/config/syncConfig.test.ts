@@ -42,10 +42,13 @@ describe("loadSyncConfigEnv — OB_SYNC_FILE_TYPES", () => {
     expect(out.fileTypes).toBe("image,audio,pdf,video,unsupported");
   });
 
-  test("accepts whitespace around tokens (validates trimmed, passes verbatim)", () => {
-    const raw = " image , audio ";
-    const out = loadSyncConfigEnv({ OB_SYNC_FILE_TYPES: raw });
-    expect(out.fileTypes).toBe(raw);
+  test("accepts whitespace around tokens and normalizes them out", () => {
+    // Per the validator contract: whitespace is permitted in the source env
+    // var but the value forwarded downstream must be the trimmed/normalized
+    // CSV. Otherwise " image , audio " would survive into the `ob sync-config
+    // --file-types` argv and turn a config typo into a runtime failure.
+    const out = loadSyncConfigEnv({ OB_SYNC_FILE_TYPES: " image , audio " });
+    expect(out.fileTypes).toBe("image,audio");
   });
 
   test("accepts empty string ('empty to clear')", () => {

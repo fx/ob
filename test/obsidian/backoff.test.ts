@@ -85,7 +85,11 @@ describe("runWithBackoff", () => {
     });
     expect(result).toEqual({ ok: true });
     expect(calls).toBe(3);
-    expect(sleeps).toEqual([1_000, 2_000]);
+    // The backoff sleep is sliced into ≤250ms chunks so a stop signal arriving
+    // mid-window aborts promptly. Total wait per backoff window is unchanged
+    // (1_000ms then 2_000ms), but reaches the sleep callback as 4×250 + 8×250.
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBe(3_000);
+    expect(sleeps.every((ms) => ms <= 250)).toBe(true);
   });
 
   test("returns ok:false with lastExit after every attempt failed", async () => {
@@ -126,7 +130,7 @@ describe("runWithBackoff", () => {
     expect(calls).toBe(3);
   });
 
-  test("after all attempts throw, reports lastExit -1", async () => {
+  test("after all attempts throw, reports lastExit -1 and preserves lastError", async () => {
     const result = await runWithBackoff({
       opName: "sync-setup",
       vaultSlug: "v",
@@ -138,7 +142,7 @@ describe("runWithBackoff", () => {
       logger: silentLog,
       shouldStop: () => false,
     });
-    expect(result).toEqual({ ok: false, lastExit: -1 });
+    expect(result).toEqual({ ok: false, lastExit: -1, lastError: "nope" });
   });
 
   test("shouldStop short-circuits before the first attempt", async () => {
@@ -177,6 +181,34 @@ describe("runWithBackoff", () => {
     });
     expect(result).toEqual({ ok: "cancelled" });
     expect(calls).toBe(1);
+  });
+
+  test("shouldStop short-circuits during the backoff sleep window", async () => {
+    let calls = 0;
+    let sliceCalls = 0;
+    let stop = false;
+    const result = await runWithBackoff({
+      opName: "sync-config",
+      vaultSlug: "v",
+      attempt: async () => {
+        calls++;
+        return 1; // always fail so we enter backoff
+      },
+      // Long backoff window — without slicing, a stop signal would be ignored
+      // until the full delay elapses.
+      backoff: { initialMs: 10_000, factor: 1, capMs: 10_000, maxAttempts: 5 },
+      sleep: async (_ms) => {
+        sliceCalls++;
+        // Trip the stop signal partway through the backoff window.
+        if (sliceCalls === 3) stop = true;
+      },
+      logger: silentLog,
+      shouldStop: () => stop,
+    });
+    expect(result).toEqual({ ok: "cancelled" });
+    expect(calls).toBe(1);
+    // Aborted promptly: only a handful of slice waits, not the full 40 (10s/250ms).
+    expect(sliceCalls).toBeLessThan(10);
   });
 
   test("emits log lines with opName/vaultSlug substitution", async () => {

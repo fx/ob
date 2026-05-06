@@ -245,7 +245,9 @@ function parseCsvSubset(varName: string, raw: string, allowed: readonly string[]
       );
     }
   }
-  return raw;
+  // Return the normalized form so downstream forwarders (`ob sync-config`)
+  // never receive whitespace from `image, pdf` style inputs.
+  return tokens.join(",");
 }
 
 function parseSyncFileTypes(raw: string): string {

@@ -92,7 +92,11 @@ describe("ensureVaultSetup", () => {
     };
     await ensureVaultSetup(FAKE_VAULT, { spawner: sp, logger: silentLog, sleep });
     expect(sp.calls).toHaveLength(5);
-    expect(sleeps).toEqual([1_000, 2_000, 4_000]);
+    // Backoff windows are now sliced into ≤250ms chunks for prompt stop-signal
+    // handling, so the sleep callback receives 4 + 8 + 16 = 28 calls instead
+    // of 3. Total wait per window is unchanged: 1_000 + 2_000 + 4_000 = 7_000.
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBe(7_000);
+    expect(sleeps.every((ms) => ms <= 250)).toBe(true);
   });
 
   test("throws SetupPermanentError after 5 attempts", async () => {

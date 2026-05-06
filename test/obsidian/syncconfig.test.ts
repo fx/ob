@@ -200,7 +200,10 @@ describe("applyVaultSyncConfig — retries", () => {
       },
     );
     expect(sp.calls).toHaveLength(2);
-    expect(sleeps).toEqual([1_000]); // initial backoff between attempt 1 and 2
+    // Initial backoff window (1_000ms) is sliced into ≤250ms chunks for
+    // prompt stop-signal handling — total wait is unchanged.
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBe(1_000);
+    expect(sleeps.every((ms) => ms <= 250)).toBe(true);
   });
 
   test("treats spawner throws as transient (-1 exit) and continues to retry", async () => {

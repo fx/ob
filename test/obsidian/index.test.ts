@@ -726,7 +726,12 @@ describe("startSupervisor — sync-config wiring", () => {
       setupBackoff: { initialMs: 0, factor: 1, capMs: 0, maxAttempts: 2 },
     });
     await waitFor(() => sup.get("v")?.state === "failed", "vault failed on sync-config throw");
-    expect(sup.get("v")?.lastError).toContain("permanently");
+    const lastError = sup.get("v")?.lastError;
+    expect(lastError).toContain("permanently");
+    // Regression guard: the non-Error throw value MUST survive the
+    // backoff/permanent-error chain so operators can diagnose the launch
+    // failure instead of seeing only a generic "permanently" message.
+    expect(lastError).toContain("raw sync-config failure");
     expect(calls).toBeGreaterThanOrEqual(2);
     await sup.stop();
   });

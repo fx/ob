@@ -38,12 +38,15 @@ export class SetupTransientError extends Error {
  */
 export class SetupPermanentError extends Error {
   readonly attempts: number;
-  constructor(attempts: number, vaultName: string, lastExit: number) {
+  readonly lastError?: string;
+  constructor(attempts: number, vaultName: string, lastExit: number, lastError?: string) {
+    const tail = lastError !== undefined ? `: ${lastError}` : "";
     super(
-      `sync-setup for "${vaultName}" failed permanently after ${attempts} attempts (last exit ${lastExit})`,
+      `sync-setup for "${vaultName}" failed permanently after ${attempts} attempts (last exit ${lastExit})${tail}`,
     );
     this.name = "SetupPermanentError";
     this.attempts = attempts;
+    if (lastError !== undefined) this.lastError = lastError;
   }
 }
 
@@ -131,5 +134,5 @@ export async function ensureVaultSetup(vault: SetupVault, deps: SetupDeps): Prom
   });
 
   if (result.ok === true || result.ok === "cancelled") return;
-  throw new SetupPermanentError(backoff.maxAttempts, vault.name, result.lastExit);
+  throw new SetupPermanentError(backoff.maxAttempts, vault.name, result.lastExit, result.lastError);
 }

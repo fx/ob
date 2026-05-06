@@ -21,12 +21,15 @@ import type { Spawner } from "./spawn.ts";
  */
 export class SyncConfigPermanentError extends Error {
   readonly attempts: number;
-  constructor(attempts: number, vaultName: string, lastExit: number) {
+  readonly lastError?: string;
+  constructor(attempts: number, vaultName: string, lastExit: number, lastError?: string) {
+    const tail = lastError !== undefined ? `: ${lastError}` : "";
     super(
-      `sync-config for "${vaultName}" failed permanently after ${attempts} attempts (last exit ${lastExit})`,
+      `sync-config for "${vaultName}" failed permanently after ${attempts} attempts (last exit ${lastExit})${tail}`,
     );
     this.name = "SyncConfigPermanentError";
     this.attempts = attempts;
+    if (lastError !== undefined) this.lastError = lastError;
   }
 }
 
@@ -103,5 +106,10 @@ export async function applyVaultSyncConfig(
   });
 
   if (result.ok === true || result.ok === "cancelled") return;
-  throw new SyncConfigPermanentError(backoff.maxAttempts, vault.name, result.lastExit);
+  throw new SyncConfigPermanentError(
+    backoff.maxAttempts,
+    vault.name,
+    result.lastExit,
+    result.lastError,
+  );
 }
