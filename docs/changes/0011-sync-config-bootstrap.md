@@ -6,7 +6,7 @@ Add an env-var-driven `ob sync-config` step between `sync-setup` and `sync --con
 
 **Spec:** [Obsidian Sync](../specs/obsidian-sync/)
 **Status:** draft
-**Depends On:** —
+**Depends On:** 0002
 
 ## Motivation
 
@@ -130,7 +130,7 @@ Rules:
 Add `src/obsidian/syncconfig.ts` with two responsibilities:
 
 1. **Pure validation + arg construction.** Export a function `buildSyncConfigArgs(env, vaultPath): string[] | null` that returns either the argv to pass to `ob` (e.g. `["sync-config", "--path", "/data/vaults/v", "--file-types", "..."]`) or `null` to signal "no vars set, skip the call." Validation lives here; throws a structured error for invalid values.
-2. **Orchestration.** Export `applyVaultSyncConfig(vault, deps, env)` analogous to `ensureVaultSetup`. Reuses the shared backoff helper (factor it out of `setup.ts` if not already a util) and the shared `Spawner` interface.
+2. **Orchestration.** Export `applyVaultSyncConfig(vault, deps, log, env)` analogous to `ensureVaultSetup`. Reuses the shared backoff helper (factor it out of `setup.ts` if not already a util) and the shared `Spawner` interface.
 
 Wire it into `src/obsidian/index.ts`:
 

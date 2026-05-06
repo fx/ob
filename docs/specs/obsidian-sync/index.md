@@ -94,7 +94,7 @@ This spec defines how the `ob` server bootstraps credentials, configures one or 
 
 - **GIVEN** `OB_SYNC_FILE_TYPES=image,audio,pdf,video,unsupported` and a fresh vault `v`
 - **WHEN** the supervisor starts
-- **THEN** the order of operations for `v` is: `ob sync-setup` → `ob sync-config --path /data/vaults/v --file-types image,audio,pdf,video,unsupported` → `ob sync --continuous --path /data/vaults/v`
+- **THEN** the order of operations for `v` is: `ob sync-setup --vault v --path /data/vaults/v` → `ob sync-config --path /data/vaults/v --file-types image,audio,pdf,video,unsupported` → `ob sync --continuous --path /data/vaults/v`
 
 #### Scenario: All sync-config vars unset
 
@@ -107,7 +107,7 @@ This spec defines how the `ob` server bootstraps credentials, configures one or 
 
 - **GIVEN** `OB_SYNC_EXCLUDED_FOLDERS=` (set, empty string)
 - **WHEN** the supervisor starts vault `v`
-- **THEN** `ob sync-config --path /data/vaults/v --excluded-folders ""` is invoked exactly once
+- **THEN** `ob sync-config` is invoked exactly once with argv `["sync-config", "--path", "/data/vaults/v", "--excluded-folders", ""]` (the empty string is a single argv element, not the literal characters `""`)
 - **AND** any previously configured excluded folders are cleared
 
 #### Scenario: Invalid mode rejected at startup
@@ -225,4 +225,4 @@ src/obsidian/
 |------|--------|----------|
 | 2026-05-03 | Initial spec created | — |
 | 2026-05-03 | Align `/readyz` semantics with Architecture spec: strict 200-only-if-all-ready (replaces the prior "200 if any vault healthy" wording). | [Change 0002](../../changes/0002-obsidian-supervisor.md) |
-| 2026-05-06 | Add Sync-configuration-bootstrap requirements: env-var-driven `ob sync-config` step between `sync-setup` and `sync --continuous`, with `OB_SYNC_*` mapping, validation, and retry semantics. Lifts the prior "Per-vault sync mode override is out of scope for v1" constraint. | [Change 0011](../../changes/0011-sync-config-bootstrap.md) |
+| 2026-05-06 | Add Sync-configuration-bootstrap requirements: env-var-driven `ob sync-config` step between `sync-setup` and `sync --continuous`, with `OB_SYNC_*` mapping, validation, and retry semantics. Replaces the prior "Per-vault sync mode override is OUT OF SCOPE for v1" deferral with a global, env-driven mechanism; per-vault overrides remain out of scope. | [Change 0011](../../changes/0011-sync-config-bootstrap.md) |
