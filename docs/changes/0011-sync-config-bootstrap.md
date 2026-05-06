@@ -5,7 +5,7 @@
 Add an env-var-driven `ob sync-config` step between `sync-setup` and `sync --continuous` so operators can configure file types, excluded folders, sync mode, conflict strategy, configs, and device name without `kubectl exec`'ing into the pod. Implements the Sync-configuration-bootstrap section newly added to the [Obsidian Sync spec](../specs/obsidian-sync/index.md#sync-configuration-bootstrap).
 
 **Spec:** [Obsidian Sync](../specs/obsidian-sync/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0002
 
 ## Motivation
@@ -185,7 +185,7 @@ Validation runs once up-front in `loadConfig` (or a new `loadSyncConfigEnv`) so 
   - [x] Tests under `test/config/` for each invalid case
 - [x] Update `.env.example` with a documented `OB_SYNC_*` block (one line per var, each commented as optional)
 - [x] Update `README.md` Configuration table with the six new vars and a worked example showing `OB_SYNC_FILE_TYPES=image,audio,pdf,video,unsupported`
-- [ ] Update spec changelog row already added in this change to mark "complete" with the merged PR number once shipping
+- [x] Update spec changelog row already added in this change to mark "complete" with the merged PR number once shipping (PR #4)
 
 ## Open Questions
 

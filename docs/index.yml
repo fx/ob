@@ -99,5 +99,5 @@ changes:
     path: changes/0011-sync-config-bootstrap.md
     description: OB_SYNC_* env vars drive an `ob sync-config` step between sync-setup and sync --continuous, exposing file types, excluded folders, mode, conflict strategy, configs, and device name.
     spec: obsidian-sync
-    status: draft
+    status: complete
     depends_on: ["0002"]
