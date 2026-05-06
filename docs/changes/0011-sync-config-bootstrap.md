@@ -5,7 +5,7 @@
 Add an env-var-driven `ob sync-config` step between `sync-setup` and `sync --continuous` so operators can configure file types, excluded folders, sync mode, conflict strategy, configs, and device name without `kubectl exec`'ing into the pod. Implements the Sync-configuration-bootstrap section newly added to the [Obsidian Sync spec](../specs/obsidian-sync/index.md#sync-configuration-bootstrap).
 
 **Spec:** [Obsidian Sync](../specs/obsidian-sync/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0002
 
 ## Motivation
@@ -170,22 +170,22 @@ Validation runs once up-front in `loadConfig` (or a new `loadSyncConfigEnv`) so 
 
 ## Tasks
 
-- [ ] Implement `src/obsidian/syncconfig.ts`
-  - [ ] `buildSyncConfigArgs(env, vaultPath)` — env-var → argv with full validation; returns `null` when no vars are set
-  - [ ] `applyVaultSyncConfig(vault, deps, log, env)` — orchestrates the spawn with exponential backoff (1s/×2/cap 60s/max 5); throws `SyncConfigPermanentError` on terminal failure
-  - [ ] Unit tests covering: each var unset, each var set to a valid value, each var set to empty, each enum's invalid-value path, the no-op `null` return when nothing is set, and transient-then-success retry
-- [ ] Wire `applyVaultSyncConfig` into `src/obsidian/index.ts`
-  - [ ] Call between `ensureVaultSetup` and `void child.start()` in the per-vault init IIFE
-  - [ ] On `SyncConfigPermanentError`, set vault state to `failed` with `lastError`, and do NOT call `child.start()` for that vault
-  - [ ] Update tests in `test/obsidian/index.test.ts` (or equivalent) to cover the new ordering and the failed-vault path
-- [ ] Validate `OB_SYNC_*` env vars in `src/config/index.ts`
-  - [ ] Add a `loadSyncConfigEnv(env)` that returns `{ fileTypes?, excludedFolders?, mode?, conflictStrategy?, deviceName?, configs? }` (each field is `string | undefined`; `undefined` = unset, `""` = empty/clear)
-  - [ ] Throw `VaultConfigError` (exit 78) on bad enum values, naming the offending var and acceptable values
-  - [ ] Plumb the result through `Config` so `startSupervisor` can pass it to `applyVaultSyncConfig`
-  - [ ] Tests under `test/config/` for each invalid case
-- [ ] Update `.env.example` with a documented `OB_SYNC_*` block (one line per var, each commented as optional)
-- [ ] Update `README.md` Configuration table with the six new vars and a worked example showing `OB_SYNC_FILE_TYPES=image,audio,pdf,video,unsupported`
-- [ ] Update spec changelog row already added in this change to mark "complete" with the merged PR number once shipping
+- [x] Implement `src/obsidian/syncconfig.ts`
+  - [x] `buildSyncConfigArgs(env, vaultPath)` — env-var → argv with full validation; returns `null` when no vars are set
+  - [x] `applyVaultSyncConfig(vault, deps, log, env)` — orchestrates the spawn with exponential backoff (1s/×2/cap 60s/max 5); throws `SyncConfigPermanentError` on terminal failure
+  - [x] Unit tests covering: each var unset, each var set to a valid value, each var set to empty, each enum's invalid-value path, the no-op `null` return when nothing is set, and transient-then-success retry
+- [x] Wire `applyVaultSyncConfig` into `src/obsidian/index.ts`
+  - [x] Call between `ensureVaultSetup` and `void child.start()` in the per-vault init IIFE
+  - [x] On `SyncConfigPermanentError`, set vault state to `failed` with `lastError`, and do NOT call `child.start()` for that vault
+  - [x] Update tests in `test/obsidian/index.test.ts` (or equivalent) to cover the new ordering and the failed-vault path
+- [x] Validate `OB_SYNC_*` env vars in `src/config/index.ts`
+  - [x] Add a `loadSyncConfigEnv(env)` that returns `{ fileTypes?, excludedFolders?, mode?, conflictStrategy?, deviceName?, configs? }` (each field is `string | undefined`; `undefined` = unset, `""` = empty/clear)
+  - [x] Throw `VaultConfigError` (exit 78) on bad enum values, naming the offending var and acceptable values (uses the existing `ConfigError` class — see implementation note in the change doc)
+  - [x] Plumb the result through `Config` so `startSupervisor` can pass it to `applyVaultSyncConfig`
+  - [x] Tests under `test/config/` for each invalid case
+- [x] Update `.env.example` with a documented `OB_SYNC_*` block (one line per var, each commented as optional)
+- [x] Update `README.md` Configuration table with the six new vars and a worked example showing `OB_SYNC_FILE_TYPES=image,audio,pdf,video,unsupported`
+- [x] Update spec changelog row already added in this change to mark "complete" with the merged PR number once shipping (PR #4)
 
 ## Open Questions
 

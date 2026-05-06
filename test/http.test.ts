@@ -71,6 +71,7 @@ describe("buildHttpApp", () => {
         embeddingProvider: "transformers",
         embeddingModel: "x",
         logLevel: "error",
+        syncConfigEnv: {},
       },
     });
     const res = await app.request("/v1/vaults/v/search", {

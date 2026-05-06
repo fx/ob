@@ -22,15 +22,18 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config } from "../config/index.ts";
 import type { Logger } from "../log.ts";
+import type { Backoff } from "./backoff.ts";
 import { ensureAuthToken } from "./bootstrap.ts";
 import { type ChildBackoff, type CrashLoop, VaultChild, type VaultStatus } from "./child.ts";
-import { type SetupBackoff, SetupPermanentError, ensureVaultSetup } from "./setup.ts";
+import { SetupPermanentError, ensureVaultSetup } from "./setup.ts";
 import { type Spawner, realSpawner } from "./spawn.ts";
+import { SyncConfigPermanentError, applyVaultSyncConfig } from "./syncconfig.ts";
 
 export type { VaultState, VaultStatus } from "./child.ts";
 export type { SpawnHandle, SpawnOpts, Spawner } from "./spawn.ts";
 export { AuthMissingError } from "./bootstrap.ts";
 export { SetupPermanentError, SetupTransientError } from "./setup.ts";
+export { SyncConfigPermanentError } from "./syncconfig.ts";
 
 export interface Supervisor {
   list(): VaultStatus[];
@@ -46,7 +49,7 @@ export interface SupervisorDeps {
   readonly mkdir?: (path: string, opts: { recursive: true; mode: number }) => Promise<void>;
   readonly homeDir?: string;
   readonly xdgConfigHome?: string;
-  readonly setupBackoff?: SetupBackoff;
+  readonly setupBackoff?: Backoff;
   readonly childBackoff?: ChildBackoff;
   readonly crashLoop?: CrashLoop;
   readonly obBin?: string;
@@ -179,6 +182,35 @@ export async function startSupervisor(cfg: Config, deps: SupervisorDeps): Promis
           vault: v.slug,
           error: msg,
           permanent: e instanceof SetupPermanentError,
+        });
+        child.markFailed(msg);
+        continue;
+      }
+      if (initState.stopped) return;
+      try {
+        await applyVaultSyncConfig(
+          {
+            name: v.name,
+            slug: v.slug,
+            path: vaultPath,
+            ...(v.e2eePassword !== undefined ? { e2eePassword: v.e2eePassword } : {}),
+          },
+          {
+            spawner,
+            logger: log,
+            sleep,
+            ...(deps.setupBackoff !== undefined ? { backoff: deps.setupBackoff } : {}),
+            ...(deps.obBin !== undefined ? { obBin: deps.obBin } : {}),
+            shouldStop: () => initState.stopped,
+          },
+          cfg.syncConfigEnv,
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log.error("vault sync-config permanently failed", {
+          vault: v.slug,
+          error: msg,
+          permanent: e instanceof SyncConfigPermanentError,
         });
         child.markFailed(msg);
         continue;

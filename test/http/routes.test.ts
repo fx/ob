@@ -640,6 +640,7 @@ describe("server-error logging branch", () => {
         embeddingProvider: "transformers",
         embeddingModel: "x",
         logLevel: "error",
+        syncConfigEnv: {},
       },
       logger,
     });

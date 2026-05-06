@@ -11,7 +11,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../../src/config/index.ts";
 import { createLogger } from "../../src/log.ts";
-import { AuthMissingError, isAllRunning, startSupervisor } from "../../src/obsidian/index.ts";
+import {
+  AuthMissingError,
+  SyncConfigPermanentError,
+  isAllRunning,
+  startSupervisor,
+} from "../../src/obsidian/index.ts";
 import { createFakeSpawner } from "../helpers/fakeSpawner.ts";
 
 const silentLog = createLogger({ level: "error", write: () => undefined });
@@ -31,6 +36,7 @@ function buildConfig(over: Partial<Config> = {}): Config {
     embeddingProvider: "transformers",
     embeddingModel: "Xenova/all-MiniLM-L6-v2",
     logLevel: "error",
+    syncConfigEnv: {},
     ...over,
   };
 }
@@ -581,6 +587,152 @@ describe("startSupervisor — defaults", () => {
       },
     });
     expect(writes).toBe(1);
+    await sup.stop();
+  });
+});
+
+describe("startSupervisor — sync-config wiring", () => {
+  test("all OB_SYNC_* unset → sync-config is not invoked (default no-op)", async () => {
+    const cfg = buildConfig(); // syncConfigEnv defaults to {}
+    const sp = createFakeSpawner();
+    sp.enqueue({ exitCode: 1 }); // sync-status -> not configured
+    sp.enqueue({ exitCode: 0 }); // sync-setup
+    let resolveSync!: (n: number) => void;
+    const syncExit = new Promise<number>((r) => {
+      resolveSync = r;
+    });
+    sp.enqueue({ exitWhen: syncExit });
+    const sup = await startSupervisor(cfg, {
+      logger: silentLog,
+      spawner: sp,
+      sleep: noSleep,
+      skipAuthBootstrap: true,
+    });
+    await waitForCalls(sp, 3);
+    // No sync-config call ever happened.
+    expect(sp.calls.map((c) => c.args[0])).toEqual(["sync-status", "sync-setup", "sync"]);
+    resolveSync(0);
+    await sup.stop();
+  });
+
+  test("with OB_SYNC_FILE_TYPES set, spawn order is setup → sync-config → sync", async () => {
+    const cfg = buildConfig({
+      syncConfigEnv: { fileTypes: "image,audio,pdf,video,unsupported" },
+    });
+    const sp = createFakeSpawner();
+    sp.enqueue({ exitCode: 1 }); // sync-status -> not configured
+    sp.enqueue({ exitCode: 0 }); // sync-setup
+    sp.enqueue({ exitCode: 0 }); // sync-config
+    let resolveSync!: (n: number) => void;
+    const syncExit = new Promise<number>((r) => {
+      resolveSync = r;
+    });
+    sp.enqueue({ exitWhen: syncExit });
+    const sup = await startSupervisor(cfg, {
+      logger: silentLog,
+      spawner: sp,
+      sleep: noSleep,
+      skipAuthBootstrap: true,
+    });
+    await waitForCalls(sp, 4);
+    expect(sp.calls.map((c) => c.args[0])).toEqual([
+      "sync-status",
+      "sync-setup",
+      "sync-config",
+      "sync",
+    ]);
+    const vaultPath = join(cfg.dataDir, "vaults", "v");
+    expect(sp.calls[2]?.args).toEqual([
+      "sync-config",
+      "--path",
+      vaultPath,
+      "--file-types",
+      "image,audio,pdf,video,unsupported",
+    ]);
+    resolveSync(0);
+    await sup.stop();
+  });
+
+  test("sync-config permanent failure marks vault failed and prevents `sync` spawn", async () => {
+    const cfg = buildConfig({
+      syncConfigEnv: { mode: "bidirectional" },
+    });
+    const sp = createFakeSpawner();
+    sp.enqueue({ exitCode: 0 }); // sync-status -> already configured (skips setup)
+    // Five sync-config attempts all fail.
+    for (let i = 0; i < 5; i++) sp.enqueue({ exitCode: 1 });
+
+    const sup = await startSupervisor(cfg, {
+      logger: silentLog,
+      spawner: sp,
+      sleep: noSleep,
+      skipAuthBootstrap: true,
+      setupBackoff: { initialMs: 0, factor: 1, capMs: 0, maxAttempts: 5 },
+    });
+    await waitFor(() => sup.get("v")?.state === "failed", "vault failed on sync-config");
+    // 1 sync-status + 5 sync-config attempts = 6 calls. NO sync child.
+    expect(sp.calls).toHaveLength(6);
+    expect(sp.calls.map((c) => c.args[0])).toEqual([
+      "sync-status",
+      "sync-config",
+      "sync-config",
+      "sync-config",
+      "sync-config",
+      "sync-config",
+    ]);
+    expect(sup.get("v")?.lastError).toContain("sync-config");
+    // Sanity: the error message comes from SyncConfigPermanentError; the
+    // exported class is what `index.ts` uses to recognise the error type.
+    expect(SyncConfigPermanentError.name).toBe("SyncConfigPermanentError");
+    await sup.stop();
+  });
+
+  test("non-Error throw from a sync-config sub-step stringifies into lastError", async () => {
+    // This drives the `e instanceof Error ? e.message : String(e)` branch in
+    // the supervisor's catch handler. We achieve this by using a custom
+    // spawner that throws a non-Error value on sync-config; the orchestrator
+    // converts the throw into a -1 "exit" and reaches the permanent-failure
+    // branch after maxAttempts.
+    const cfg = buildConfig({ syncConfigEnv: { mode: "bidirectional" } });
+    const empty = (): ReadableStream<Uint8Array> =>
+      new ReadableStream<Uint8Array>({
+        start(c): void {
+          c.close();
+        },
+      });
+    let calls = 0;
+    const sp = {
+      run: (_cmd: string, args: readonly string[]) => {
+        calls++;
+        if (args[0] === "sync-status") {
+          return {
+            pid: 1,
+            stdout: empty(),
+            stderr: empty(),
+            exited: Promise.resolve(0),
+            kill: (): void => undefined,
+          };
+        }
+        // sync-config — always non-Error throw.
+        // eslint-disable-next-line no-throw-literal -- non-Error branch
+        throw "raw sync-config failure";
+      },
+    };
+    const sup = await startSupervisor(cfg, {
+      logger: silentLog,
+      spawner: sp,
+      sleep: noSleep,
+      skipAuthBootstrap: true,
+      setupBackoff: { initialMs: 0, factor: 1, capMs: 0, maxAttempts: 2 },
+    });
+    await waitFor(() => sup.get("v")?.state === "failed", "vault failed on sync-config throw");
+    const lastError = sup.get("v")?.lastError;
+    expect(lastError).toContain("permanently");
+    // Regression guard: the non-Error throw value MUST survive the
+    // backoff/permanent-error chain so operators can diagnose the launch
+    // failure instead of seeing only a generic "permanently" message.
+    expect(lastError).toContain("raw sync-config failure");
+    expect(calls).toBeGreaterThanOrEqual(2);
     await sup.stop();
   });
 });

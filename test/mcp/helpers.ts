@@ -86,6 +86,7 @@ export async function makeMcpFixture(opts: McpFixtureOptions = {}): Promise<McpF
     embeddingProvider: "transformers",
     embeddingModel: "x",
     logLevel: "error",
+    syncConfigEnv: {},
   };
 
   const indexer = await startIndexer(cfg, {

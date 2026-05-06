@@ -37,6 +37,7 @@ function makeConfig(over: Partial<Config> = {}): Config {
     embeddingProvider: "transformers",
     embeddingModel: "x",
     logLevel: "error",
+    syncConfigEnv: {},
     ...over,
   };
 }

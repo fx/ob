@@ -150,6 +150,7 @@ function makeConfig(dataDir: string): Config {
     embeddingProvider: "transformers",
     embeddingModel: "x",
     logLevel: "error",
+    syncConfigEnv: {},
   };
 }
 
