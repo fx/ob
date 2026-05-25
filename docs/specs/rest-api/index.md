@@ -132,6 +132,65 @@ For all routes below, `:slug` is the vault slug and `*path` is the file path ins
 - **THEN** the response is `200`
 - **AND** the file body is `# Today\n- 14:30 had coffee\n`
 
+### Folder CRUD
+
+Folders are a separate surface from files because `list_files` only emits `Dirent.isFile()` entries: a folder with no descendant files is invisible to the file API. Obsidian Sync preserves empty folders (verified against a live vault; no upstream toggle exists per [Sync settings](https://obsidian.md/help/sync/settings)), so the API MUST expose them too. `FolderEntry = { path, mtimeMs }` — folders carry no size, sha256, or contentType.
+
+#### `GET /v1/vaults/:slug/folders`
+
+- Lists folders. Query params: `prefix` (string, MUST match path prefix), `limit` (int, default 100, max 1000), `cursor` (opaque string) — same shape and semantics as the file list endpoint.
+- MUST return `200 { items: [{ path, mtimeMs }], nextCursor: string | null }` where `path` is the vault-relative folder path with no trailing slash.
+- MUST walk the on-disk vault directory and emit directory entries in pre-order lexicographic walk (parent before children) so cursor resumption advances into subtrees predictably.
+- MUST omit any folder containing a `/.obsidian/` or `/.trash/` segment, any dotfolder, and any symlink (same rules as `list_files`).
+- MUST NOT emit the vault root itself.
+
+#### `PUT /v1/vaults/:slug/folders/*path`
+
+- Creates the folder (and any missing ancestors); `mkdir -p` semantics.
+- Request body MUST be ignored (folders carry no content). Senders SHOULD send `Content-Length: 0`.
+- Response MUST be `200 { path, mtimeMs, created: boolean }`. `created` is `true` on first creation and `false` on idempotent no-op against an existing folder.
+- If the path already exists as a file (not a directory), the response MUST be `400` with `error.code = "invalid_path"`.
+
+#### `DELETE /v1/vaults/:slug/folders/*path`
+
+- Deletes the folder.
+- Optional query string `?recursive=true` opts into recursive removal of all descendants.
+- Without `recursive=true`, a non-empty folder MUST yield `409` with `error.code = "folder_not_empty"`. The folder MUST remain unchanged.
+- With `recursive=true`, the handler MUST collect every Markdown descendant first, call `await indexer.drop(slug, mdPath)` for each (best-effort; failures logged), then `fs.rm(abs, { recursive: true, force: false })`.
+- If the path does not exist, MUST return `404` with `error.code = "not_found"`.
+- If the path exists but is a file, MUST return `400` with `error.code = "invalid_path"` — callers should use `DELETE /files/*path` for files.
+- On success: `204` (no body).
+
+#### Scenario: Empty-folder visibility
+
+- **GIVEN** vault `v` containing only the empty folder `notes/scratchpad/`
+- **WHEN** the client calls `GET /v1/vaults/v/folders`
+- **AND** then calls `GET /v1/vaults/v/files`
+- **THEN** the folders response includes `notes/scratchpad`
+- **AND** the files response is `{ items: [], nextCursor: null }`
+
+#### Scenario: Idempotent create
+
+- **GIVEN** vault `v` with no `archive/2026/` folder
+- **WHEN** the client `PUT`s `/v1/vaults/v/folders/archive/2026`
+- **THEN** the response is `200` with `created: true`
+- **AND** a replay of the same `PUT` returns `200` with `created: false` and the same `mtimeMs`
+
+#### Scenario: Non-empty refused without recursive flag
+
+- **GIVEN** vault `v` containing `social-graphs/people/peter-thiel/intro.md`
+- **WHEN** the client `DELETE`s `/v1/vaults/v/folders/social-graphs/people/peter-thiel`
+- **THEN** the response is `409` with `error.code = "folder_not_empty"`
+- **AND** `social-graphs/people/peter-thiel/intro.md` is unchanged
+
+#### Scenario: Recursive delete drops Markdown index entries
+
+- **GIVEN** vault `v` containing `archive/2024/jan.md` and `archive/2024/cover.png`
+- **WHEN** the client `DELETE`s `/v1/vaults/v/folders/archive/2024?recursive=true`
+- **THEN** the response is `204`
+- **AND** the indexer recorded exactly one `drop` call for `archive/2024/jan.md` (zero for the binary)
+- **AND** the folder `archive/2024/` no longer exists on disk
+
 ### Path validation
 
 - A path MUST NOT contain `..` segments, MUST NOT start with `/`, MUST NOT contain a NUL byte, MUST NOT exceed 1024 bytes.
@@ -187,7 +246,7 @@ For all routes below, `:slug` is the vault slug and `*path` is the file path ins
 ### Error model
 
 - Every error response MUST be JSON `{ error: { code: string, message: string, details?: unknown } }`.
-- `code` MUST come from a closed set: `vault_not_found`, `not_found`, `invalid_input`, `invalid_path`, `invalid_body`, `invalid_query`, `unsupported_media_type`, `patch_no_match`, `patch_ambiguous`, `embedder_failed`, `internal`. `invalid_input` is the canonical code for any Zod schema-validation failure and is shared with the MCP adapter; `invalid_body` and `invalid_query` are HTTP-specific codes for malformed request envelopes (e.g. unparseable JSON body or unknown query string).
+- `code` MUST come from a closed set: `vault_not_found`, `not_found`, `invalid_input`, `invalid_path`, `invalid_body`, `invalid_query`, `unsupported_media_type`, `patch_no_match`, `patch_ambiguous`, `folder_not_empty`, `embedder_failed`, `internal`. `invalid_input` is the canonical code for any Zod schema-validation failure and is shared with the MCP adapter; `invalid_body` and `invalid_query` are HTTP-specific codes for malformed request envelopes (e.g. unparseable JSON body or unknown query string); `folder_not_empty` is the 409 response from `DELETE /v1/vaults/:slug/folders/*path` without `?recursive=true` against a non-empty folder.
 - 5xx responses MUST log `error` and `requestId`. The response MUST include `requestId` in `details`.
 
 ### Request logging
@@ -254,3 +313,4 @@ function safeJoin(root: string, rel: string): string {
 |------|--------|----------|
 | 2026-05-03 | Initial spec created | — |
 | 2026-05-03 | Search request body gains `mode`, `threshold`, `mmrLambda`, `maxPerPath` knobs. Default `mode` is `"hybrid"` — retrieval behavior changes from pre-0008 (was vector-only); the response *shape* is unchanged. | [Change 0008](../../changes/0008-search-relevance.md) |
+| 2026-05-25 | Added Folder CRUD section (`GET/PUT/DELETE /v1/vaults/:slug/folders[*path]`) so empty folders are visible to API consumers — `list_files` only emits files. New error code `folder_not_empty` (409) added to the closed set. | [Change 0012](../../changes/0012-folder-operations.md) |

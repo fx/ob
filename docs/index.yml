@@ -101,3 +101,10 @@ changes:
     spec: obsidian-sync
     status: complete
     depends_on: ["0002"]
+  - id: "0012"
+    name: folder-operations
+    path: changes/0012-folder-operations.md
+    description: list_folders / create_folder / delete_folder on REST and MCP so empty folders (invisible to list_files) become reachable; new folder_not_empty error code.
+    spec: rest-api
+    status: draft
+    depends_on: ["0004", "0005"]

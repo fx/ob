@@ -36,9 +36,14 @@ The server MUST register exactly these tools. Argument schemas are JSON Schema; 
 | `patch_file` | `{ vault, path, edits: [{ old, new, replaceAll? }] }` — text files only | `{ path, contentType, mtimeMs, size, sha256, indexed, edits: number }` | `PATCH /v1/vaults/:slug/files/*path` |
 | `append_file` | `{ vault, path, content }` — text files only | `{ path, contentType, mtimeMs, size, sha256, indexed }` | `POST /v1/vaults/:slug/files/*path:append` |
 | `delete_file` | `{ vault, path }` | `{ deleted: boolean }` | `DELETE /v1/vaults/:slug/files/*path` |
+| `list_folders` | `{ vault, prefix?, limit?, cursor? }` | `{ items: FolderEntry[], nextCursor }` where `FolderEntry = { path, mtimeMs }` | `GET /v1/vaults/:slug/folders` |
+| `create_folder` | `{ vault, path }` — idempotent (mkdir -p) | `{ path, mtimeMs, created }` | `PUT /v1/vaults/:slug/folders/*path` |
+| `delete_folder` | `{ vault, path, recursive? }` — default `recursive: false` refuses non-empty folders | `{ deleted: true }` | `DELETE /v1/vaults/:slug/folders/*path` |
 | `search` | `{ vault, query, limit?, filter?, mode?, threshold?, mmrLambda?, maxPerPath? }` | `{ hits: SearchHit[] }` | `POST /v1/vaults/:slug/search` |
 
 `patch_file`'s tool description MUST tell the agent exactly when to prefer it over `write_file`: "Use `patch_file` whenever you would otherwise re-send the entire file with small changes. Each `old` must appear exactly once in the file, or pass `replaceAll: true`. Edits apply in order and the patch is atomic — any failed edit aborts the whole call." `append_file`'s description MUST direct callers to use it for daily-note / log / capture flows where no existing context is needed.
+
+`list_folders`'s description MUST state that it complements `list_files` and is the only way to see folders that contain no files (e.g. an empty leaf like `social-graphs/people/peter-thiel/`). `create_folder`'s description MUST state that it is idempotent (`mkdir -p` semantics) and that creating a folder whose path already exists as a file returns `invalid_path`. `delete_folder`'s description MUST state that the default refuses non-empty folders with `folder_not_empty` and that `recursive: true` is required to opt into recursive removal.
 
 `search` MUST document in its tool description that it ranks Markdown content only; binary files are not embedded in v1. The description MUST also state: default `mode: "hybrid"` blends vector and full-text retrieval and is the right choice for almost every query; pass `mode: "vector"` only for pure-semantics evaluation; pass `mode: "fts"` only for exact-phrase / proper-noun queries where you've confirmed semantics aren't needed. The other knobs (`threshold`, `mmrLambda`, `maxPerPath`) are tuning levers; the defaults are good.
 
@@ -163,3 +168,4 @@ All tool handlers MUST call into the same internal service modules used by REST 
 | 2026-05-03 | Initial spec created | — |
 | 2026-05-03 | `list_vaults` output flattened to bare `VaultSummary[]` for REST parity | 0005 |
 | 2026-05-03 | `search` tool input gains `mode`, `threshold`, `mmrLambda`, `maxPerPath` knobs (mirroring REST) | [Change 0008](../../changes/0008-search-relevance.md) |
+| 2026-05-25 | Added `list_folders` / `create_folder` / `delete_folder` tools mirroring the new REST `/v1/vaults/:slug/folders` surface. Required so empty folders (invisible to `list_files`) are reachable. | [Change 0012](../../changes/0012-folder-operations.md) |
