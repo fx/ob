@@ -198,7 +198,7 @@ The MCP adapter MUST register three new tools using the existing `tool()` regist
 |---|---|---|---|
 | `list_folders` | `{ vault, prefix?, limit?, cursor? }` | `{ items: FolderEntry[], nextCursor }` | `GET /v1/vaults/:slug/folders` |
 | `create_folder` | `{ vault, path }` | `{ path, mtimeMs, created }` | `PUT /v1/vaults/:slug/folders/*path` |
-| `delete_folder` | `{ vault, path, recursive? }` | `{ deleted: true }` | `DELETE /v1/vaults/:slug/folders/*path` |
+| `delete_folder` | `{ vault, path, recursive? }` | `{ deleted: boolean }` (always `true` on success — kept as a boolean for type parity with `delete_file`) | `DELETE /v1/vaults/:slug/folders/*path` |
 
 Rules:
 
@@ -315,12 +315,12 @@ The walk yields a parent *before* its children so the cursor pagination behaves 
   - [ ] Register all three in `src/mcp/index.ts`
   - [ ] Each tool description verbatim per the Tool surface section
   - [ ] Tests in `test/mcp/folders.test.ts` asserting tool invocation, error envelope parity with REST for `folder_not_empty` and `invalid_path`
-- [ ] **Spec changelog rows**
-  - [ ] Append a row to `docs/specs/rest-api/index.md` Changelog table referencing this change
-  - [ ] Append a row to `docs/specs/mcp-server/index.md` Changelog table referencing this change
-- [ ] **Docs index updates**
-  - [ ] Add this change to `docs/index.yml` (`status: draft`)
-  - [ ] Add a row to `docs/index.md` Changes table
+- [x] **Spec changelog rows**
+  - [x] Append a row to `docs/specs/rest-api/index.md` Changelog table referencing this change
+  - [x] Append a row to `docs/specs/mcp-server/index.md` Changelog table referencing this change
+- [x] **Docs index updates**
+  - [x] Add this change to `docs/index.yml` (`status: draft`)
+  - [x] Add a row to `docs/index.md` Changes table
 - [ ] **README**
   - [ ] Document the three new tools / routes in the README's API surface section if such a table exists (verify during implementation; if absent, skip)
 

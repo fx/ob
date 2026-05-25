@@ -48,7 +48,7 @@ For all routes below, `:slug` is the vault slug and `*path` is the file path ins
 - Lists files. Query params: `prefix` (string, MUST match path prefix), `limit` (int, default 100, max 1000), `cursor` (opaque string).
 - MUST return `200 { items: [{ path, mtimeMs, size, sha256, contentType }], nextCursor: string | null }` where `contentType` is the detected MIME type by extension.
 - MUST stream from the on-disk vault directory and MUST include all file types (not just Markdown).
-- MUST omit any path containing a `/.obsidian/` or `/.trash/` segment, and any dotfile.
+- MUST omit any path containing a `/.obsidian/` or `/.trash/` segment, any dotfile, and any symlink (symlinks are detected by `Dirent` type and never followed).
 
 #### `GET /v1/vaults/:slug/files/*path`
 
@@ -134,14 +134,14 @@ For all routes below, `:slug` is the vault slug and `*path` is the file path ins
 
 ### Folder CRUD
 
-Folders are a separate surface from files because `list_files` only emits `Dirent.isFile()` entries: a folder with no descendant files is invisible to the file API. Obsidian Sync preserves empty folders (verified against a live vault; no upstream toggle exists per [Sync settings](https://obsidian.md/help/sync/settings)), so the API MUST expose them too. `FolderEntry = { path, mtimeMs }` — folders carry no size, sha256, or contentType.
+Folders are a separate surface from files because `GET /v1/vaults/:slug/files` only emits `Dirent.isFile()` entries: a folder with no descendant files is invisible to the file API. Obsidian Sync preserves empty folders (verified against a live vault; no upstream toggle exists per [Sync settings](https://obsidian.md/help/sync/settings)), so the API MUST expose them too. `FolderEntry = { path, mtimeMs }` — folders carry no size, sha256, or contentType.
 
 #### `GET /v1/vaults/:slug/folders`
 
 - Lists folders. Query params: `prefix` (string, MUST match path prefix), `limit` (int, default 100, max 1000), `cursor` (opaque string) — same shape and semantics as the file list endpoint.
 - MUST return `200 { items: [{ path, mtimeMs }], nextCursor: string | null }` where `path` is the vault-relative folder path with no trailing slash.
 - MUST walk the on-disk vault directory and emit directory entries in pre-order lexicographic walk (parent before children) so cursor resumption advances into subtrees predictably.
-- MUST omit any folder containing a `/.obsidian/` or `/.trash/` segment, any dotfolder, and any symlink (same rules as `list_files`).
+- MUST omit any folder containing a `/.obsidian/` or `/.trash/` segment, any dotfolder, and any symlink (same omission rules as `GET /v1/vaults/:slug/files`).
 - MUST NOT emit the vault root itself.
 
 #### `PUT /v1/vaults/:slug/folders/*path`
@@ -313,4 +313,4 @@ function safeJoin(root: string, rel: string): string {
 |------|--------|----------|
 | 2026-05-03 | Initial spec created | — |
 | 2026-05-03 | Search request body gains `mode`, `threshold`, `mmrLambda`, `maxPerPath` knobs. Default `mode` is `"hybrid"` — retrieval behavior changes from pre-0008 (was vector-only); the response *shape* is unchanged. | [Change 0008](../../changes/0008-search-relevance.md) |
-| 2026-05-25 | Added Folder CRUD section (`GET/PUT/DELETE /v1/vaults/:slug/folders[*path]`) so empty folders are visible to API consumers — `list_files` only emits files. New error code `folder_not_empty` (409) added to the closed set. | [Change 0012](../../changes/0012-folder-operations.md) |
+| 2026-05-25 | Added Folder CRUD section: `GET /v1/vaults/:slug/folders` (list) plus `PUT` and `DELETE` on `/v1/vaults/:slug/folders/*path` (create / delete). Required because `GET /v1/vaults/:slug/files` only emits files, hiding empty folders. New error code `folder_not_empty` (409) added to the closed set. | [Change 0012](../../changes/0012-folder-operations.md) |
