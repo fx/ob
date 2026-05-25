@@ -14,7 +14,7 @@ Add a sibling surface to file CRUD for folders: `list_folders`, `create_folder`,
 
 On the live production vault this is not a corner case:
 
-```
+```bash
 $ kubectl -n ob exec deploy/ob -- sh -c 'find /data/vaults/v/social-graphs/people -mindepth 1 -maxdepth 1 -type d \
   -exec sh -c "[ -z \$(ls -A \"\$0\") ] && echo empty: \$0" {} \;' | wc -l
 20
