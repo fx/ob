@@ -52,13 +52,9 @@ describe("extractPdfMarkdown", () => {
   test("corrupt PDF throws a typed PdfExtractionError with the shared code", async () => {
     const promise = extractPdfMarkdown(loadPdfFixture("broken.pdf"));
     await expect(promise).rejects.toBeInstanceOf(PdfExtractionError);
-    try {
-      await extractPdfMarkdown(loadPdfFixture("broken.pdf"));
-      throw new Error("expected extractPdfMarkdown to throw");
-    } catch (e) {
-      expect(e).toBeInstanceOf(PdfExtractionError);
-      expect((e as PdfExtractionError).code).toBe("extraction_failed");
-      expect((e as PdfExtractionError).message).toContain("failed to parse PDF");
-    }
+    await expect(promise).rejects.toMatchObject({
+      code: "extraction_failed",
+      message: expect.stringContaining("failed to parse PDF"),
+    });
   });
 });

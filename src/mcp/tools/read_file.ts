@@ -81,9 +81,12 @@ export function readFileTool(deps: VaultServiceDeps): ToolDefinition {
           // Preserve the original parse-cause message (REST surfaces the same
           // "failed to parse PDF: <cause>") and append the caller-facing hint
           // so the two adapters' `extraction_failed` messages stay at parity.
-          throw new PdfExtractionError(
+          // Keep the original error as `cause` so its stack is not lost.
+          const remapped = new PdfExtractionError(
             `${err.message}; retry with format:"binary" to fetch the raw bytes`,
           );
+          remapped.cause = err;
+          throw remapped;
         }
       }
       // Branch on the same `isTextMimeType` rule the REST adapter uses for
