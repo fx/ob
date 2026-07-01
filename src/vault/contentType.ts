@@ -95,3 +95,8 @@ export function isTextPath(path: string): boolean {
 export function isMarkdownPath(path: string): boolean {
   return MARKDOWN_EXTENSIONS.has(extOf(path));
 }
+
+/** True for `.pdf` — the only binary extension with a text-extraction path. */
+export function isPdfPath(path: string): boolean {
+  return extOf(path) === "pdf";
+}
