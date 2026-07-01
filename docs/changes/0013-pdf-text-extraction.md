@@ -32,7 +32,7 @@ Skipping or weakening any of these rules to land the PR MUST be treated as a bug
 
 - A shared-core module `src/vault/pdfText.ts` MUST expose `extractPdfMarkdown(bytes: Uint8Array): Promise<PdfExtraction>` where `PdfExtraction = { markdown: string, pages: number, hasTextLayer: boolean }`.
 - Extraction MUST use `unpdf` (`extractText(pdf, { mergePages: false })`) so page boundaries are preserved.
-- Pages MUST be joined with `\n\n<!-- page N -->\n\n` markers (N is the 1-based page number of the page that follows; no marker before page 1). Markers are HTML comments so they never collide with content-derived Markdown structure.
+- Only pages that have text MUST be emitted: empty (image-only) pages are dropped from the join. Each emitted page is preceded by a `\n\n<!-- page N -->\n\n` marker (N is that page's own 1-based physical page number) — with no marker before page 1. Dropping empty pages preserves the whitespace guarantee for mixed text/image PDFs (no leading/trailing blank runs, no marker pointing at empty content). Markers are HTML comments so they never collide with content-derived Markdown structure.
 - Per-page text SHOULD be whitespace-normalized: trim each page, collapse runs of 3+ newlines to 2. No heading/list reconstruction in v1 — output is Markdown-safe plain text, not reflowed Markdown.
 - `hasTextLayer` MUST be `false` when the concatenated, trimmed text of all pages is empty (scanned/image-only PDF). This is a successful result, NOT an error; `markdown` is `""`.
 - If the PDF cannot be parsed (corrupt, encrypted/password-protected), the module MUST throw a typed error that adapters map to error code `extraction_failed`. OCR is OUT OF SCOPE.

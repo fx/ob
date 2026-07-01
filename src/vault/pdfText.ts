@@ -8,10 +8,15 @@
  *
  * Extraction runs on `unpdf` (a Bun-friendly, pre-bundled build of pdf.js) via
  * `extractText(pdf, { mergePages: false })`, which preserves page boundaries.
- * Pages are joined with `\n\n<!-- page N -->\n\n` markers (N = the 1-based
- * number of the FOLLOWING page; no marker before page 1). The markers are HTML
- * comments so they never collide with content-derived Markdown structure and
- * stay invisible in rendered output while giving callers page anchors.
+ * Only pages with text are emitted: empty (image-only) pages are dropped from
+ * the join, and each emitted page is preceded by a `\n\n<!-- page N -->\n\n`
+ * marker (N = that page's own 1-based physical number) — except no marker when
+ * the emitted page is page 1. Skipping empty pages keeps the whitespace
+ * guarantee intact for PDFs that mix text and image-only pages: the result
+ * never has leading/trailing blank runs or a marker pointing at empty content.
+ * The markers are HTML comments so they never collide with content-derived
+ * Markdown structure and stay invisible in rendered output while giving
+ * callers page anchors. `pages` still reports the total physical page count.
  *
  * A PDF with no text objects (scanned/image-only) is a SUCCESS, not an error:
  * `hasTextLayer` is `false` and `markdown` is `""`. Only a genuinely
@@ -75,8 +80,15 @@ export async function extractPdfMarkdown(bytes: Uint8Array): Promise<PdfExtracti
   if (!hasTextLayer) {
     return { markdown: "", pages, hasTextLayer: false };
   }
+  // Emit only non-empty pages. Each keeps its own 1-based physical page number
+  // in the marker (so a dropped image-only page shifts the marker, never the
+  // number), and page 1 never carries a marker. Dropping empty pages avoids the
+  // blank runs / dangling markers that a mixed text+image PDF would otherwise
+  // produce.
   const markdown = normalized
-    .map((page, i) => (i === 0 ? page : `<!-- page ${i + 1} -->\n\n${page}`))
+    .map((page, i) => ({ page, n: i + 1 }))
+    .filter((p) => p.page.length > 0)
+    .map((p) => (p.n === 1 ? p.page : `<!-- page ${p.n} -->\n\n${p.page}`))
     .join("\n\n");
   return { markdown, pages, hasTextLayer: true };
 }

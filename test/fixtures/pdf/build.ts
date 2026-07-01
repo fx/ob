@@ -6,9 +6,11 @@
  * (via `unpdf`) accepts them. Run with `bun test/fixtures/pdf/build.ts` after
  * changing fixture content. Not a `.test.ts` file, so `bun test` skips it.
  *
- * - `text.pdf`    two pages whose text layers are "alpha" and "beta"
- * - `scanned.pdf` one page with an empty content stream (no text objects)
- * - `broken.pdf`  a valid header followed by garbage / truncation
+ * - `text.pdf`         two pages whose text layers are "alpha" and "beta"
+ * - `scanned.pdf`      one page with an empty content stream (no text objects)
+ * - `broken.pdf`       a valid header followed by garbage / truncation
+ * - `mixed.pdf`        three pages: "alpha", empty (image-only), "gamma"
+ * - `mixed-leading.pdf` two pages: empty (image-only), then "beta"
  */
 
 import { writeFileSync } from "node:fs";
@@ -55,8 +57,40 @@ const scannedPdf = buildPdf([
 
 const brokenPdf = new TextEncoder().encode("%PDF-1.4\n%garbage\x01\x02\x03 not a real pdf");
 
+const emptyStream = "<< /Length 0 >>\nstream\n\nendstream";
+
+// Three pages — text, image-only (no text objects), text — so the join must
+// drop the middle page and keep "gamma"'s own physical page number (3) in its
+// marker: "alpha\n\n<!-- page 3 -->\n\ngamma".
+const mixedPdf = buildPdf([
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>",
+  "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R /Resources << /Font << /F1 9 0 R >> >> >>",
+  "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 7 0 R /Resources << >> >>",
+  "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 8 0 R /Resources << /Font << /F1 9 0 R >> >> >>",
+  contentStream("alpha"),
+  emptyStream,
+  contentStream("gamma"),
+  "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+]);
+
+// Leading image-only page followed by a text page — the first emitted page is
+// page 2, so it MUST still carry its "<!-- page 2 -->" marker with no leading
+// blank run: "<!-- page 2 -->\n\nbeta".
+const mixedLeadingPdf = buildPdf([
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+  "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << >> >>",
+  "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> >>",
+  emptyStream,
+  contentStream("beta"),
+  "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+]);
+
 const dir = import.meta.dir;
 writeFileSync(join(dir, "text.pdf"), textPdf);
 writeFileSync(join(dir, "scanned.pdf"), scannedPdf);
 writeFileSync(join(dir, "broken.pdf"), brokenPdf);
-console.log("wrote text.pdf, scanned.pdf, broken.pdf");
+writeFileSync(join(dir, "mixed.pdf"), mixedPdf);
+writeFileSync(join(dir, "mixed-leading.pdf"), mixedLeadingPdf);
+console.log("wrote text.pdf, scanned.pdf, broken.pdf, mixed.pdf, mixed-leading.pdf");

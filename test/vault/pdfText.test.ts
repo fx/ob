@@ -22,6 +22,26 @@ describe("extractPdfMarkdown", () => {
     expect(out.markdown).toBe("alpha\n\n<!-- page 2 -->\n\nbeta");
   });
 
+  test("drops an image-only page between two text pages, keeping physical page numbers", async () => {
+    // mixed.pdf: "alpha" (page 1), empty/image-only (page 2), "gamma" (page 3).
+    // The empty page is omitted from the join and "gamma" keeps its own page
+    // number (3) in the marker — no 4-newline blank run, no marker at page 2.
+    const out = await extractPdfMarkdown(loadPdfFixture("mixed.pdf"));
+    expect(out.pages).toBe(3);
+    expect(out.hasTextLayer).toBe(true);
+    expect(out.markdown).toBe("alpha\n\n<!-- page 3 -->\n\ngamma");
+  });
+
+  test("a leading image-only page still emits its follower's marker without a blank prefix", async () => {
+    // mixed-leading.pdf: empty/image-only (page 1), "beta" (page 2). The first
+    // emitted page is page 2, so its marker is present and there is no leading
+    // blank run.
+    const out = await extractPdfMarkdown(loadPdfFixture("mixed-leading.pdf"));
+    expect(out.pages).toBe(2);
+    expect(out.hasTextLayer).toBe(true);
+    expect(out.markdown).toBe("<!-- page 2 -->\n\nbeta");
+  });
+
   test("scanned PDF with no text objects succeeds with hasTextLayer false", async () => {
     const out = await extractPdfMarkdown(loadPdfFixture("scanned.pdf"));
     expect(out.hasTextLayer).toBe(false);
