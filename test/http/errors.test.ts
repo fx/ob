@@ -12,6 +12,7 @@ import {
   VaultNotFoundError,
 } from "../../src/errors.ts";
 import { mapErrorToHttp } from "../../src/http/errors.ts";
+import { PdfExtractionError } from "../../src/vault/pdfText.ts";
 
 describe("mapErrorToHttp", () => {
   test("VaultNotFoundError → 404 vault_not_found", () => {
@@ -71,6 +72,12 @@ describe("mapErrorToHttp", () => {
     const env = mapErrorToHttp(new EmbedderError("provider down"));
     expect(env.status).toBe(502);
     expect(env.body.error.code).toBe("embedder_failed");
+  });
+
+  test("PdfExtractionError → 422 extraction_failed", () => {
+    const env = mapErrorToHttp(new PdfExtractionError("bad pdf"));
+    expect(env.status).toBe(422);
+    expect(env.body.error.code).toBe("extraction_failed");
   });
 
   test("any other Error → 500 internal with requestId", () => {

@@ -29,6 +29,7 @@ import {
   UnsupportedMediaTypeError,
   VaultNotFoundError,
 } from "../errors.ts";
+import { PdfExtractionError } from "../vault/pdfText.ts";
 
 export interface HttpErrorEnvelope {
   readonly status: number;
@@ -59,6 +60,7 @@ export function mapErrorToHttp(error: unknown, requestId?: string): HttpErrorEnv
   if (error instanceof UnsupportedMediaTypeError) return envelope(415, error);
   if (error instanceof PatchNoMatchError) return envelope(409, error);
   if (error instanceof PatchAmbiguousError) return envelope(409, error);
+  if (error instanceof PdfExtractionError) return envelope(422, error);
   if (error instanceof EmbedderError) {
     return {
       status: 502,
