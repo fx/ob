@@ -53,9 +53,24 @@ For all routes below, `:slug` is the vault slug and `*path` is the file path ins
 #### `GET /v1/vaults/:slug/files/*path`
 
 - Returns the raw file bytes.
-- Response `Content-Type` MUST be the detected MIME type by extension (`text/markdown; charset=utf-8` for `.md`/`.markdown`, `image/png` for `.png`, `application/pdf` for `.pdf`, etc.); fallback `application/octet-stream`.
-- If the file is `.md`/`.markdown` AND the request sends `Accept: application/json`, the response MUST be `{ path, content, frontmatter, mtimeMs, size, sha256 }` with `frontmatter` parsed. For non-Markdown files the JSON variant MUST return `406 Not Acceptable`.
+- For the raw-bytes (non-JSON) variant, the response `Content-Type` header MUST be the detected MIME type by extension (`text/markdown; charset=utf-8` for `.md`/`.markdown`, `image/png` for `.png`, `application/pdf` for `.pdf`, etc.); fallback `application/octet-stream`. The JSON variants below respond with `Content-Type: application/json`; the original file's detected MIME type appears in the body's `contentType` field where the shape includes one.
+- If the file is `.md`/`.markdown` AND the request sends `Accept: application/json`, the response MUST be `{ path, content, frontmatter, mtimeMs, size, sha256 }` with `frontmatter` parsed.
+- If the file is `.pdf` AND the request sends `Accept: application/json`, the response MUST be `200 { path, content, contentType, pdf: { pages, hasTextLayer }, mtimeMs, size, sha256 }` where `content` is the extracted plain-text/Markdown content (page-marker and normalization semantics defined in [Change 0013](../../changes/0013-pdf-text-extraction.md); shared with MCP `read_file`). No `frontmatter` field. A scanned/image-only PDF MUST succeed with `content: ""` and `pdf.hasTextLayer: false`. A corrupt or password-protected PDF MUST return `422` with `error.code = "extraction_failed"`. `size` and `sha256` MUST describe the on-disk bytes, not the extracted text. The plain (non-JSON) GET is unaffected and keeps serving verbatim bytes.
+- For all other non-Markdown files the JSON variant MUST return `406 Not Acceptable`.
 - `404` if the file does not exist; `400` if the path is invalid (see Path validation).
+
+#### Scenario: JSON read of a PDF returns extracted text
+
+- **GIVEN** vault `v` contains `papers/attention.pdf` with a text layer
+- **WHEN** the client `GET`s `/v1/vaults/v/files/papers/attention.pdf` with `Accept: application/json`
+- **THEN** the response is `200` JSON with `content` = extracted text and `pdf.pages` ≥ 1
+- **AND** a plain `GET` of the same URL still returns the verbatim bytes with `Content-Type: application/pdf`
+
+#### Scenario: Unparseable PDF fails closed
+
+- **GIVEN** vault `v` contains a password-protected `secret.pdf`
+- **WHEN** the client `GET`s it with `Accept: application/json`
+- **THEN** the response is `422` with `error.code = "extraction_failed"`
 
 #### `PUT /v1/vaults/:slug/files/*path`
 
@@ -246,7 +261,7 @@ Folders are a separate surface from files because `GET /v1/vaults/:slug/files` o
 ### Error model
 
 - Every error response MUST be JSON `{ error: { code: string, message: string, details?: unknown } }`.
-- `code` MUST come from a closed set: `vault_not_found`, `not_found`, `invalid_input`, `invalid_path`, `invalid_body`, `invalid_query`, `unsupported_media_type`, `patch_no_match`, `patch_ambiguous`, `folder_not_empty`, `embedder_failed`, `internal`. `invalid_input` is the canonical code for any Zod schema-validation failure and is shared with the MCP adapter; `invalid_body` and `invalid_query` are HTTP-specific codes for malformed request envelopes (e.g. unparseable JSON body or unknown query string); `folder_not_empty` is the 409 response from `DELETE /v1/vaults/:slug/folders/*path` without `?recursive=true` against a non-empty folder.
+- `code` MUST come from a closed set: `vault_not_found`, `not_found`, `invalid_input`, `invalid_path`, `invalid_body`, `invalid_query`, `unsupported_media_type`, `patch_no_match`, `patch_ambiguous`, `folder_not_empty`, `extraction_failed`, `embedder_failed`, `internal`. `invalid_input` is the canonical code for any Zod schema-validation failure and is shared with the MCP adapter; `invalid_body` and `invalid_query` are HTTP-specific codes for malformed request envelopes (e.g. unparseable JSON body or unknown query string); `folder_not_empty` is the 409 response from `DELETE /v1/vaults/:slug/folders/*path` without `?recursive=true` against a non-empty folder; `extraction_failed` is the 422 response when a PDF requested as text cannot be parsed (corrupt or password-protected).
 - 5xx responses MUST log `error` and `requestId`. The response MUST include `requestId` in `details`.
 
 ### Request logging
@@ -314,3 +329,4 @@ function safeJoin(root: string, rel: string): string {
 | 2026-05-03 | Initial spec created | — |
 | 2026-05-03 | Search request body gains `mode`, `threshold`, `mmrLambda`, `maxPerPath` knobs. Default `mode` is `"hybrid"` — retrieval behavior changes from pre-0008 (was vector-only); the response *shape* is unchanged. | [Change 0008](../../changes/0008-search-relevance.md) |
 | 2026-05-25 | Added Folder CRUD section: `GET /v1/vaults/:slug/folders` (list) plus `PUT` and `DELETE` on `/v1/vaults/:slug/folders/*path` (create / delete). Required because `GET /v1/vaults/:slug/files` only emits files, hiding empty folders. New error code `folder_not_empty` (409) added to the closed set. | [Change 0012](../../changes/0012-folder-operations.md) |
+| 2026-07-01 | JSON read variant (`Accept: application/json`) now accepts `.pdf` and returns extracted text with `pdf: { pages, hasTextLayer }` metadata; other non-Markdown files still get `406`. New error code `extraction_failed` (422) added to the closed set. Plain GET byte semantics unchanged. | [Change 0013](../../changes/0013-pdf-text-extraction.md) |
