@@ -1,15 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { loadPdfFixture } from "../helpers/loadPdfFixture.ts";
 import { makeHttpFixture, waitFor } from "./helpers.ts";
-
-const PDF_FIXTURES = join(import.meta.dir, "../fixtures/pdf");
-function pdfFixture(name: string): Uint8Array {
-  const buf = readFileSync(join(PDF_FIXTURES, name));
-  const view = new Uint8Array(buf.byteLength);
-  view.set(buf);
-  return view;
-}
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -132,7 +125,7 @@ describe("file CRUD", () => {
   test("GET with Accept: application/json on a PDF returns extracted text", async () => {
     const fx = await makeHttpFixture("getjsonpdf");
     cleanup.push(fx.stop);
-    writeFileSync(join(fx.vaultRoot, "paper.pdf"), pdfFixture("text.pdf"));
+    writeFileSync(join(fx.vaultRoot, "paper.pdf"), loadPdfFixture("text.pdf"));
     const res = await fx.app.request("/v1/vaults/v/files/paper.pdf", {
       headers: { accept: "application/json" },
     });
@@ -154,7 +147,7 @@ describe("file CRUD", () => {
   test("plain GET on a PDF still returns verbatim bytes", async () => {
     const fx = await makeHttpFixture("getbytespdf");
     cleanup.push(fx.stop);
-    const bytes = pdfFixture("text.pdf");
+    const bytes = loadPdfFixture("text.pdf");
     writeFileSync(join(fx.vaultRoot, "paper.pdf"), bytes);
     const res = await fx.app.request("/v1/vaults/v/files/paper.pdf");
     expect(res.status).toBe(200);
@@ -166,7 +159,7 @@ describe("file CRUD", () => {
   test("GET JSON on a corrupt PDF returns 422 extraction_failed", async () => {
     const fx = await makeHttpFixture("getjsonpdfbroken");
     cleanup.push(fx.stop);
-    writeFileSync(join(fx.vaultRoot, "bad.pdf"), pdfFixture("broken.pdf"));
+    writeFileSync(join(fx.vaultRoot, "bad.pdf"), loadPdfFixture("broken.pdf"));
     const res = await fx.app.request("/v1/vaults/v/files/bad.pdf", {
       headers: { accept: "application/json" },
     });

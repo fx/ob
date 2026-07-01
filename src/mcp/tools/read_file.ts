@@ -54,25 +54,25 @@ export function readFileTool(deps: VaultServiceDeps): ToolDefinition {
       const result = await readFile(deps, args.vault, args.path);
       const contentType = detectContentType(args.path);
       // `format: "binary"` is a verbatim byte read for ANY file type — no
-      // frontmatter parsing, no PDF extraction. Handle it before the
-      // per-type branches so it wins uniformly.
-      if (args.format === "binary") {
-        return {
-          path: result.path,
-          contentType,
-          encoding: "base64" as const,
-          content: Buffer.from(result.bytes).toString("base64"),
-          mtimeMs: result.mtimeMs,
-          size: result.size,
-          sha256: result.sha256,
-        };
-      }
+      // frontmatter parsing, no PDF extraction. The text-producing branches
+      // below are gated on `format === "text"` (the default) so binary falls
+      // through to the single base64 return at the bottom.
+      const wantsText = args.format === "text";
       // PDFs return extracted text under `format: "text"`. `size`/`sha256`
       // still describe the on-disk bytes (identity fields), not the text.
-      if (isPdfPath(args.path)) {
-        let extraction: Awaited<ReturnType<typeof extractPdfMarkdown>>;
+      if (wantsText && isPdfPath(args.path)) {
         try {
-          extraction = await extractPdfMarkdown(result.bytes);
+          const extraction = await extractPdfMarkdown(result.bytes);
+          return {
+            path: result.path,
+            contentType,
+            encoding: "utf-8" as const,
+            content: extraction.markdown,
+            pdf: { pages: extraction.pages, hasTextLayer: extraction.hasTextLayer },
+            mtimeMs: result.mtimeMs,
+            size: result.size,
+            sha256: result.sha256,
+          };
         } catch {
           // `extractPdfMarkdown` only ever throws `PdfExtractionError`; rewrap
           // with the caller-facing hint so the `extraction_failed` message
@@ -81,21 +81,11 @@ export function readFileTool(deps: VaultServiceDeps): ToolDefinition {
             `could not extract text from PDF "${args.path}"; retry with format:"binary" to fetch the raw bytes`,
           );
         }
-        return {
-          path: result.path,
-          contentType,
-          encoding: "utf-8" as const,
-          content: extraction.markdown,
-          pdf: { pages: extraction.pages, hasTextLayer: extraction.hasTextLayer },
-          mtimeMs: result.mtimeMs,
-          size: result.size,
-          sha256: result.sha256,
-        };
       }
       // Branch on the same `isTextMimeType` rule the REST adapter uses for
       // its `Accept: application/json` variant — keeps the two adapters'
       // text/binary boundary identical.
-      if (isTextMimeType(contentType)) {
+      if (wantsText && isTextMimeType(contentType)) {
         const text = new TextDecoder().decode(result.bytes);
         if (isMarkdownPath(args.path)) {
           const parsed = grayMatter(text);

@@ -4,17 +4,10 @@
  */
 
 import { afterEach, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { loadPdfFixture } from "../../helpers/loadPdfFixture.ts";
 import { makeMcpFixture } from "../helpers.ts";
-
-const PDF_FIXTURES = join(import.meta.dir, "../../fixtures/pdf");
-function pdfFixture(name: string): Uint8Array {
-  const buf = readFileSync(join(PDF_FIXTURES, name));
-  const view = new Uint8Array(buf.byteLength);
-  view.set(buf);
-  return view;
-}
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -85,7 +78,7 @@ test("read_file invalid input (missing path)", async () => {
 test("read_file returns extracted text for a PDF by default", async () => {
   const fx = await makeMcpFixture({ label: "tool-rf-pdf" });
   cleanup.push(fx.stop);
-  writeFileSync(join(fx.vaultRoot, "paper.pdf"), pdfFixture("text.pdf"));
+  writeFileSync(join(fx.vaultRoot, "paper.pdf"), loadPdfFixture("text.pdf"));
   const r = await fx.callTool("read_file", { vault: "v", path: "paper.pdf" });
   expect(r.isError).toBeUndefined();
   const parsed = r.parsed as {
@@ -105,7 +98,7 @@ test("read_file returns extracted text for a PDF by default", async () => {
 test("read_file reports hasTextLayer false for a scanned PDF", async () => {
   const fx = await makeMcpFixture({ label: "tool-rf-pdf-scan" });
   cleanup.push(fx.stop);
-  writeFileSync(join(fx.vaultRoot, "scan.pdf"), pdfFixture("scanned.pdf"));
+  writeFileSync(join(fx.vaultRoot, "scan.pdf"), loadPdfFixture("scanned.pdf"));
   const r = await fx.callTool("read_file", { vault: "v", path: "scan.pdf" });
   const parsed = r.parsed as { content: string; pdf: { hasTextLayer: boolean; pages: number } };
   expect(parsed.content).toBe("");
@@ -116,7 +109,7 @@ test("read_file reports hasTextLayer false for a scanned PDF", async () => {
 test("read_file format:binary returns verbatim base64 for a PDF", async () => {
   const fx = await makeMcpFixture({ label: "tool-rf-pdf-bin" });
   cleanup.push(fx.stop);
-  const bytes = pdfFixture("text.pdf");
+  const bytes = loadPdfFixture("text.pdf");
   writeFileSync(join(fx.vaultRoot, "paper.pdf"), bytes);
   const r = await fx.callTool("read_file", { vault: "v", path: "paper.pdf", format: "binary" });
   const parsed = r.parsed as { encoding: string; content: string; pdf?: unknown };
@@ -140,7 +133,7 @@ test("read_file format:binary returns base64 for Markdown without frontmatter pa
 test("read_file on a corrupt PDF yields extraction_failed with a retry hint", async () => {
   const fx = await makeMcpFixture({ label: "tool-rf-pdf-broken" });
   cleanup.push(fx.stop);
-  writeFileSync(join(fx.vaultRoot, "bad.pdf"), pdfFixture("broken.pdf"));
+  writeFileSync(join(fx.vaultRoot, "bad.pdf"), loadPdfFixture("broken.pdf"));
   const r = await fx.callTool("read_file", { vault: "v", path: "bad.pdf" });
   expect(r.isError).toBe(true);
   const parsed = r.parsed as { code: string; message: string };

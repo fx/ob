@@ -1,15 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { loadPdfFixture } from "../helpers/loadPdfFixture.ts";
 import { callMcp, callRestBytes, callRestJson, makeParityFixture } from "./helpers.ts";
-
-const PDF_FIXTURES = join(import.meta.dir, "../fixtures/pdf");
-function pdfFixture(name: string): Uint8Array {
-  const buf = readFileSync(join(PDF_FIXTURES, name));
-  const view = new Uint8Array(buf.byteLength);
-  view.set(buf);
-  return view;
-}
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -58,7 +51,7 @@ test("read_file binary parity (base64 round-trip)", async () => {
 test("read_file PDF text parity (MCP format:text vs REST JSON)", async () => {
   const fx = await makeParityFixture({ label: "p-rf-pdf" });
   cleanup.push(fx.stop);
-  writeFileSync(join(fx.vaultRoot, "paper.pdf"), pdfFixture("text.pdf"));
+  writeFileSync(join(fx.vaultRoot, "paper.pdf"), loadPdfFixture("text.pdf"));
   const mcp = await callMcp(fx, "read_file", { vault: "v", path: "paper.pdf" });
   const rest = await callRestJson(fx, "GET", "/v1/vaults/v/files/paper.pdf");
   expect(mcp.isError).toBe(false);
@@ -76,7 +69,7 @@ test("read_file PDF text parity (MCP format:text vs REST JSON)", async () => {
 test("read_file PDF binary parity (MCP format:binary vs REST plain GET)", async () => {
   const fx = await makeParityFixture({ label: "p-rf-pdf-bin" });
   cleanup.push(fx.stop);
-  const bytes = pdfFixture("text.pdf");
+  const bytes = loadPdfFixture("text.pdf");
   writeFileSync(join(fx.vaultRoot, "paper.pdf"), bytes);
   const mcp = await callMcp(fx, "read_file", { vault: "v", path: "paper.pdf", format: "binary" });
   const rest = await callRestBytes(fx, "/v1/vaults/v/files/paper.pdf");
@@ -90,7 +83,7 @@ test("read_file PDF binary parity (MCP format:binary vs REST plain GET)", async 
 test("read_file PDF extraction_failed parity", async () => {
   const fx = await makeParityFixture({ label: "p-rf-pdf-broken" });
   cleanup.push(fx.stop);
-  writeFileSync(join(fx.vaultRoot, "bad.pdf"), pdfFixture("broken.pdf"));
+  writeFileSync(join(fx.vaultRoot, "bad.pdf"), loadPdfFixture("broken.pdf"));
   const mcp = await callMcp(fx, "read_file", { vault: "v", path: "bad.pdf" });
   const rest = await callRestJson(fx, "GET", "/v1/vaults/v/files/bad.pdf");
   expect(mcp.isError).toBe(true);

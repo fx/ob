@@ -9,22 +9,12 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { PdfExtractionError, extractPdfMarkdown } from "../../src/vault/pdfText.ts";
-
-const FIXTURES = join(import.meta.dir, "../fixtures/pdf");
-
-function fixture(name: string): Uint8Array {
-  const buf = readFileSync(join(FIXTURES, name));
-  const view = new Uint8Array(buf.byteLength);
-  view.set(buf);
-  return view;
-}
+import { loadPdfFixture } from "../helpers/loadPdfFixture.ts";
 
 describe("extractPdfMarkdown", () => {
   test("extracts a two-page text layer with a page marker between pages", async () => {
-    const out = await extractPdfMarkdown(fixture("text.pdf"));
+    const out = await extractPdfMarkdown(loadPdfFixture("text.pdf"));
     expect(out.pages).toBe(2);
     expect(out.hasTextLayer).toBe(true);
     // Page 1 text, then the marker for the FOLLOWING page (2), then page 2 —
@@ -33,17 +23,17 @@ describe("extractPdfMarkdown", () => {
   });
 
   test("scanned PDF with no text objects succeeds with hasTextLayer false", async () => {
-    const out = await extractPdfMarkdown(fixture("scanned.pdf"));
+    const out = await extractPdfMarkdown(loadPdfFixture("scanned.pdf"));
     expect(out.hasTextLayer).toBe(false);
     expect(out.markdown).toBe("");
     expect(out.pages).toBeGreaterThanOrEqual(1);
   });
 
   test("corrupt PDF throws a typed PdfExtractionError with the shared code", async () => {
-    const promise = extractPdfMarkdown(fixture("broken.pdf"));
+    const promise = extractPdfMarkdown(loadPdfFixture("broken.pdf"));
     await expect(promise).rejects.toBeInstanceOf(PdfExtractionError);
     try {
-      await extractPdfMarkdown(fixture("broken.pdf"));
+      await extractPdfMarkdown(loadPdfFixture("broken.pdf"));
       throw new Error("expected extractPdfMarkdown to throw");
     } catch (e) {
       expect(e).toBeInstanceOf(PdfExtractionError);
