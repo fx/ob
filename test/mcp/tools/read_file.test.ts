@@ -139,4 +139,7 @@ test("read_file on a corrupt PDF yields extraction_failed with a retry hint", as
   const parsed = r.parsed as { code: string; message: string };
   expect(parsed.code).toBe("extraction_failed");
   expect(parsed.message).toContain('format:"binary"');
+  // The MCP message must also carry the underlying parse cause so it stays at
+  // parity with the REST body ("failed to parse PDF: <cause>").
+  expect(parsed.message).toContain("failed to parse PDF");
 });

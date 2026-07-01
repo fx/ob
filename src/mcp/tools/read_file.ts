@@ -73,12 +73,16 @@ export function readFileTool(deps: VaultServiceDeps): ToolDefinition {
             size: result.size,
             sha256: result.sha256,
           };
-        } catch {
-          // `extractPdfMarkdown` only ever throws `PdfExtractionError`; rewrap
-          // with the caller-facing hint so the `extraction_failed` message
-          // tells the client how to get the raw bytes instead.
+        } catch (err) {
+          // Only remap genuine extraction failures. Any other error (a bug,
+          // an unexpected throw) must propagate unchanged so it is NOT
+          // mislabelled `extraction_failed`.
+          if (!(err instanceof PdfExtractionError)) throw err;
+          // Preserve the original parse-cause message (REST surfaces the same
+          // "failed to parse PDF: <cause>") and append the caller-facing hint
+          // so the two adapters' `extraction_failed` messages stay at parity.
           throw new PdfExtractionError(
-            `could not extract text from PDF "${args.path}"; retry with format:"binary" to fetch the raw bytes`,
+            `${err.message}; retry with format:"binary" to fetch the raw bytes`,
           );
         }
       }

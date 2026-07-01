@@ -139,7 +139,7 @@ export function mountFileRoutes(app: Hono, deps: RouteDeps): void {
         {
           error: {
             code: "unsupported_media_type",
-            message: "JSON variant is only available for Markdown files",
+            message: "JSON variant is only available for Markdown and PDF files",
             details: { path },
           },
         },
