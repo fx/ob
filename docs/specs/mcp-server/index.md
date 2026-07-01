@@ -31,14 +31,27 @@ The server MUST register exactly these tools. Argument schemas are JSON Schema; 
 | `list_vaults` | `{}` | `VaultSummary[]` | `GET /v1/vaults` |
 | `vault_status` | `{ vault: string }` | `VaultSummary` | `GET /v1/vaults/:slug` |
 | `list_files` | `{ vault, prefix?, limit?, cursor? }` | `{ items: FileEntry[], nextCursor }` | `GET /v1/vaults/:slug/files` |
-| `read_file` | `{ vault, path }` | `{ path, contentType, content, encoding, frontmatter?, mtimeMs, size, sha256 }` where `encoding` is `"utf-8"` for text and `"base64"` for binary | `GET /v1/vaults/:slug/files/*path` |
+| `read_file` | `{ vault, path, format? }` — `format` is `"text"` (default) or `"binary"` | `{ path, contentType, content, encoding, frontmatter?, pdf?, mtimeMs, size, sha256 }` where `encoding` is `"utf-8"` for text files and extracted-PDF reads, `"base64"` for binary | `GET /v1/vaults/:slug/files/*path` |
 | `write_file` | `{ vault, path, content, encoding?, contentType?, frontmatter? }` — `encoding` defaults to `"utf-8"`; `frontmatter` is only valid when path is Markdown | `{ path, contentType, mtimeMs, size, sha256, created, indexed }` | `PUT /v1/vaults/:slug/files/*path` |
 | `patch_file` | `{ vault, path, edits: [{ old, new, replaceAll? }] }` — text files only | `{ path, contentType, mtimeMs, size, sha256, indexed, edits: number }` | `PATCH /v1/vaults/:slug/files/*path` |
 | `append_file` | `{ vault, path, content }` — text files only | `{ path, contentType, mtimeMs, size, sha256, indexed }` | `POST /v1/vaults/:slug/files/*path:append` |
 | `delete_file` | `{ vault, path }` | `{ deleted: boolean }` | `DELETE /v1/vaults/:slug/files/*path` |
+| `list_folders` | `{ vault, prefix?, limit?, cursor? }` | `{ items: FolderEntry[], nextCursor }` where `FolderEntry = { path, mtimeMs }` | `GET /v1/vaults/:slug/folders` |
+| `create_folder` | `{ vault, path }` — idempotent (mkdir -p) | `{ path, mtimeMs, created }` | `PUT /v1/vaults/:slug/folders/*path` |
+| `delete_folder` | `{ vault, path, recursive? }` — default `recursive: false` refuses non-empty folders | `{ deleted: boolean }` (always `true` on success; the 404-on-missing semantic preserves the field for type parity with `delete_file`) | `DELETE /v1/vaults/:slug/folders/*path` |
 | `search` | `{ vault, query, limit?, filter?, mode?, threshold?, mmrLambda?, maxPerPath? }` | `{ hits: SearchHit[] }` | `POST /v1/vaults/:slug/search` |
 
+`read_file` behavior by file type and `format` (extraction semantics — page markers, whitespace normalization, `pdf` metadata object, `sha256`/`size` meaning — are defined once in [Change 0013](../../changes/0013-pdf-text-extraction.md) and the shared core; both adapters MUST reuse them):
+
+- `format: "text"` (default) — text files (per `isTextMimeType`) return `encoding: "utf-8"` with `frontmatter` parsed for Markdown, unchanged from before. **PDFs MUST return the extracted plain-text/Markdown content** (`encoding: "utf-8"`, `contentType: "application/pdf"`) plus `pdf: { pages, hasTextLayer }`. A scanned/image-only PDF is a success with `content: ""` and `pdf.hasTextLayer: false`, NOT an error. A corrupt or password-protected PDF MUST yield `isError: true` with `code: "extraction_failed"` and a message directing the caller to `format: "binary"`. Other binaries (images, unknown types) return base64 as before.
+- `format: "binary"` — verbatim file bytes base64-encoded for ANY file type (including Markdown and PDFs); no frontmatter parsing, no extraction.
+- `size` and `sha256` MUST always describe the on-disk file bytes, never the extracted text.
+
+`read_file`'s tool description MUST state that PDFs return extracted text by default and that `format: "binary"` returns the verbatim base64 bytes.
+
 `patch_file`'s tool description MUST tell the agent exactly when to prefer it over `write_file`: "Use `patch_file` whenever you would otherwise re-send the entire file with small changes. Each `old` must appear exactly once in the file, or pass `replaceAll: true`. Edits apply in order and the patch is atomic — any failed edit aborts the whole call." `append_file`'s description MUST direct callers to use it for daily-note / log / capture flows where no existing context is needed.
+
+`list_folders`'s description MUST state that it complements `list_files` and is the only way to see folders that contain no files (e.g. an empty leaf like `social-graphs/people/peter-thiel/`). `create_folder`'s description MUST state that it is idempotent (`mkdir -p` semantics) and that creating a folder whose path already exists as a file returns `invalid_path`. `delete_folder`'s description MUST state that the default refuses non-empty folders with `folder_not_empty` and that `recursive: true` is required to opt into recursive removal.
 
 `search` MUST document in its tool description that it ranks Markdown content only; binary files are not embedded in v1. The description MUST also state: default `mode: "hybrid"` blends vector and full-text retrieval and is the right choice for almost every query; pass `mode: "vector"` only for pure-semantics evaluation; pass `mode: "fts"` only for exact-phrase / proper-noun queries where you've confirmed semantics aren't needed. The other knobs (`threshold`, `mmrLambda`, `maxPerPath`) are tuning levers; the defaults are good.
 
@@ -60,6 +73,28 @@ The server MUST register exactly these tools. Argument schemas are JSON Schema; 
 - **THEN** the response `encoding` is `"base64"`
 - **AND** decoding `content` yields the original PNG bytes
 - **AND** `contentType` is `"image/png"`
+
+#### Scenario: Read a PDF returns extracted text by default
+
+- **GIVEN** vault `v` contains `papers/attention.pdf` with a text layer
+- **WHEN** the client invokes `read_file` with `{ vault: "v", path: "papers/attention.pdf" }`
+- **THEN** the response is not an error and `encoding` is `"utf-8"`
+- **AND** `content` is the extracted text with `<!-- page N -->` markers between pages
+- **AND** `contentType` is `"application/pdf"` and `pdf.hasTextLayer` is `true`
+
+#### Scenario: Explicitly request PDF binary
+
+- **GIVEN** vault `v` contains `papers/attention.pdf`
+- **WHEN** the client invokes `read_file` with `{ vault: "v", path: "papers/attention.pdf", format: "binary" }`
+- **THEN** the response `encoding` is `"base64"`
+- **AND** decoding `content` yields the original PDF bytes
+
+#### Scenario: Scanned PDF signals missing text layer
+
+- **GIVEN** vault `v` contains `scans/receipt.pdf` containing only page images
+- **WHEN** the client invokes `read_file` with default `format`
+- **THEN** the response is not an error
+- **AND** `content` is `""` and `pdf.hasTextLayer` is `false`
 
 #### Scenario: Patch ambiguous edit reported per-edit
 
@@ -121,14 +156,18 @@ src/mcp/
 ```ts
 // src/mcp/tools/read_file.ts
 import { z } from "zod";
-const Input = z.object({ vault: z.string().min(1), path: z.string().min(1) });
+const Input = z.object({
+  vault: z.string().min(1),
+  path: z.string().min(1),
+  format: z.enum(["text", "binary"]).default("text"),
+});
 export const readFile = (deps: Deps) => ({
   name: "read_file",
-  description: "Read any file from a vault. Returns utf-8 text for Markdown and other text files; base64 for binaries.",
+  description: "Read any file from a vault. Returns utf-8 text for Markdown and other text files, extracted text for PDFs, and base64 for other binaries. Pass format: \"binary\" for verbatim base64 bytes of any file.",
   inputSchema: zodToJsonSchema(Input),
   handler: async (raw: unknown) => {
     const args = Input.parse(raw);
-    const result = await deps.files.read(args.vault, args.path);
+    const result = await deps.files.read(args.vault, args.path, { format: args.format });
     return ok(result);
   },
 });
@@ -163,3 +202,5 @@ All tool handlers MUST call into the same internal service modules used by REST 
 | 2026-05-03 | Initial spec created | — |
 | 2026-05-03 | `list_vaults` output flattened to bare `VaultSummary[]` for REST parity | 0005 |
 | 2026-05-03 | `search` tool input gains `mode`, `threshold`, `mmrLambda`, `maxPerPath` knobs (mirroring REST) | [Change 0008](../../changes/0008-search-relevance.md) |
+| 2026-05-25 | Added `list_folders` / `create_folder` / `delete_folder` tools mirroring the new REST `/v1/vaults/:slug/folders` surface. Required so empty folders (invisible to `list_files`) are reachable. | [Change 0012](../../changes/0012-folder-operations.md) |
+| 2026-07-01 | `read_file` gains `format?: "text" \| "binary"` (default `"text"`): PDFs now return extracted text with `pdf: { pages, hasTextLayer }` metadata by default; `format: "binary"` returns verbatim base64 for any file. New error code `extraction_failed` for unparseable PDFs. | [Change 0013](../../changes/0013-pdf-text-extraction.md) |

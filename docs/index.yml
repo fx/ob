@@ -101,3 +101,17 @@ changes:
     spec: obsidian-sync
     status: complete
     depends_on: ["0002"]
+  - id: "0012"
+    name: folder-operations
+    path: changes/0012-folder-operations.md
+    description: list_folders / create_folder / delete_folder on REST and MCP so empty folders (invisible to list_files) become reachable; new folder_not_empty error code.
+    spec: rest-api
+    status: draft
+    depends_on: ["0004", "0005"]
+  - id: "0013"
+    name: pdf-text-extraction
+    path: changes/0013-pdf-text-extraction.md
+    description: read_file and the REST JSON read variant return extracted text (via unpdf) for PDFs by default, with format:"binary" / plain GET for verbatim bytes; new extraction_failed error code.
+    spec: mcp-server
+    status: draft
+    depends_on: ["0004", "0005"]

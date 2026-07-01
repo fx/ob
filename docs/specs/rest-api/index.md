@@ -48,14 +48,29 @@ For all routes below, `:slug` is the vault slug and `*path` is the file path ins
 - Lists files. Query params: `prefix` (string, MUST match path prefix), `limit` (int, default 100, max 1000), `cursor` (opaque string).
 - MUST return `200 { items: [{ path, mtimeMs, size, sha256, contentType }], nextCursor: string | null }` where `contentType` is the detected MIME type by extension.
 - MUST stream from the on-disk vault directory and MUST include all file types (not just Markdown).
-- MUST omit any path containing a `/.obsidian/` or `/.trash/` segment, and any dotfile.
+- MUST omit any path containing a `/.obsidian/` or `/.trash/` segment, any dotfile, and any symlink (symlinks are detected by `Dirent` type and never followed).
 
 #### `GET /v1/vaults/:slug/files/*path`
 
 - Returns the raw file bytes.
-- Response `Content-Type` MUST be the detected MIME type by extension (`text/markdown; charset=utf-8` for `.md`/`.markdown`, `image/png` for `.png`, `application/pdf` for `.pdf`, etc.); fallback `application/octet-stream`.
-- If the file is `.md`/`.markdown` AND the request sends `Accept: application/json`, the response MUST be `{ path, content, frontmatter, mtimeMs, size, sha256 }` with `frontmatter` parsed. For non-Markdown files the JSON variant MUST return `406 Not Acceptable`.
+- For the raw-bytes (non-JSON) variant, the response `Content-Type` header MUST be the detected MIME type by extension (`text/markdown; charset=utf-8` for `.md`/`.markdown`, `image/png` for `.png`, `application/pdf` for `.pdf`, etc.); fallback `application/octet-stream`. The JSON variants below respond with `Content-Type: application/json`; the original file's detected MIME type appears in the body's `contentType` field where the shape includes one.
+- If the file is `.md`/`.markdown` AND the request sends `Accept: application/json`, the response MUST be `{ path, content, frontmatter, mtimeMs, size, sha256 }` with `frontmatter` parsed.
+- If the file is `.pdf` AND the request sends `Accept: application/json`, the response MUST be `200 { path, content, contentType, pdf: { pages, hasTextLayer }, mtimeMs, size, sha256 }` where `content` is the extracted plain-text/Markdown content (page-marker and normalization semantics defined in [Change 0013](../../changes/0013-pdf-text-extraction.md); shared with MCP `read_file`). No `frontmatter` field. A scanned/image-only PDF MUST succeed with `content: ""` and `pdf.hasTextLayer: false`. A corrupt or password-protected PDF MUST return `422` with `error.code = "extraction_failed"`. `size` and `sha256` MUST describe the on-disk bytes, not the extracted text. The plain (non-JSON) GET is unaffected and keeps serving verbatim bytes.
+- For all other non-Markdown files the JSON variant MUST return `406 Not Acceptable`.
 - `404` if the file does not exist; `400` if the path is invalid (see Path validation).
+
+#### Scenario: JSON read of a PDF returns extracted text
+
+- **GIVEN** vault `v` contains `papers/attention.pdf` with a text layer
+- **WHEN** the client `GET`s `/v1/vaults/v/files/papers/attention.pdf` with `Accept: application/json`
+- **THEN** the response is `200` JSON with `content` = extracted text and `pdf.pages` ≥ 1
+- **AND** a plain `GET` of the same URL still returns the verbatim bytes with `Content-Type: application/pdf`
+
+#### Scenario: Unparseable PDF fails closed
+
+- **GIVEN** vault `v` contains a password-protected `secret.pdf`
+- **WHEN** the client `GET`s it with `Accept: application/json`
+- **THEN** the response is `422` with `error.code = "extraction_failed"`
 
 #### `PUT /v1/vaults/:slug/files/*path`
 
@@ -132,6 +147,65 @@ For all routes below, `:slug` is the vault slug and `*path` is the file path ins
 - **THEN** the response is `200`
 - **AND** the file body is `# Today\n- 14:30 had coffee\n`
 
+### Folder CRUD
+
+Folders are a separate surface from files because `GET /v1/vaults/:slug/files` only emits `Dirent.isFile()` entries: a folder with no descendant files is invisible to the file API. Obsidian Sync preserves empty folders (verified against a live vault; no upstream toggle exists per [Sync settings](https://obsidian.md/help/sync/settings)), so the API MUST expose them too. `FolderEntry = { path, mtimeMs }` — folders carry no size, sha256, or contentType.
+
+#### `GET /v1/vaults/:slug/folders`
+
+- Lists folders. Query params: `prefix` (string, MUST match path prefix), `limit` (int, default 100, max 1000), `cursor` (opaque string) — same shape and semantics as the file list endpoint.
+- MUST return `200 { items: [{ path, mtimeMs }], nextCursor: string | null }` where `path` is the vault-relative folder path with no trailing slash.
+- MUST walk the on-disk vault directory and emit directory entries in pre-order lexicographic walk (parent before children) so cursor resumption advances into subtrees predictably.
+- MUST omit any folder containing a `/.obsidian/` or `/.trash/` segment, any dotfolder, and any symlink (same omission rules as `GET /v1/vaults/:slug/files`).
+- MUST NOT emit the vault root itself.
+
+#### `PUT /v1/vaults/:slug/folders/*path`
+
+- Creates the folder (and any missing ancestors); `mkdir -p` semantics.
+- Request body MUST be ignored (folders carry no content). Senders SHOULD send `Content-Length: 0`.
+- Response MUST be `200 { path, mtimeMs, created: boolean }`. `created` is `true` on first creation and `false` on idempotent no-op against an existing folder.
+- If the path already exists as a file (not a directory), the response MUST be `400` with `error.code = "invalid_path"`.
+
+#### `DELETE /v1/vaults/:slug/folders/*path`
+
+- Deletes the folder.
+- Optional query string `?recursive=true` opts into recursive removal of all descendants.
+- Without `recursive=true`, a non-empty folder MUST yield `409` with `error.code = "folder_not_empty"`. The folder MUST remain unchanged.
+- With `recursive=true`, the handler MUST collect every Markdown descendant first, call `await indexer.drop(slug, mdPath)` for each (best-effort; failures logged), then `fs.rm(abs, { recursive: true, force: false })`.
+- If the path does not exist, MUST return `404` with `error.code = "not_found"`.
+- If the path exists but is a file, MUST return `400` with `error.code = "invalid_path"` — callers should use `DELETE /files/*path` for files.
+- On success: `204` (no body).
+
+#### Scenario: Empty-folder visibility
+
+- **GIVEN** vault `v` containing only the empty folder `notes/scratchpad/`
+- **WHEN** the client calls `GET /v1/vaults/v/folders`
+- **AND** then calls `GET /v1/vaults/v/files`
+- **THEN** the folders response includes `notes/scratchpad`
+- **AND** the files response is `{ items: [], nextCursor: null }`
+
+#### Scenario: Idempotent create
+
+- **GIVEN** vault `v` with no `archive/2026/` folder
+- **WHEN** the client `PUT`s `/v1/vaults/v/folders/archive/2026`
+- **THEN** the response is `200` with `created: true`
+- **AND** a replay of the same `PUT` returns `200` with `created: false` and the same `mtimeMs`
+
+#### Scenario: Non-empty refused without recursive flag
+
+- **GIVEN** vault `v` containing `social-graphs/people/peter-thiel/intro.md`
+- **WHEN** the client `DELETE`s `/v1/vaults/v/folders/social-graphs/people/peter-thiel`
+- **THEN** the response is `409` with `error.code = "folder_not_empty"`
+- **AND** `social-graphs/people/peter-thiel/intro.md` is unchanged
+
+#### Scenario: Recursive delete drops Markdown index entries
+
+- **GIVEN** vault `v` containing `archive/2024/jan.md` and `archive/2024/cover.png`
+- **WHEN** the client `DELETE`s `/v1/vaults/v/folders/archive/2024?recursive=true`
+- **THEN** the response is `204`
+- **AND** the indexer recorded exactly one `drop` call for `archive/2024/jan.md` (zero for the binary)
+- **AND** the folder `archive/2024/` no longer exists on disk
+
 ### Path validation
 
 - A path MUST NOT contain `..` segments, MUST NOT start with `/`, MUST NOT contain a NUL byte, MUST NOT exceed 1024 bytes.
@@ -187,7 +261,7 @@ For all routes below, `:slug` is the vault slug and `*path` is the file path ins
 ### Error model
 
 - Every error response MUST be JSON `{ error: { code: string, message: string, details?: unknown } }`.
-- `code` MUST come from a closed set: `vault_not_found`, `not_found`, `invalid_input`, `invalid_path`, `invalid_body`, `invalid_query`, `unsupported_media_type`, `patch_no_match`, `patch_ambiguous`, `embedder_failed`, `internal`. `invalid_input` is the canonical code for any Zod schema-validation failure and is shared with the MCP adapter; `invalid_body` and `invalid_query` are HTTP-specific codes for malformed request envelopes (e.g. unparseable JSON body or unknown query string).
+- `code` MUST come from a closed set: `vault_not_found`, `not_found`, `invalid_input`, `invalid_path`, `invalid_body`, `invalid_query`, `unsupported_media_type`, `patch_no_match`, `patch_ambiguous`, `folder_not_empty`, `extraction_failed`, `embedder_failed`, `internal`. `invalid_input` is the canonical code for any Zod schema-validation failure and is shared with the MCP adapter; `invalid_body` and `invalid_query` are HTTP-specific codes for malformed request envelopes (e.g. unparseable JSON body or unknown query string); `folder_not_empty` is the 409 response from `DELETE /v1/vaults/:slug/folders/*path` without `?recursive=true` against a non-empty folder; `extraction_failed` is the 422 response when a PDF requested as text cannot be parsed (corrupt or password-protected).
 - 5xx responses MUST log `error` and `requestId`. The response MUST include `requestId` in `details`.
 
 ### Request logging
@@ -254,3 +328,5 @@ function safeJoin(root: string, rel: string): string {
 |------|--------|----------|
 | 2026-05-03 | Initial spec created | — |
 | 2026-05-03 | Search request body gains `mode`, `threshold`, `mmrLambda`, `maxPerPath` knobs. Default `mode` is `"hybrid"` — retrieval behavior changes from pre-0008 (was vector-only); the response *shape* is unchanged. | [Change 0008](../../changes/0008-search-relevance.md) |
+| 2026-05-25 | Added Folder CRUD section: `GET /v1/vaults/:slug/folders` (list) plus `PUT` and `DELETE` on `/v1/vaults/:slug/folders/*path` (create / delete). Required because `GET /v1/vaults/:slug/files` only emits files, hiding empty folders. New error code `folder_not_empty` (409) added to the closed set. | [Change 0012](../../changes/0012-folder-operations.md) |
+| 2026-07-01 | JSON read variant (`Accept: application/json`) now accepts `.pdf` and returns extracted text with `pdf: { pages, hasTextLayer }` metadata; other non-Markdown files still get `406`. New error code `extraction_failed` (422) added to the closed set. Plain GET byte semantics unchanged. | [Change 0013](../../changes/0013-pdf-text-extraction.md) |
