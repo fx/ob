@@ -5,7 +5,7 @@
 `read_file` (MCP) and the JSON read variant (REST) return extracted plain-text/Markdown content for PDFs by default, instead of the raw base64/binary payload. Callers can still request the verbatim bytes explicitly. Motivated by real agent failures: a base64-encoded PDF blew past the MCP client's token ceiling (~224k characters for a modest PDF) while carrying zero readable signal for the model.
 
 **Spec:** [MCP Server](../specs/mcp-server/) (and [REST API](../specs/rest-api/) for the mirrored surface)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0004, 0005
 
 ## Motivation
@@ -135,9 +135,9 @@ Skipping or weakening any of these rules to land the PR MUST be treated as a bug
 
 ## Tasks
 
-- [ ] Core extraction + contentType helper — add `unpdf` (exact pin); implement `src/vault/pdfText.ts` (`extractPdfMarkdown`, page joining, whitespace normalization, `PdfExtractionError`) and `isPdfPath()` in `src/vault/contentType.ts`; create `test/fixtures/pdf/{text,scanned,broken}.pdf`; unit tests in `test/vault/pdfText.test.ts` covering text-layer, scanned, corrupt, and page-marker format (100% branch)
-- [ ] Adapters + error code — add `format` to MCP `read_file` (schema, branching, updated tool description) with tests in `test/mcp/tools/read_file.test.ts`; extend REST JSON-variant branch in `src/http/routes/files.ts` for PDFs (200 JSON, 422 `extraction_failed`, 406 preserved for other binaries) with tests in `test/http/routes.test.ts`; register `extraction_failed` in the shared error model
-- [ ] Parity + docs — extend `test/parity/read_file.test.ts` with text-format PDF parity, binary-format byte parity, and `extraction_failed` code parity; verify coverage stays 100%; flip this change to complete and update spec changelogs if wording drifted
+- [x] Core extraction + contentType helper — add `unpdf` (exact pin); implement `src/vault/pdfText.ts` (`extractPdfMarkdown`, page joining, whitespace normalization, `PdfExtractionError`) and `isPdfPath()` in `src/vault/contentType.ts`; create `test/fixtures/pdf/{text,scanned,broken}.pdf`; unit tests in `test/vault/pdfText.test.ts` covering text-layer, scanned, corrupt, and page-marker format (100% branch)
+- [x] Adapters + error code — add `format` to MCP `read_file` (schema, branching, updated tool description) with tests in `test/mcp/tools/read_file.test.ts`; extend REST JSON-variant branch in `src/http/routes/files.ts` for PDFs (200 JSON, 422 `extraction_failed`, 406 preserved for other binaries) with tests in `test/http/routes.test.ts`; register `extraction_failed` in the shared error model
+- [x] Parity + docs — extend `test/parity/read_file.test.ts` with text-format PDF parity, binary-format byte parity, and `extraction_failed` code parity; verify coverage stays 100%; flip this change to complete and update spec changelogs if wording drifted
 
 ## Open Questions
 
