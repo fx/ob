@@ -73,6 +73,7 @@ test("read_file PDF binary parity (MCP format:binary vs REST plain GET)", async 
   writeFileSync(join(fx.vaultRoot, "paper.pdf"), bytes);
   const mcp = await callMcp(fx, "read_file", { vault: "v", path: "paper.pdf", format: "binary" });
   const rest = await callRestBytes(fx, "/v1/vaults/v/files/paper.pdf");
+  expect(mcp.isError).toBe(false);
   expect(rest.status).toBe(200);
   const mcpBody = mcp.body as { encoding: string; content: string };
   expect(mcpBody.encoding).toBe("base64");

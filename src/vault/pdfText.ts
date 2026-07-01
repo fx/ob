@@ -73,7 +73,9 @@ export async function extractPdfMarkdown(bytes: Uint8Array): Promise<PdfExtracti
     pages = result.totalPages;
     pageTexts = result.text;
   } catch (e) {
-    throw new PdfExtractionError(`failed to parse PDF: ${String(e)}`);
+    const wrapped = new PdfExtractionError(`failed to parse PDF: ${String(e)}`);
+    wrapped.cause = e;
+    throw wrapped;
   }
   const normalized = pageTexts.map(normalizePage);
   const hasTextLayer = normalized.some((page) => page.length > 0);

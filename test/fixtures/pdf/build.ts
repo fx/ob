@@ -35,7 +35,8 @@ function buildPdf(objects: string[]): Uint8Array {
 
 function contentStream(text: string): string {
   const stream = `BT /F1 24 Tf 72 700 Td (${text}) Tj ET`;
-  return `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
+  const length = new TextEncoder().encode(stream).length;
+  return `<< /Length ${length} >>\nstream\n${stream}\nendstream`;
 }
 
 const textPdf = buildPdf([
