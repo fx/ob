@@ -34,8 +34,8 @@ ARG OBSIDIAN_HEADLESS_VERSION=0.0.8
 # is the desired forcing function. Re-discover with:
 #   docker run --rm oven/bun:${BUN_VERSION} bash -c \
 #     'apt-get update -qq && apt-cache policy tini curl ca-certificates'
-ARG TINI_VERSION=0.19.0-3+b6
-ARG CURL_VERSION=8.14.1-2+deb13u2
+ARG TINI_VERSION=0.19.0-3+b7
+ARG CURL_VERSION=8.14.1-2+deb13u3
 ARG CA_CERTIFICATES_VERSION=20250419
 
 # Git revision baked into the image's OCI labels. CI sets this to the 7-char
