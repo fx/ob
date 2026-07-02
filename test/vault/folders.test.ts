@@ -90,12 +90,12 @@ describe("listFolders", () => {
     expect(result.items.map((i) => i.path)).toEqual(["real"]);
   });
 
-  test("skips a directory that vanishes between readdir and stat", async () => {
+  test("skips a directory that vanishes between readdir and lstat", async () => {
     const fx = makeVaultFixture();
     await fs.mkdir(join(fx.root, "a"), { recursive: true });
     await fs.mkdir(join(fx.root, "ghost"), { recursive: true });
     await fs.mkdir(join(fx.root, "z"), { recursive: true });
-    const realStat = fs.stat;
+    const realLstat = fs.lstat;
     const ghostAbs = join(fx.root, "ghost");
     const stub = ((p: string, ...rest: unknown[]) => {
       if (p === ghostAbs) {
@@ -103,32 +103,60 @@ describe("listFolders", () => {
         err.code = "ENOENT";
         throw err;
       }
-      // biome-ignore lint/suspicious/noExplicitAny: forwarding rest args to the original fs.stat overloads.
-      return realStat(p as any, ...(rest as []));
-    }) as typeof fs.stat;
-    (fs as unknown as { stat: typeof fs.stat }).stat = stub;
+      // biome-ignore lint/suspicious/noExplicitAny: forwarding rest args to the original fs.lstat overloads.
+      return realLstat(p as any, ...(rest as []));
+    }) as typeof fs.lstat;
+    (fs as unknown as { lstat: typeof fs.lstat }).lstat = stub;
     try {
       const result = await listFolders(fx.deps, fx.slug);
       expect(result.items.map((i) => i.path)).toEqual(["a", "z"]);
     } finally {
-      (fs as unknown as { stat: typeof fs.stat }).stat = realStat;
+      (fs as unknown as { lstat: typeof fs.lstat }).lstat = realLstat;
     }
   });
 
-  test("non-ENOENT stat error during listing propagates", async () => {
+  test("skips an entry swapped for a non-directory between readdir and lstat", async () => {
+    const fx = makeVaultFixture();
+    await fs.mkdir(join(fx.root, "a"), { recursive: true });
+    await fs.mkdir(join(fx.root, "swapped"), { recursive: true });
+    await fs.mkdir(join(fx.root, "z"), { recursive: true });
+    const realLstat = fs.lstat;
+    const swappedAbs = join(fx.root, "swapped");
+    // Simulate a TOCTOU swap: at readdir the entry was a directory, but by the
+    // time lstat runs it has been replaced with a symlink (a non-directory).
+    const stub = ((p: string, ...rest: unknown[]) => {
+      if (p === swappedAbs) {
+        return Promise.resolve({
+          isDirectory: () => false,
+          mtimeMs: 123,
+        } as unknown as import("node:fs").Stats);
+      }
+      // biome-ignore lint/suspicious/noExplicitAny: forwarding rest args to the original fs.lstat overloads.
+      return realLstat(p as any, ...(rest as []));
+    }) as typeof fs.lstat;
+    (fs as unknown as { lstat: typeof fs.lstat }).lstat = stub;
+    try {
+      const result = await listFolders(fx.deps, fx.slug);
+      expect(result.items.map((i) => i.path)).toEqual(["a", "z"]);
+    } finally {
+      (fs as unknown as { lstat: typeof fs.lstat }).lstat = realLstat;
+    }
+  });
+
+  test("non-ENOENT lstat error during listing propagates", async () => {
     const fx = makeVaultFixture();
     await fs.mkdir(join(fx.root, "boom"), { recursive: true });
-    const realStat = fs.stat;
+    const realLstat = fs.lstat;
     const stub = ((p: string, ...rest: unknown[]) => {
       if (p === join(fx.root, "boom")) throw new Error("EACCES (stubbed)");
-      // biome-ignore lint/suspicious/noExplicitAny: forwarding rest args to the original fs.stat overloads.
-      return realStat(p as any, ...(rest as []));
-    }) as typeof fs.stat;
-    (fs as unknown as { stat: typeof fs.stat }).stat = stub;
+      // biome-ignore lint/suspicious/noExplicitAny: forwarding rest args to the original fs.lstat overloads.
+      return realLstat(p as any, ...(rest as []));
+    }) as typeof fs.lstat;
+    (fs as unknown as { lstat: typeof fs.lstat }).lstat = stub;
     try {
       await expect(listFolders(fx.deps, fx.slug)).rejects.toThrow("EACCES");
     } finally {
-      (fs as unknown as { stat: typeof fs.stat }).stat = realStat;
+      (fs as unknown as { lstat: typeof fs.lstat }).lstat = realLstat;
     }
   });
 
@@ -277,6 +305,36 @@ describe("deleteFolder", () => {
     await deleteFolder(fx.deps, fx.slug, "archive/2024", { recursive: true });
     expect(fx.calls.drop).toEqual([{ slug: fx.slug, path: "archive/2024/jan.md" }]);
     expect(await folderExists(join(fx.root, "archive/2024"))).toBe(false);
+  });
+
+  test("recursive delete drops no index entries when fs.rm fails (index stays consistent)", async () => {
+    const fx = makeVaultFixture();
+    await fs.mkdir(join(fx.root, "d"), { recursive: true });
+    writeFileSync(join(fx.root, "d/n.md"), "# n");
+    const target = join(fx.root, "d");
+    const realRm = fs.rm;
+    // rm fails on the target tree; index drops happen only AFTER a successful
+    // rm, so none should be recorded and the files must remain on disk.
+    const stub = ((p: string, ...rest: unknown[]) => {
+      if (p === target) throw new Error("EACCES (stubbed)");
+      // biome-ignore lint/suspicious/noExplicitAny: forwarding rest args to the original fs.rm overloads.
+      return realRm(p as any, ...(rest as []));
+    }) as typeof fs.rm;
+    (fs as unknown as { rm: typeof fs.rm }).rm = stub;
+    let caught: unknown;
+    try {
+      await deleteFolder(fx.deps, fx.slug, "d", { recursive: true });
+    } catch (e) {
+      caught = e;
+    } finally {
+      (fs as unknown as { rm: typeof fs.rm }).rm = realRm;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain("EACCES");
+    // No drops happened (drop is strictly after a successful rm), and the tree
+    // is still present — the index and the filesystem remain in agreement.
+    expect(fx.calls.drop).toEqual([]);
+    expect(await folderExists(join(fx.root, "d/n.md"))).toBe(true);
   });
 
   test("recursive delete tolerates an indexer drop failure", async () => {

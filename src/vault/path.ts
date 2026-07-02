@@ -28,6 +28,16 @@ import { InvalidPathError, assertSafeRelativePath } from "../errors.ts";
 export { InvalidPathError } from "../errors.ts";
 
 /**
+ * Vault-relative path in POSIX (`/`-separated) form. `path.relative` yields
+ * OS-native separators (backslashes on Windows); every error envelope speaks
+ * `/`, so normalize before surfacing. A no-op on POSIX where `sep` is already
+ * `/` — `split`/`join` runs unconditionally, introducing no untestable branch.
+ */
+function toPosixRelative(absRoot: string, absPath: string): string {
+  return relative(absRoot, absPath).split(sep).join("/");
+}
+
+/**
  * Resolve `rel` against `root`, returning the absolute filesystem path.
  * Throws `InvalidPathError` for any traversal-unsafe input.
  *
@@ -95,12 +105,18 @@ export async function assertNotSymlinkEscape(absPath: string, root: string): Pro
       // doesn't leak as a 500. Report the vault-RELATIVE path (like every other
       // invalid_path error) so the envelope never exposes the absolute layout.
       if (err.code === "ENOTDIR") {
-        throw new InvalidPathError(relative(absRoot, absPath), "path traverses a non-directory");
+        throw new InvalidPathError(
+          toPosixRelative(absRoot, absPath),
+          "path traverses a non-directory",
+        );
       }
       throw e;
     }
     if (stat.isSymbolicLink()) {
-      throw new InvalidPathError(relative(absRoot, absPath), "path traverses a symbolic link");
+      throw new InvalidPathError(
+        toPosixRelative(absRoot, absPath),
+        "path traverses a symbolic link",
+      );
     }
     current = dirname(current);
   }

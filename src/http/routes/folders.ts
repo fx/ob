@@ -16,7 +16,7 @@ import type { Hono } from "hono";
 import { InvalidQueryError } from "../../errors.ts";
 import { DeleteFolderQuery, ListFoldersQuery } from "../../schemas/index.ts";
 import { createFolder, deleteFolder, listFolders } from "../../vault/folders.ts";
-import { getParam } from "./params.ts";
+import { buildListOpts, getParam } from "./params.ts";
 import type { RouteDeps } from "./types.ts";
 
 /** Mount folder routes on `app` under `/v1/vaults/:slug/folders`. */
@@ -30,12 +30,7 @@ export function mountFolderRoutes(app: Hono, deps: RouteDeps): void {
       });
     }
     const slug = getParam(c, "slug");
-    const opts: { prefix?: string; limit?: number; cursor?: string } = {
-      limit: parsed.data.limit,
-    };
-    if (parsed.data.prefix !== undefined) opts.prefix = parsed.data.prefix;
-    if (parsed.data.cursor !== undefined) opts.cursor = parsed.data.cursor;
-    const result = await listFolders(deps, slug, opts);
+    const result = await listFolders(deps, slug, buildListOpts(parsed.data));
     return c.json(result);
   });
 

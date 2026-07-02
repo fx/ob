@@ -99,9 +99,9 @@ interface CreateFolderResult {
 - If the path exists but is a file, MUST throw `InvalidPathError` naming the type mismatch — callers should use `deleteFile` for files.
 - If the folder is non-empty and `recursive !== true`, MUST throw `FolderNotEmptyError` (a new typed error with code `folder_not_empty` → HTTP 409).
 - If `recursive === true`, the implementation MUST:
-  1. Walk the folder collecting every Markdown descendant path (using the same hidden / symlink rules as `walkVault`).
-  2. Best-effort `indexer.drop` for each Markdown path, in the same try/log-and-continue pattern as `tryDrop` (`src/vault/files.ts:203-213`). A drop failure MUST NOT abort the delete; the chokidar `unlink` event will reconcile.
-  3. `fs.rm(abs, { recursive: true, force: false })` — `force: false` so a permission error or unexpected race surfaces rather than being swallowed.
+  1. Walk the folder collecting every Markdown descendant path (using the same hidden / symlink rules as `walkVault`) into a list — WITHOUT dropping any index entry yet.
+  2. `fs.rm(abs, { recursive: true, force: false })` — `force: false` so a permission error or unexpected race surfaces rather than being swallowed. This runs BEFORE any index drop, so if `fs.rm` throws, no index entries have been dropped and the index stays consistent with the still-present files.
+  3. Only AFTER `fs.rm` succeeds, best-effort `indexer.drop` for each collected Markdown path, in the same try/log-and-continue pattern as `tryDrop` (`src/vault/files.ts:203-213`). A drop failure MUST NOT abort the delete; the chokidar `unlink` event will reconcile.
 - MUST NOT delete anything outside `v.root`. `safeJoin` already guarantees this; the test suite MUST assert it explicitly.
 
 ### REST routes
@@ -253,7 +253,7 @@ The walk yields a parent *before* its children so the cursor pagination behaves 
 
 `createFolder` is a thin wrapper over `fs.mkdir(abs, { recursive: true })` plus an `existed`/`stat` probe to compute `created`. The `existed-but-is-a-file` branch issues `fs.lstat` and translates `!stat.isDirectory()` into `InvalidPathError`.
 
-`deleteFolder` performs the Markdown enumeration via `walkVault` (the existing file-walker, not the folder one) under the target path, calls `tryDrop` per Markdown path with the same try/log-and-continue contract as `deleteFile`, then `fs.rm(abs, { recursive: true, force: false })`. The pre-check for "is a file" uses `fs.lstat` and rejects with `InvalidPathError` to keep the surface symmetric with `createFolder`.
+`deleteFolder` performs the Markdown enumeration via `walkVault` (the existing file-walker, not the folder one) under the target path, collecting the descendant paths into a list, then `fs.rm(abs, { recursive: true, force: false })`, and only after that succeeds calls `tryDrop` per collected Markdown path with the same try/log-and-continue contract as `deleteFile`. Dropping after (not before) the removal means a failed `fs.rm` leaves the index consistent — the files are still on disk, so their entries must remain — while any drop that slips through is still reconciled by the chokidar `unlink` event. The pre-check for "is a file" uses `fs.lstat` and rejects with `InvalidPathError` to keep the surface symmetric with `createFolder`.
 
 ### Decisions
 
@@ -277,9 +277,9 @@ The walk yields a parent *before* its children so the cursor pagination behaves 
 - **Decision:** `list_folders` does NOT emit the vault root.
   - **Why:** The root is implicit — every consumer already addresses it as `vault: <slug>` with no path. Emitting an empty-string path would force every client to special-case the head of the list.
   - **Alternatives considered:** Emit `""` for the root. Rejected on the special-case grounds above.
-- **Decision:** `delete_folder { recursive: true }` returns as soon as `fs.rm` resolves, not after chokidar reconciles.
-  - **Why:** The pre-delete Markdown drop loop covers the index. Any drop that slips through is reconciled by the chokidar `unlink` event later — exactly the same eventual-consistency story `deleteFile` already relies on. Blocking on chokidar would couple API latency to filesystem-event timing for no observable correctness gain.
-  - **Alternatives considered:** Await a chokidar-reconciled signal before returning. Rejected — adds latency and a new synchronization primitive for zero behavioral difference.
+- **Decision:** `delete_folder { recursive: true }` collects Markdown descendants, removes the tree, and drops index entries only AFTER `fs.rm` succeeds — then returns as soon as those drops resolve, not after chokidar reconciles.
+  - **Why:** Ordering the index drops *after* a successful `fs.rm` keeps the index consistent on failure: if `fs.rm` throws (permission error, race), no entries have been dropped, so the index still matches the files that remain on disk. On success, the post-`rm` drop loop covers the index, and any drop that slips through is reconciled by the chokidar `unlink` event later — exactly the same eventual-consistency story `deleteFile` already relies on. Blocking on chokidar would couple API latency to filesystem-event timing for no observable correctness gain. (Dropping *before* `fs.rm`, the earlier approach, had the opposite failure mode: a failed `rm` would leave files present but their index entries gone.)
+  - **Alternatives considered:** Drop before `fs.rm` — rejected because a failed removal then leaves the index inconsistent (entries gone, files present) until chokidar happens to re-reconcile. Await a chokidar-reconciled signal before returning — rejected, adds latency and a new synchronization primitive for zero behavioral difference.
 
 ### Non-Goals
 

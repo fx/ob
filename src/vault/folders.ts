@@ -12,10 +12,13 @@
  * MCP adapters call these unchanged.
  *
  * Folders are NOT indexed — the indexer is document-oriented. `createFolder`
- * never touches it. `deleteFolder` with `recursive: true` best-effort drops
- * the index entry of every Markdown descendant (same log-and-continue contract
- * as `deleteFile`) before removing the tree; any drop that slips through is
- * reconciled by the chokidar `unlink` event later.
+ * never touches it. `deleteFolder` with `recursive: true` collects every
+ * Markdown descendant, removes the tree, and only then best-effort drops each
+ * collected index entry (same log-and-continue contract as `deleteFile`).
+ * Dropping AFTER a successful `fs.rm` keeps the index consistent when the
+ * removal fails — the files are still on disk, so their entries must stay too;
+ * any drop that still slips through is reconciled by the chokidar `unlink`
+ * event later.
  */
 
 import { promises as fs } from "node:fs";
@@ -118,14 +121,20 @@ export async function listFolders(
     const abs = join(v.root, rel);
     // The vault is live (chokidar may race the listing with `ob sync`). If a
     // directory vanishes between readdir and stat, skip it — mirrors
-    // listFiles's ENOENT handling.
+    // listFiles's ENOENT handling. Use `lstat`, NOT `stat`: `stat` follows
+    // symlinks, so a dir entry swapped for a symlink between readdir and here
+    // (TOCTOU) would leak metadata about a target outside the vault. `lstat`
+    // describes the entry itself.
     let stat: import("node:fs").Stats;
     try {
-      stat = await fs.stat(abs);
+      stat = await fs.lstat(abs);
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
       throw e;
     }
+    // If the entry changed after readdir (now a symlink or a file), skip it —
+    // only real directories belong in the folder listing.
+    if (!stat.isDirectory()) continue;
     items.push({ path: rel, mtimeMs: stat.mtimeMs });
     lastPath = rel;
   }
@@ -209,14 +218,23 @@ export async function deleteFolder(
     }
     return;
   }
-  // Recursive delete: drop the index entry of every Markdown descendant FIRST
-  // (best-effort, log-and-continue) so the index is in the right state once the
-  // tree is gone. `walkVault` under `path` yields vault-relative file paths.
+  // Recursive delete. First COLLECT the Markdown descendants (do not drop yet)
+  // so the enumeration reflects the tree as it exists on disk. `walkVault`
+  // under `path` yields vault-relative file paths.
+  const markdownDescendants: string[] = [];
   for await (const rel2 of walkVault(v.root, rel)) {
-    if (isMarkdownPath(rel2)) await tryDrop(deps, slug, rel2);
+    if (isMarkdownPath(rel2)) markdownDescendants.push(rel2);
   }
-  // `force: false` so a permission error or unexpected race surfaces rather
-  // than being swallowed. `safeJoin` already guarantees `abs` is inside the
-  // vault root, so this can never remove anything outside it.
+  // Remove the tree BEFORE touching the index. `force: false` so a permission
+  // error or unexpected race surfaces rather than being swallowed. `safeJoin`
+  // already guarantees `abs` is inside the vault root, so this can never remove
+  // anything outside it. If this throws, no index entries have been dropped, so
+  // the index stays consistent with the (still-present) files.
   await fs.rm(abs, { recursive: true, force: false });
+  // Only AFTER the tree is gone, best-effort drop each collected Markdown entry
+  // (log-and-continue, same contract as `deleteFile`). Any drop that slips
+  // through is reconciled by the chokidar `unlink` event later.
+  for (const rel2 of markdownDescendants) {
+    await tryDrop(deps, slug, rel2);
+  }
 }
