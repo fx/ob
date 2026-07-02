@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { promises as fs } from "node:fs";
 import { join, resolve } from "node:path";
 import { InvalidPathError } from "../../src/errors.ts";
-import { safeJoin } from "../../src/vault/path.ts";
+import { assertNotSymlinkEscape, safeJoin } from "../../src/vault/path.ts";
 
 describe("safeJoin", () => {
   const root = resolve("/tmp/ob-test-root");
@@ -33,8 +34,13 @@ describe("safeJoin", () => {
     expect(() => safeJoin(root, ".DS_Store")).toThrow(InvalidPathError);
   });
 
-  test("a `.` (current dir) input resolves to the root itself", () => {
-    expect(safeJoin(root, "./")).toBe(root);
+  test("rejects a path that resolves to the vault root itself", () => {
+    // Dot-only paths survive `assertSafeRelativePath` but resolve to the root;
+    // the root is never a valid target (it would let a recursive delete wipe
+    // the whole vault), so `safeJoin` rejects it.
+    expect(() => safeJoin(root, "./")).toThrow(InvalidPathError);
+    expect(() => safeJoin(root, ".")).toThrow(InvalidPathError);
+    expect(() => safeJoin(root, "./.")).toThrow(InvalidPathError);
   });
 
   test("rejects the empty string", () => {
@@ -46,5 +52,24 @@ describe("safeJoin", () => {
     const rel = "tmp/relative-root";
     const result = safeJoin(rel, "notes/x.md");
     expect(result).toBe(resolve(rel, "notes/x.md"));
+  });
+});
+
+describe("assertNotSymlinkEscape", () => {
+  test("propagates a non-ENOENT / non-ENOTDIR lstat error", async () => {
+    const root = resolve("/tmp/ob-ase-root");
+    const target = join(root, "child");
+    const realLstat = fs.lstat;
+    const stub = ((p: string, ...rest: unknown[]) => {
+      if (p === target) throw new Error("EACCES (stubbed)");
+      // biome-ignore lint/suspicious/noExplicitAny: forwarding rest args to the original fs.lstat overloads.
+      return realLstat(p as any, ...(rest as []));
+    }) as typeof fs.lstat;
+    (fs as unknown as { lstat: typeof fs.lstat }).lstat = stub;
+    try {
+      await expect(assertNotSymlinkEscape(target, root)).rejects.toThrow("EACCES");
+    } finally {
+      (fs as unknown as { lstat: typeof fs.lstat }).lstat = realLstat;
+    }
   });
 });

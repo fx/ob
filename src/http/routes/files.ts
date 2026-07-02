@@ -21,13 +21,9 @@ import {
   writeFile,
 } from "../../vault/files.ts";
 import { extractPdfMarkdown } from "../../vault/pdfText.ts";
+import { buildListOpts, getParam } from "./params.ts";
 import type { RouteDeps } from "./types.ts";
 import { zodIssuesToInvalidInput } from "./zod.ts";
-
-function getParam(c: Context, name: string): string {
-  const v = c.req.param(name);
-  return typeof v === "string" ? v : "";
-}
 
 async function readBodyBytes(c: Context): Promise<Uint8Array> {
   const buf = await c.req.arrayBuffer();
@@ -66,12 +62,7 @@ export function mountFileRoutes(app: Hono, deps: RouteDeps): void {
       });
     }
     const slug = getParam(c, "slug");
-    const opts: { prefix?: string; limit?: number; cursor?: string } = {
-      limit: parsed.data.limit,
-    };
-    if (parsed.data.prefix !== undefined) opts.prefix = parsed.data.prefix;
-    if (parsed.data.cursor !== undefined) opts.cursor = parsed.data.cursor;
-    const result = await listFiles(deps, slug, opts);
+    const result = await listFiles(deps, slug, buildListOpts(parsed.data));
     return c.json(result);
   });
 

@@ -30,6 +30,7 @@ import { mapErrorToHttp } from "./errors.ts";
 import { logMiddleware } from "./middleware/log.ts";
 import { getRequestId, requestIdMiddleware } from "./middleware/requestId.ts";
 import { mountFileRoutes } from "./routes/files.ts";
+import { mountFolderRoutes } from "./routes/folders.ts";
 import { mountSearchRoutes } from "./routes/search.ts";
 import type { RouteDeps } from "./routes/types.ts";
 import { mountVaultRoutes } from "./routes/vaults.ts";
@@ -108,6 +109,7 @@ export function buildHttpApp(deps: HttpAppDeps = {}): Hono {
     const routeDeps: RouteDeps = { ...serviceDeps, supervisor, indexer };
     mountVaultRoutes(app, routeDeps);
     mountFileRoutes(app, routeDeps);
+    mountFolderRoutes(app, routeDeps);
     mountSearchRoutes(app, routeDeps);
     // Mount BEFORE the catch-all error handler / notFound below.
     app.route("/mcp", buildMcpRoutes({ ...routeDeps, logger }));

@@ -25,5 +25,5 @@
 | 0009 | [ci-test-suite](changes/0009-ci-test-suite.md) | [architecture](specs/architecture/) | complete | 0006 |
 | 0010 | [release-and-image-publishing](changes/0010-release-and-image-publishing.md) | [architecture](specs/architecture/) | complete | 0009 |
 | 0011 | [sync-config-bootstrap](changes/0011-sync-config-bootstrap.md) | [obsidian-sync](specs/obsidian-sync/) | complete | 0002 |
-| 0012 | [folder-operations](changes/0012-folder-operations.md) | [rest-api](specs/rest-api/) | draft | 0004, 0005 |
+| 0012 | [folder-operations](changes/0012-folder-operations.md) | [rest-api](specs/rest-api/) | complete | 0004, 0005 |
 | 0013 | [pdf-text-extraction](changes/0013-pdf-text-extraction.md) | [mcp-server](specs/mcp-server/) | complete | 0004, 0005 |

@@ -5,7 +5,7 @@
 Add a sibling surface to file CRUD for folders: `list_folders`, `create_folder`, `delete_folder` on both REST (`/v1/vaults/:slug/folders/*path`) and MCP (`list_folders` / `create_folder` / `delete_folder` tools), backed by three new service-core functions in `src/vault/folders.ts`. Implements the Folder CRUD section newly added to the [REST API spec](../specs/rest-api/index.md#folder-crud) and the matching tool rows in the [MCP Server spec](../specs/mcp-server/index.md#tool-surface).
 
 **Spec:** [REST API](../specs/rest-api/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0004, 0005
 
 ## Motivation
@@ -99,9 +99,9 @@ interface CreateFolderResult {
 - If the path exists but is a file, MUST throw `InvalidPathError` naming the type mismatch — callers should use `deleteFile` for files.
 - If the folder is non-empty and `recursive !== true`, MUST throw `FolderNotEmptyError` (a new typed error with code `folder_not_empty` → HTTP 409).
 - If `recursive === true`, the implementation MUST:
-  1. Walk the folder collecting every Markdown descendant path (using the same hidden / symlink rules as `walkVault`).
-  2. Best-effort `indexer.drop` for each Markdown path, in the same try/log-and-continue pattern as `tryDrop` (`src/vault/files.ts:203-213`). A drop failure MUST NOT abort the delete; the chokidar `unlink` event will reconcile.
-  3. `fs.rm(abs, { recursive: true, force: false })` — `force: false` so a permission error or unexpected race surfaces rather than being swallowed.
+  1. Walk the folder collecting every Markdown descendant path (using the same hidden / symlink rules as `walkVault`) into a list — WITHOUT dropping any index entry yet.
+  2. `fs.rm(abs, { recursive: true, force: false })` — `force: false` so a permission error or unexpected race surfaces rather than being swallowed. This runs BEFORE any index drop, so if `fs.rm` throws, no index entries have been dropped and the index stays consistent with the still-present files.
+  3. Only AFTER `fs.rm` succeeds, best-effort `indexer.drop` for each collected Markdown path, in the same try/log-and-continue pattern as `tryDrop` (`src/vault/files.ts:203-213`). A drop failure MUST NOT abort the delete; the chokidar `unlink` event will reconcile.
 - MUST NOT delete anything outside `v.root`. `safeJoin` already guarantees this; the test suite MUST assert it explicitly.
 
 ### REST routes
@@ -253,7 +253,7 @@ The walk yields a parent *before* its children so the cursor pagination behaves 
 
 `createFolder` is a thin wrapper over `fs.mkdir(abs, { recursive: true })` plus an `existed`/`stat` probe to compute `created`. The `existed-but-is-a-file` branch issues `fs.lstat` and translates `!stat.isDirectory()` into `InvalidPathError`.
 
-`deleteFolder` performs the Markdown enumeration via `walkVault` (the existing file-walker, not the folder one) under the target path, calls `tryDrop` per Markdown path with the same try/log-and-continue contract as `deleteFile`, then `fs.rm(abs, { recursive: true, force: false })`. The pre-check for "is a file" uses `fs.lstat` and rejects with `InvalidPathError` to keep the surface symmetric with `createFolder`.
+`deleteFolder` performs the Markdown enumeration via `walkVault` (the existing file-walker, not the folder one) under the target path, collecting the descendant paths into a list, then `fs.rm(abs, { recursive: true, force: false })`, and only after that succeeds calls `tryDrop` per collected Markdown path with the same try/log-and-continue contract as `deleteFile`. Dropping after (not before) the removal means a failed `fs.rm` leaves the index consistent — the files are still on disk, so their entries must remain — while any drop that slips through is still reconciled by the chokidar `unlink` event. The pre-check for "is a file" uses `fs.lstat` and rejects with `InvalidPathError` to keep the surface symmetric with `createFolder`.
 
 ### Decisions
 
@@ -277,9 +277,9 @@ The walk yields a parent *before* its children so the cursor pagination behaves 
 - **Decision:** `list_folders` does NOT emit the vault root.
   - **Why:** The root is implicit — every consumer already addresses it as `vault: <slug>` with no path. Emitting an empty-string path would force every client to special-case the head of the list.
   - **Alternatives considered:** Emit `""` for the root. Rejected on the special-case grounds above.
-- **Decision:** `delete_folder { recursive: true }` returns as soon as `fs.rm` resolves, not after chokidar reconciles.
-  - **Why:** The pre-delete Markdown drop loop covers the index. Any drop that slips through is reconciled by the chokidar `unlink` event later — exactly the same eventual-consistency story `deleteFile` already relies on. Blocking on chokidar would couple API latency to filesystem-event timing for no observable correctness gain.
-  - **Alternatives considered:** Await a chokidar-reconciled signal before returning. Rejected — adds latency and a new synchronization primitive for zero behavioral difference.
+- **Decision:** `delete_folder { recursive: true }` collects Markdown descendants, removes the tree, and drops index entries only AFTER `fs.rm` succeeds — then returns as soon as those drops resolve, not after chokidar reconciles.
+  - **Why:** Ordering the index drops *after* a successful `fs.rm` keeps the index consistent on failure: if `fs.rm` throws (permission error, race), no entries have been dropped, so the index still matches the files that remain on disk. On success, the post-`rm` drop loop covers the index, and any drop that slips through is reconciled by the chokidar `unlink` event later — exactly the same eventual-consistency story `deleteFile` already relies on. Blocking on chokidar would couple API latency to filesystem-event timing for no observable correctness gain. (Dropping *before* `fs.rm`, the earlier approach, had the opposite failure mode: a failed `rm` would leave files present but their index entries gone.)
+  - **Alternatives considered:** Drop before `fs.rm` — rejected because a failed removal then leaves the index inconsistent (entries gone, files present) until chokidar happens to re-reconcile. Await a chokidar-reconciled signal before returning — rejected, adds latency and a new synchronization primitive for zero behavioral difference.
 
 ### Non-Goals
 
@@ -291,38 +291,38 @@ The walk yields a parent *before* its children so the cursor pagination behaves 
 
 ## Tasks
 
-- [ ] **Service core: `src/vault/folders.ts`**
-  - [ ] `walkVaultFolders(root, sub?)` async-generator yielding directory paths in pre-order lexicographic walk; skips hidden + symlink entries by `Dirent` inspection
-  - [ ] `listFolders(deps, slug, opts)` with prefix/limit/cursor parity to `listFiles`, ENOENT tolerance, no root emission
-  - [ ] `createFolder(deps, slug, path)` — idempotent mkdir -p; rejects file-conflict with `InvalidPathError`; returns `{path, mtimeMs, created}`
-  - [ ] `deleteFolder(deps, slug, path, {recursive})` — pre-check via `lstat`, file-conflict rejection, `FolderNotEmptyError` when non-recursive and non-empty, recursive Markdown-drop + `fs.rm`
-  - [ ] Unit tests in `test/vault/folders.test.ts` covering: empty-vault list (returns `[]`), prefix filtering, cursor pagination, hidden segment exclusion, symlink exclusion, idempotent create, file-conflict on create, recursive delete with Markdown drop, non-recursive delete on non-empty folder, type-mismatch on delete-against-file, traversal rejection
-- [ ] **Schemas: `src/schemas/folders.ts`**
-  - [ ] `ListFoldersQuery`, `FolderEntry`, `ListFoldersResponse`, `CreateFolderResponse`, `DeleteFolderQuery`, `MCP` input schemas for the three tools
-  - [ ] Re-exported from `src/schemas/index.ts`
-  - [ ] Schema tests in `test/schemas/folders.test.ts`
-- [ ] **Errors: extend `src/errors.ts`**
-  - [ ] Add `"folder_not_empty"` to `ErrorCode` and `ERROR_CODES`
-  - [ ] Define `FolderNotEmptyError extends OBError` with `code = "folder_not_empty"`
-  - [ ] Update the closed-set assertion test in `test/errors.test.ts`
-- [ ] **HTTP routes: extend `src/http/routes/files.ts` (or a sibling `folders.ts`)**
-  - [ ] `GET /v1/vaults/:slug/folders` — query parse via `ListFoldersQuery`, delegate to `listFolders`
-  - [ ] `PUT /v1/vaults/:slug/folders/:path{.+}` — ignore body, delegate to `createFolder`
-  - [ ] `DELETE /v1/vaults/:slug/folders/:path{.+}` — parse `?recursive=true`, delegate to `deleteFolder`
-  - [ ] Map `FolderNotEmptyError → 409` in `src/http/errors.ts`
-  - [ ] Integration tests in `test/http/folders.test.ts` covering every scenario in the Requirements section
-- [ ] **MCP tools: `src/mcp/tools/list_folders.ts`, `create_folder.ts`, `delete_folder.ts`**
-  - [ ] Register all three in `src/mcp/index.ts`
-  - [ ] Each tool description verbatim per the Tool surface section
-  - [ ] Tests in `test/mcp/folders.test.ts` asserting tool invocation, error envelope parity with REST for `folder_not_empty` and `invalid_path`
+- [x] **Service core: `src/vault/folders.ts`**
+  - [x] `walkVaultFolders(root, sub?)` async-generator yielding directory paths in pre-order lexicographic walk; skips hidden + symlink entries by `Dirent` inspection
+  - [x] `listFolders(deps, slug, opts)` with prefix/limit/cursor parity to `listFiles`, ENOENT tolerance, no root emission
+  - [x] `createFolder(deps, slug, path)` — idempotent mkdir -p; rejects file-conflict with `InvalidPathError`; returns `{path, mtimeMs, created}`
+  - [x] `deleteFolder(deps, slug, path, {recursive})` — pre-check via `lstat`, file-conflict rejection, `FolderNotEmptyError` when non-recursive and non-empty, recursive Markdown-drop + `fs.rm`
+  - [x] Unit tests in `test/vault/folders.test.ts` covering: empty-vault list (returns `[]`), prefix filtering, cursor pagination, hidden segment exclusion, symlink exclusion, idempotent create, file-conflict on create, recursive delete with Markdown drop, non-recursive delete on non-empty folder, type-mismatch on delete-against-file, traversal rejection
+- [x] **Schemas: `src/schemas/folders.ts`**
+  - [x] `ListFoldersQuery`, `FolderEntry`, `ListFoldersResponse`, `CreateFolderResponse`, `DeleteFolderQuery`, `MCP` input schemas for the three tools
+  - [x] Re-exported from `src/schemas/index.ts`
+  - [x] Schema tests in `test/schemas/folders.test.ts`
+- [x] **Errors: extend `src/errors.ts`**
+  - [x] Add `"folder_not_empty"` to `ErrorCode` and `ERROR_CODES`
+  - [x] Define `FolderNotEmptyError extends OBError` with `code = "folder_not_empty"`
+  - [x] Update the closed-set assertion test in `test/errors.test.ts`
+- [x] **HTTP routes: extend `src/http/routes/files.ts` (or a sibling `folders.ts`)**
+  - [x] `GET /v1/vaults/:slug/folders` — query parse via `ListFoldersQuery`, delegate to `listFolders`
+  - [x] `PUT /v1/vaults/:slug/folders/:path{.+}` — ignore body, delegate to `createFolder`
+  - [x] `DELETE /v1/vaults/:slug/folders/:path{.+}` — parse `?recursive=true`, delegate to `deleteFolder`
+  - [x] Map `FolderNotEmptyError → 409` in `src/http/errors.ts`
+  - [x] Integration tests in `test/http/folders.test.ts` covering every scenario in the Requirements section
+- [x] **MCP tools: `src/mcp/tools/list_folders.ts`, `create_folder.ts`, `delete_folder.ts`**
+  - [x] Register all three in `src/mcp/index.ts`
+  - [x] Each tool description verbatim per the Tool surface section
+  - [x] Tests in `test/mcp/folders.test.ts` asserting tool invocation, error envelope parity with REST for `folder_not_empty` and `invalid_path`
 - [x] **Spec changelog rows**
   - [x] Append a row to `docs/specs/rest-api/index.md` Changelog table referencing this change
   - [x] Append a row to `docs/specs/mcp-server/index.md` Changelog table referencing this change
 - [x] **Docs index updates**
   - [x] Add this change to `docs/index.yml` (`status: draft`)
   - [x] Add a row to `docs/index.md` Changes table
-- [ ] **README**
-  - [ ] Document the three new tools / routes in the README's API surface section if such a table exists (verify during implementation; if absent, skip)
+- [x] **README**
+  - [x] Document the three new tools / routes in the README's API surface section if such a table exists (verify during implementation; if absent, skip)
 
 ## References
 
