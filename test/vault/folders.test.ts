@@ -339,6 +339,55 @@ describe("deleteFolder", () => {
       await expect(deleteFolder(fx.deps, fx.slug, "probe")).rejects.toThrow("EACCES");
     });
   });
+
+  test("a child racing in after the empty-check surfaces as folder_not_empty, not 500", async () => {
+    const fx = makeVaultFixture();
+    const target = join(fx.root, "racy");
+    await fs.mkdir(target, { recursive: true });
+    writeFileSync(join(target, "child.md"), "x"); // actually non-empty on disk
+    const realReaddir = fs.readdir;
+    // Simulate the TOCTOU race: readdir reports empty, but rmdir hits the
+    // real (non-empty) directory and throws ENOTEMPTY.
+    const stub = ((p: string, ...rest: unknown[]) => {
+      if (p === target) return Promise.resolve([] as unknown as string[]);
+      // biome-ignore lint/suspicious/noExplicitAny: forwarding rest args to the original fs.readdir overloads.
+      return realReaddir(p as any, ...(rest as []));
+    }) as typeof fs.readdir;
+    (fs as unknown as { readdir: typeof fs.readdir }).readdir = stub;
+    try {
+      await expect(deleteFolder(fx.deps, fx.slug, "racy")).rejects.toBeInstanceOf(
+        FolderNotEmptyError,
+      );
+    } finally {
+      (fs as unknown as { readdir: typeof fs.readdir }).readdir = realReaddir;
+    }
+    // Folder + child still present.
+    expect(await folderExists(join(target, "child.md"))).toBe(true);
+  });
+
+  test("a non-ENOTEMPTY rmdir error propagates unchanged", async () => {
+    const fx = makeVaultFixture();
+    const target = join(fx.root, "empty");
+    await fs.mkdir(target, { recursive: true });
+    const realRmdir = fs.rmdir;
+    const stub = ((p: string, ...rest: unknown[]) => {
+      if (p === target) throw new Error("EACCES (stubbed)");
+      // biome-ignore lint/suspicious/noExplicitAny: forwarding rest args to the original fs.rmdir overloads.
+      return realRmdir(p as any, ...(rest as []));
+    }) as typeof fs.rmdir;
+    (fs as unknown as { rmdir: typeof fs.rmdir }).rmdir = stub;
+    let caught: unknown;
+    try {
+      await deleteFolder(fx.deps, fx.slug, "empty");
+    } catch (e) {
+      caught = e;
+    } finally {
+      (fs as unknown as { rmdir: typeof fs.rmdir }).rmdir = realRmdir;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(FolderNotEmptyError);
+    expect((caught as Error).message).toContain("EACCES");
+  });
 });
 
 async function folderExists(abs: string): Promise<boolean> {

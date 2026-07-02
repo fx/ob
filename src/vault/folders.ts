@@ -132,13 +132,24 @@ export async function listFolders(
   return { items, nextCursor };
 }
 
+/**
+ * Canonical folder path: no trailing slash, matching the on-disk reality and
+ * the no-trailing-slash form `listFolders` emits. Normalizing here (rather than
+ * only in the REST route) keeps every adapter — REST and MCP — in parity: the
+ * returned `path` and any error message are canonical regardless of caller.
+ */
+function canonicalFolderPath(path: string): string {
+  return path.replace(/\/+$/, "");
+}
+
 export async function createFolder(
   deps: VaultServiceDeps,
   slug: string,
   path: string,
 ): Promise<CreateFolderResult> {
   const v = resolveVault(deps, slug);
-  const abs = safeJoin(v.root, path);
+  const rel = canonicalFolderPath(path);
+  const abs = safeJoin(v.root, rel);
   await assertNotSymlinkEscape(abs, v.root);
   // Probe first so we can report `created` accurately: mkdir -p can't tell us
   // whether it made the leaf or found it already there.
@@ -151,14 +162,14 @@ export async function createFolder(
   }
   if (existing !== null) {
     if (!existing.isDirectory()) {
-      throw new InvalidPathError(path, "path already exists as a file, not a directory");
+      throw new InvalidPathError(rel, "path already exists as a file, not a directory");
     }
     // Idempotent no-op: leave the folder untouched so mtime is stable.
-    return { path, mtimeMs: existing.mtimeMs, created: false };
+    return { path: rel, mtimeMs: existing.mtimeMs, created: false };
   }
   await fs.mkdir(abs, { recursive: true });
   const stat = await fs.stat(abs);
-  return { path, mtimeMs: stat.mtimeMs, created: true };
+  return { path: rel, mtimeMs: stat.mtimeMs, created: true };
 }
 
 export async function deleteFolder(
@@ -168,33 +179,41 @@ export async function deleteFolder(
   opts: { recursive?: boolean } = {},
 ): Promise<void> {
   const v = resolveVault(deps, slug);
-  const abs = safeJoin(v.root, path);
+  const rel = canonicalFolderPath(path);
+  const abs = safeJoin(v.root, rel);
   await assertNotSymlinkEscape(abs, v.root);
   let stat: import("node:fs").Stats;
   try {
     stat = await fs.lstat(abs);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") throw new DocNotFoundError(path);
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") throw new DocNotFoundError(rel);
     throw e;
   }
   if (!stat.isDirectory()) {
-    throw new InvalidPathError(path, "path is a file, not a directory; use deleteFile");
+    throw new InvalidPathError(rel, "path is a file, not a directory; use deleteFile");
   }
   if (opts.recursive !== true) {
     // Non-recursive: refuse a folder that still has children, then remove it
     // with `rmdir` (NOT `rm -r`). `rmdir` deletes only an empty directory, so
-    // if a child is added between the readdir probe and the removal the delete
-    // fails with ENOTEMPTY rather than silently wiping the new child.
+    // if a child is added between the readdir probe and the removal, `rmdir`
+    // fails with ENOTEMPTY instead of silently wiping the new child — which we
+    // translate back to the documented `folder_not_empty` (409) response.
     const children = await fs.readdir(abs);
-    if (children.length > 0) throw new FolderNotEmptyError(path);
-    await fs.rmdir(abs);
+    if (children.length > 0) throw new FolderNotEmptyError(rel);
+    try {
+      await fs.rmdir(abs);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "ENOTEMPTY" || code === "EEXIST") throw new FolderNotEmptyError(rel);
+      throw e;
+    }
     return;
   }
   // Recursive delete: drop the index entry of every Markdown descendant FIRST
   // (best-effort, log-and-continue) so the index is in the right state once the
   // tree is gone. `walkVault` under `path` yields vault-relative file paths.
-  for await (const rel of walkVault(v.root, path)) {
-    if (isMarkdownPath(rel)) await tryDrop(deps, slug, rel);
+  for await (const rel2 of walkVault(v.root, rel)) {
+    if (isMarkdownPath(rel2)) await tryDrop(deps, slug, rel2);
   }
   // `force: false` so a permission error or unexpected race surfaces rather
   // than being swallowed. `safeJoin` already guarantees `abs` is inside the

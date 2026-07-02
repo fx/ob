@@ -76,6 +76,16 @@ describe("create_folder", () => {
     expect(r.isError).toBe(true);
     expect((r.parsed as { code: string }).code).toBe("invalid_input");
   });
+
+  test("canonicalizes a trailing-slash path to match REST", async () => {
+    const fx = await makeMcpFixture({ label: "tool-cfo-slash" });
+    cleanup.push(fx.stop);
+    const tool = await fx.callTool("create_folder", { vault: "v", path: "archive/2026/" });
+    expect((tool.parsed as { path: string }).path).toBe("archive/2026");
+
+    const rest = await fx.app.request("/v1/vaults/v/folders/archive/2026/", { method: "PUT" });
+    expect(((await rest.json()) as { path: string }).path).toBe("archive/2026");
+  });
 });
 
 describe("delete_folder", () => {

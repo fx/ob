@@ -8,8 +8,8 @@
  * The `PUT` and `DELETE` routes use the `:path{.+}` wildcard, so the empty
  * path (`/v1/vaults/:slug/folders/`) does not match them — only the path-less
  * list endpoint (`GET /v1/vaults/:slug/folders`) handles a request with no
- * path. A trailing slash on the wildcard tail is tolerated and stripped so the
- * service core always sees the canonical no-trailing-slash form.
+ * path. A trailing slash on the wildcard tail is tolerated — the service core
+ * canonicalizes to the no-trailing-slash form (so REST and MCP stay in parity).
  */
 
 import type { Hono } from "hono";
@@ -18,11 +18,6 @@ import { DeleteFolderQuery, ListFoldersQuery } from "../../schemas/index.ts";
 import { createFolder, deleteFolder, listFolders } from "../../vault/folders.ts";
 import { getParam } from "./params.ts";
 import type { RouteDeps } from "./types.ts";
-
-/** Strip trailing slashes so `archive/2026/` and `archive/2026` are the same. */
-function stripTrailingSlash(path: string): string {
-  return path.replace(/\/+$/, "");
-}
 
 /** Mount folder routes on `app` under `/v1/vaults/:slug/folders`. */
 export function mountFolderRoutes(app: Hono, deps: RouteDeps): void {
@@ -47,8 +42,7 @@ export function mountFolderRoutes(app: Hono, deps: RouteDeps): void {
   // PUT /v1/vaults/:slug/folders/*path — idempotent create. Any body ignored.
   app.put("/v1/vaults/:slug/folders/:path{.+}", async (c) => {
     const slug = getParam(c, "slug");
-    const path = stripTrailingSlash(getParam(c, "path"));
-    const result = await createFolder(deps, slug, path);
+    const result = await createFolder(deps, slug, getParam(c, "path"));
     return c.json(result);
   });
 
@@ -62,8 +56,9 @@ export function mountFolderRoutes(app: Hono, deps: RouteDeps): void {
       });
     }
     const slug = getParam(c, "slug");
-    const path = stripTrailingSlash(getParam(c, "path"));
-    await deleteFolder(deps, slug, path, { recursive: parsed.data.recursive === "true" });
+    await deleteFolder(deps, slug, getParam(c, "path"), {
+      recursive: parsed.data.recursive === "true",
+    });
     return new Response(null, { status: 204 });
   });
 }
