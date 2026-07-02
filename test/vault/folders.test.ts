@@ -222,9 +222,16 @@ describe("createFolder", () => {
   test("rejects creating a folder nested under an existing file (ENOTDIR → invalid_path)", async () => {
     const fx = makeVaultFixture();
     writeFileSync(join(fx.root, "notes"), "i am a file");
-    await expect(createFolder(fx.deps, fx.slug, "notes/sub")).rejects.toBeInstanceOf(
-      InvalidPathError,
-    );
+    let caught: unknown;
+    try {
+      await createFolder(fx.deps, fx.slug, "notes/sub");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(InvalidPathError);
+    // The error reports the vault-relative path, never the absolute layout.
+    expect((caught as InvalidPathError).path).toBe("notes/sub");
+    expect((caught as InvalidPathError).message).not.toContain(fx.root);
     // The file is unchanged.
     expect(await fs.readFile(join(fx.root, "notes"), "utf8")).toBe("i am a file");
   });

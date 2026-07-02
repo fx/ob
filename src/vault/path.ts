@@ -20,7 +20,7 @@
  */
 
 import { promises as fs } from "node:fs";
-import { dirname, resolve, sep } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import { InvalidPathError, assertSafeRelativePath } from "../errors.ts";
 
 // Re-export so callers have a single import path for "path validation lives
@@ -92,14 +92,15 @@ export async function assertNotSymlinkEscape(absPath: string, root: string): Pro
       // ENOTDIR means a path component that must be a directory is actually a
       // file (e.g. `notes/sub` where `notes` is a file). That's a caller path
       // conflict, not an internal fault — translate it to a typed 4xx so it
-      // doesn't leak as a 500.
+      // doesn't leak as a 500. Report the vault-RELATIVE path (like every other
+      // invalid_path error) so the envelope never exposes the absolute layout.
       if (err.code === "ENOTDIR") {
-        throw new InvalidPathError(absPath, "path traverses a non-directory");
+        throw new InvalidPathError(relative(absRoot, absPath), "path traverses a non-directory");
       }
       throw e;
     }
     if (stat.isSymbolicLink()) {
-      throw new InvalidPathError(absPath, "path traverses a symbolic link");
+      throw new InvalidPathError(relative(absRoot, absPath), "path traverses a symbolic link");
     }
     current = dirname(current);
   }
