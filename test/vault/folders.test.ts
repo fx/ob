@@ -201,6 +201,16 @@ describe("createFolder", () => {
     await expect(createFolder(fx.deps, fx.slug, ".")).rejects.toBeInstanceOf(InvalidPathError);
   });
 
+  test("rejects creating a folder nested under an existing file (ENOTDIR → invalid_path)", async () => {
+    const fx = makeVaultFixture();
+    writeFileSync(join(fx.root, "notes"), "i am a file");
+    await expect(createFolder(fx.deps, fx.slug, "notes/sub")).rejects.toBeInstanceOf(
+      InvalidPathError,
+    );
+    // The file is unchanged.
+    expect(await fs.readFile(join(fx.root, "notes"), "utf8")).toBe("i am a file");
+  });
+
   test("non-ENOENT lstat error on the probe propagates", async () => {
     const fx = makeVaultFixture();
     // The first lstat(target) is assertNotSymlinkEscape's leaf probe (ENOENT
@@ -278,6 +288,14 @@ describe("deleteFolder", () => {
   test("rejects a traversal path", async () => {
     const fx = makeVaultFixture();
     await expect(deleteFolder(fx.deps, fx.slug, "../escape")).rejects.toBeInstanceOf(
+      InvalidPathError,
+    );
+  });
+
+  test("rejects deleting a folder nested under an existing file (ENOTDIR → invalid_path)", async () => {
+    const fx = makeVaultFixture();
+    writeFileSync(join(fx.root, "notes"), "i am a file");
+    await expect(deleteFolder(fx.deps, fx.slug, "notes/sub")).rejects.toBeInstanceOf(
       InvalidPathError,
     );
   });

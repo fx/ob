@@ -92,6 +92,13 @@ export async function assertNotSymlinkEscape(absPath: string, root: string): Pro
       // unreachable — let the outer fs op surface its own error rather
       // than translate it to InvalidPathError.
       if (err.code === "ENOENT") return;
+      // ENOTDIR means a path component that must be a directory is actually a
+      // file (e.g. `notes/sub` where `notes` is a file). That's a caller path
+      // conflict, not an internal fault — translate it to a typed 4xx so it
+      // doesn't leak as a 500.
+      if (err.code === "ENOTDIR") {
+        throw new InvalidPathError(absPath, "path traverses a non-directory");
+      }
       throw e;
     }
     if (stat.isSymbolicLink()) {
