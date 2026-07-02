@@ -20,6 +20,10 @@ permissions:
 
 jobs:
   build:
+    # release-please PRs only bump package.json + CHANGELOG; a PR-triggered image build of a
+    # version bump is pointless (images build on main push / tags anyway). Job-level `if` keeps
+    # the check reported as skipped, not absent. No branch protection here, so this blocks nothing.
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please--') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

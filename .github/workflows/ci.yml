@@ -18,6 +18,10 @@ permissions:
 
 jobs:
   ci:
+    # release-please PRs only bump package.json + CHANGELOG, so tests/lint are noise there.
+    # A job-level `if` keeps the check reported as skipped (not absent); there is no branch
+    # protection on this repo, so a skipped check blocks nothing. Still runs on push to main.
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please--') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
