@@ -145,8 +145,8 @@ export interface PatchFileResult extends WriteFileResult {
   readonly edits: number;
 }
 
-const DEFAULT_LIMIT = 100;
-const MAX_LIMIT = 1000;
+export const DEFAULT_LIMIT = 100;
+export const MAX_LIMIT = 1000;
 
 function sha256(bytes: Uint8Array): string {
   // `createHash().update()` accepts `Uint8Array` directly. Callers hand us
@@ -156,13 +156,13 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function resolveVault(deps: VaultServiceDeps, slug: string): VaultDescriptor {
+export function resolveVault(deps: VaultServiceDeps, slug: string): VaultDescriptor {
   const v = deps.vault(slug);
   if (v === null) throw new VaultNotFoundError(slug);
   return v;
 }
 
-function decodeCursor(cursor: string | undefined): string | undefined {
+export function decodeCursor(cursor: string | undefined): string | undefined {
   if (cursor === undefined || cursor === "") return undefined;
   // We use base64 of the last-seen path so callers can't construct a cursor
   // that bypasses our prefix check. `Buffer.from(_, "base64")` is total —
@@ -171,7 +171,7 @@ function decodeCursor(cursor: string | undefined): string | undefined {
   return Buffer.from(cursor, "base64").toString("utf8");
 }
 
-function encodeCursor(path: string): string {
+export function encodeCursor(path: string): string {
   return Buffer.from(path, "utf8").toString("base64");
 }
 
@@ -200,7 +200,7 @@ async function tryReindex(deps: VaultServiceDeps, slug: string, path: string): P
  * never throws — the eventual chokidar `unlink` event will retry the drop
  * via the pipeline.
  */
-async function tryDrop(deps: VaultServiceDeps, slug: string, path: string): Promise<void> {
+export async function tryDrop(deps: VaultServiceDeps, slug: string, path: string): Promise<void> {
   try {
     await deps.indexer.drop(slug, path);
   } catch (e) {
@@ -220,7 +220,7 @@ async function tryDrop(deps: VaultServiceDeps, slug: string, path: string): Prom
  * type is examined, not followed) — they would be rejected by
  * `assertNotSymlinkEscape` at use time anyway.
  */
-async function* walkVault(root: string, sub = ""): AsyncIterable<string> {
+export async function* walkVault(root: string, sub = ""): AsyncIterable<string> {
   const dir = sub === "" ? root : join(root, sub);
   let entries: import("node:fs").Dirent[];
   try {
