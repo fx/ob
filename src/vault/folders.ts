@@ -180,14 +180,16 @@ export async function deleteFolder(
   if (!stat.isDirectory()) {
     throw new InvalidPathError(path, "path is a file, not a directory; use deleteFile");
   }
-  const children = await fs.readdir(abs);
-  if (children.length > 0 && opts.recursive !== true) {
-    throw new FolderNotEmptyError(path);
-  }
-  // Recursive delete: drop the index entry of every Markdown descendant FIRST
-  // (best-effort, log-and-continue) so the index is in the right state once the
-  // tree is gone. `walkVault` under `path` yields vault-relative file paths.
-  if (opts.recursive === true) {
+  if (opts.recursive !== true) {
+    // Non-recursive: refuse a folder that still has children. (A recursive
+    // delete skips this probe — it walks the whole tree below anyway.)
+    const children = await fs.readdir(abs);
+    if (children.length > 0) throw new FolderNotEmptyError(path);
+  } else {
+    // Recursive delete: drop the index entry of every Markdown descendant
+    // FIRST (best-effort, log-and-continue) so the index is in the right state
+    // once the tree is gone. `walkVault` under `path` yields vault-relative
+    // file paths.
     for await (const rel of walkVault(v.root, path)) {
       if (isMarkdownPath(rel)) await tryDrop(deps, slug, rel);
     }
