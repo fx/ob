@@ -1,0 +1,20 @@
+# CodeRabbit configuration.
+#
+# Auto-review stays enabled for normal PRs, but release-please PRs are skipped:
+# they only bump package.json + CHANGELOG, so an AI review of them is noise.
+# `ignore_title_keywords` does a case-insensitive substring match on the PR
+# title, so "chore(main): release" matches release-please titles like
+# "chore(main): release 1.2.0" without catching ordinary feat/fix PRs.
+# Schema: https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+reviews:
+  auto_review:
+    enabled: true
+    ignore_title_keywords:
+      # release-please's title pattern is `chore${scope}: release ${version}`; the
+      # scope can be present ("chore(main): ...") or empty ("chore: ..."), so cover both.
+      - "chore(main): release"
+      - "chore: release"
+knowledge_base:
+  code_guidelines:
+    enabled: true
