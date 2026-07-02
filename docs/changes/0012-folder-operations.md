@@ -5,7 +5,7 @@
 Add a sibling surface to file CRUD for folders: `list_folders`, `create_folder`, `delete_folder` on both REST (`/v1/vaults/:slug/folders/*path`) and MCP (`list_folders` / `create_folder` / `delete_folder` tools), backed by three new service-core functions in `src/vault/folders.ts`. Implements the Folder CRUD section newly added to the [REST API spec](../specs/rest-api/index.md#folder-crud) and the matching tool rows in the [MCP Server spec](../specs/mcp-server/index.md#tool-surface).
 
 **Spec:** [REST API](../specs/rest-api/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0004, 0005
 
 ## Motivation
@@ -291,38 +291,38 @@ The walk yields a parent *before* its children so the cursor pagination behaves 
 
 ## Tasks
 
-- [ ] **Service core: `src/vault/folders.ts`**
-  - [ ] `walkVaultFolders(root, sub?)` async-generator yielding directory paths in pre-order lexicographic walk; skips hidden + symlink entries by `Dirent` inspection
-  - [ ] `listFolders(deps, slug, opts)` with prefix/limit/cursor parity to `listFiles`, ENOENT tolerance, no root emission
-  - [ ] `createFolder(deps, slug, path)` — idempotent mkdir -p; rejects file-conflict with `InvalidPathError`; returns `{path, mtimeMs, created}`
-  - [ ] `deleteFolder(deps, slug, path, {recursive})` — pre-check via `lstat`, file-conflict rejection, `FolderNotEmptyError` when non-recursive and non-empty, recursive Markdown-drop + `fs.rm`
-  - [ ] Unit tests in `test/vault/folders.test.ts` covering: empty-vault list (returns `[]`), prefix filtering, cursor pagination, hidden segment exclusion, symlink exclusion, idempotent create, file-conflict on create, recursive delete with Markdown drop, non-recursive delete on non-empty folder, type-mismatch on delete-against-file, traversal rejection
-- [ ] **Schemas: `src/schemas/folders.ts`**
-  - [ ] `ListFoldersQuery`, `FolderEntry`, `ListFoldersResponse`, `CreateFolderResponse`, `DeleteFolderQuery`, `MCP` input schemas for the three tools
-  - [ ] Re-exported from `src/schemas/index.ts`
-  - [ ] Schema tests in `test/schemas/folders.test.ts`
-- [ ] **Errors: extend `src/errors.ts`**
-  - [ ] Add `"folder_not_empty"` to `ErrorCode` and `ERROR_CODES`
-  - [ ] Define `FolderNotEmptyError extends OBError` with `code = "folder_not_empty"`
-  - [ ] Update the closed-set assertion test in `test/errors.test.ts`
-- [ ] **HTTP routes: extend `src/http/routes/files.ts` (or a sibling `folders.ts`)**
-  - [ ] `GET /v1/vaults/:slug/folders` — query parse via `ListFoldersQuery`, delegate to `listFolders`
-  - [ ] `PUT /v1/vaults/:slug/folders/:path{.+}` — ignore body, delegate to `createFolder`
-  - [ ] `DELETE /v1/vaults/:slug/folders/:path{.+}` — parse `?recursive=true`, delegate to `deleteFolder`
-  - [ ] Map `FolderNotEmptyError → 409` in `src/http/errors.ts`
-  - [ ] Integration tests in `test/http/folders.test.ts` covering every scenario in the Requirements section
-- [ ] **MCP tools: `src/mcp/tools/list_folders.ts`, `create_folder.ts`, `delete_folder.ts`**
-  - [ ] Register all three in `src/mcp/index.ts`
-  - [ ] Each tool description verbatim per the Tool surface section
-  - [ ] Tests in `test/mcp/folders.test.ts` asserting tool invocation, error envelope parity with REST for `folder_not_empty` and `invalid_path`
+- [x] **Service core: `src/vault/folders.ts`**
+  - [x] `walkVaultFolders(root, sub?)` async-generator yielding directory paths in pre-order lexicographic walk; skips hidden + symlink entries by `Dirent` inspection
+  - [x] `listFolders(deps, slug, opts)` with prefix/limit/cursor parity to `listFiles`, ENOENT tolerance, no root emission
+  - [x] `createFolder(deps, slug, path)` — idempotent mkdir -p; rejects file-conflict with `InvalidPathError`; returns `{path, mtimeMs, created}`
+  - [x] `deleteFolder(deps, slug, path, {recursive})` — pre-check via `lstat`, file-conflict rejection, `FolderNotEmptyError` when non-recursive and non-empty, recursive Markdown-drop + `fs.rm`
+  - [x] Unit tests in `test/vault/folders.test.ts` covering: empty-vault list (returns `[]`), prefix filtering, cursor pagination, hidden segment exclusion, symlink exclusion, idempotent create, file-conflict on create, recursive delete with Markdown drop, non-recursive delete on non-empty folder, type-mismatch on delete-against-file, traversal rejection
+- [x] **Schemas: `src/schemas/folders.ts`**
+  - [x] `ListFoldersQuery`, `FolderEntry`, `ListFoldersResponse`, `CreateFolderResponse`, `DeleteFolderQuery`, `MCP` input schemas for the three tools
+  - [x] Re-exported from `src/schemas/index.ts`
+  - [x] Schema tests in `test/schemas/folders.test.ts`
+- [x] **Errors: extend `src/errors.ts`**
+  - [x] Add `"folder_not_empty"` to `ErrorCode` and `ERROR_CODES`
+  - [x] Define `FolderNotEmptyError extends OBError` with `code = "folder_not_empty"`
+  - [x] Update the closed-set assertion test in `test/errors.test.ts`
+- [x] **HTTP routes: extend `src/http/routes/files.ts` (or a sibling `folders.ts`)**
+  - [x] `GET /v1/vaults/:slug/folders` — query parse via `ListFoldersQuery`, delegate to `listFolders`
+  - [x] `PUT /v1/vaults/:slug/folders/:path{.+}` — ignore body, delegate to `createFolder`
+  - [x] `DELETE /v1/vaults/:slug/folders/:path{.+}` — parse `?recursive=true`, delegate to `deleteFolder`
+  - [x] Map `FolderNotEmptyError → 409` in `src/http/errors.ts`
+  - [x] Integration tests in `test/http/folders.test.ts` covering every scenario in the Requirements section
+- [x] **MCP tools: `src/mcp/tools/list_folders.ts`, `create_folder.ts`, `delete_folder.ts`**
+  - [x] Register all three in `src/mcp/index.ts`
+  - [x] Each tool description verbatim per the Tool surface section
+  - [x] Tests in `test/mcp/folders.test.ts` asserting tool invocation, error envelope parity with REST for `folder_not_empty` and `invalid_path`
 - [x] **Spec changelog rows**
   - [x] Append a row to `docs/specs/rest-api/index.md` Changelog table referencing this change
   - [x] Append a row to `docs/specs/mcp-server/index.md` Changelog table referencing this change
 - [x] **Docs index updates**
   - [x] Add this change to `docs/index.yml` (`status: draft`)
   - [x] Add a row to `docs/index.md` Changes table
-- [ ] **README**
-  - [ ] Document the three new tools / routes in the README's API surface section if such a table exists (verify during implementation; if absent, skip)
+- [x] **README**
+  - [x] Document the three new tools / routes in the README's API surface section if such a table exists (verify during implementation; if absent, skip)
 
 ## References
 
