@@ -12,16 +12,12 @@
  * service core always sees the canonical no-trailing-slash form.
  */
 
-import type { Context, Hono } from "hono";
+import type { Hono } from "hono";
 import { InvalidQueryError } from "../../errors.ts";
 import { DeleteFolderQuery, ListFoldersQuery } from "../../schemas/index.ts";
 import { createFolder, deleteFolder, listFolders } from "../../vault/folders.ts";
+import { getParam } from "./params.ts";
 import type { RouteDeps } from "./types.ts";
-
-function getParam(c: Context, name: string): string {
-  const v = c.req.param(name);
-  return typeof v === "string" ? v : "";
-}
 
 /** Strip trailing slashes so `archive/2026/` and `archive/2026` are the same. */
 function stripTrailingSlash(path: string): string {

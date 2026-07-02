@@ -198,25 +198,11 @@ describe("createFolder", () => {
 
   test("non-ENOENT lstat error on the probe propagates", async () => {
     const fx = makeVaultFixture();
-    const target = join(fx.root, "probe");
-    const realLstat = fs.lstat;
-    let hits = 0;
-    const stub = ((p: string, ...rest: unknown[]) => {
-      if (p === target) {
-        hits++;
-        // First call is assertNotSymlinkEscape's leaf probe (let it ENOENT
-        // naturally); the second is createFolder's own probe — fail that.
-        if (hits >= 2) throw new Error("EACCES (stubbed)");
-      }
-      // biome-ignore lint/suspicious/noExplicitAny: forwarding rest args to the original fs.lstat overloads.
-      return realLstat(p as any, ...(rest as []));
-    }) as typeof fs.lstat;
-    (fs as unknown as { lstat: typeof fs.lstat }).lstat = stub;
-    try {
+    // The first lstat(target) is assertNotSymlinkEscape's leaf probe (ENOENT
+    // naturally for a fresh path); the second is createFolder's own probe.
+    await withLstatFailingOnSecondCall(join(fx.root, "probe"), async () => {
       await expect(createFolder(fx.deps, fx.slug, "probe")).rejects.toThrow("EACCES");
-    } finally {
-      (fs as unknown as { lstat: typeof fs.lstat }).lstat = realLstat;
-    }
+    });
   });
 });
 
@@ -294,25 +280,11 @@ describe("deleteFolder", () => {
   test("non-ENOENT lstat error on the pre-check propagates", async () => {
     const fx = makeVaultFixture();
     await fs.mkdir(join(fx.root, "probe"), { recursive: true });
-    const target = join(fx.root, "probe");
-    const realLstat = fs.lstat;
-    let hits = 0;
-    const stub = ((p: string, ...rest: unknown[]) => {
-      if (p === target) {
-        hits++;
-        // First call is assertNotSymlinkEscape's leaf probe (real dir); the
-        // second is deleteFolder's own pre-check — fail that.
-        if (hits >= 2) throw new Error("EACCES (stubbed)");
-      }
-      // biome-ignore lint/suspicious/noExplicitAny: forwarding rest args to the original fs.lstat overloads.
-      return realLstat(p as any, ...(rest as []));
-    }) as typeof fs.lstat;
-    (fs as unknown as { lstat: typeof fs.lstat }).lstat = stub;
-    try {
+    // First lstat(target) is assertNotSymlinkEscape's leaf probe (real dir);
+    // the second is deleteFolder's own pre-check.
+    await withLstatFailingOnSecondCall(join(fx.root, "probe"), async () => {
       await expect(deleteFolder(fx.deps, fx.slug, "probe")).rejects.toThrow("EACCES");
-    } finally {
-      (fs as unknown as { lstat: typeof fs.lstat }).lstat = realLstat;
-    }
+    });
   });
 });
 
@@ -322,5 +294,31 @@ async function folderExists(abs: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Run `fn` with `fs.lstat` stubbed to throw EACCES on the SECOND call for
+ * `target` (all other paths and the first call pass through). The service core
+ * calls `lstat(target)` once via `assertNotSymlinkEscape` and once for its own
+ * probe/pre-check, so this exercises the probe's non-ENOENT error branch.
+ * Restores the original `fs.lstat` on every exit path.
+ */
+async function withLstatFailingOnSecondCall(target: string, fn: () => Promise<void>): Promise<void> {
+  const realLstat = fs.lstat;
+  let hits = 0;
+  const stub = ((p: string, ...rest: unknown[]) => {
+    if (p === target) {
+      hits++;
+      if (hits >= 2) throw new Error("EACCES (stubbed)");
+    }
+    // biome-ignore lint/suspicious/noExplicitAny: forwarding rest args to the original fs.lstat overloads.
+    return realLstat(p as any, ...(rest as []));
+  }) as typeof fs.lstat;
+  (fs as unknown as { lstat: typeof fs.lstat }).lstat = stub;
+  try {
+    await fn();
+  } finally {
+    (fs as unknown as { lstat: typeof fs.lstat }).lstat = realLstat;
   }
 }

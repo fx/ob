@@ -21,13 +21,9 @@ import {
   writeFile,
 } from "../../vault/files.ts";
 import { extractPdfMarkdown } from "../../vault/pdfText.ts";
+import { getParam } from "./params.ts";
 import type { RouteDeps } from "./types.ts";
 import { zodIssuesToInvalidInput } from "./zod.ts";
-
-function getParam(c: Context, name: string): string {
-  const v = c.req.param(name);
-  return typeof v === "string" ? v : "";
-}
 
 async function readBodyBytes(c: Context): Promise<Uint8Array> {
   const buf = await c.req.arrayBuffer();
