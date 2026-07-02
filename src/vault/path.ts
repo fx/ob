@@ -62,8 +62,10 @@ export function safeJoin(root: string, rel: string): string {
  *   - If `absPath` itself exists and is a symlink, reject.
  *   - If any intermediate directory between `root` and `absPath` is a
  *     symlink, reject.
- *   - If `absPath` doesn't exist (e.g. about to be created), still check the
- *     parent chain so a `PUT` can't be redirected to land outside the root.
+ *   - If `absPath` (or any ancestor) doesn't exist (e.g. about to be created),
+ *     keep walking UP the chain so a symlinked ancestor above a not-yet-created
+ *     intermediate is still caught — otherwise a later recursive `mkdir` would
+ *     follow the link and land outside the root.
  *
  * Throws `InvalidPathError` on any escape attempt; otherwise returns
  * normally. The cost is one `lstat` per directory level — negligible
@@ -71,27 +73,22 @@ export function safeJoin(root: string, rel: string): string {
  */
 export async function assertNotSymlinkEscape(absPath: string, root: string): Promise<void> {
   const absRoot = resolve(root);
-  // Walk from absPath up toward absRoot. For each segment, lstat — if it's a
-  // symlink, reject. ENOENT is fine for the leaf (we may be creating it) but
-  // not for intermediate directories.
+  // Walk from absPath up toward absRoot. For each level, lstat — if it's a
+  // symlink, reject. A non-existent level (ENOENT) is fine on its own (the
+  // leaf or an intermediate may be about to be created), but we MUST keep
+  // walking up: a symlinked ancestor higher in the chain would otherwise be
+  // missed, and the subsequent `mkdir -p` would follow it out of the vault.
   let current = absPath;
-  let seenLeaf = false;
   while (current.length >= absRoot.length && current !== absRoot) {
     let stat: import("node:fs").Stats;
     try {
       stat = await fs.lstat(current);
     } catch (e) {
       const err = e as NodeJS.ErrnoException;
-      if (err.code === "ENOENT" && !seenLeaf) {
-        // Leaf may legitimately not exist (about-to-create case).
-        seenLeaf = true;
+      if (err.code === "ENOENT") {
         current = dirname(current);
         continue;
       }
-      // ENOENT on an intermediate directory means the path is already
-      // unreachable — let the outer fs op surface its own error rather
-      // than translate it to InvalidPathError.
-      if (err.code === "ENOENT") return;
       // ENOTDIR means a path component that must be a directory is actually a
       // file (e.g. `notes/sub` where `notes` is a file). That's a caller path
       // conflict, not an internal fault — translate it to a typed 4xx so it
@@ -104,7 +101,6 @@ export async function assertNotSymlinkEscape(absPath: string, root: string): Pro
     if (stat.isSymbolicLink()) {
       throw new InvalidPathError(absPath, "path traverses a symbolic link");
     }
-    seenLeaf = true;
     current = dirname(current);
   }
 }

@@ -201,6 +201,24 @@ describe("createFolder", () => {
     await expect(createFolder(fx.deps, fx.slug, ".")).rejects.toBeInstanceOf(InvalidPathError);
   });
 
+  test("rejects creating under a symlinked ancestor and creates nothing outside the vault", async () => {
+    const fx = makeVaultFixture();
+    // `outside` lives beside the vault root, reachable only via the symlink.
+    const outside = join(fx.root, "..", "..", "outside-create");
+    await fs.mkdir(outside, { recursive: true });
+    try {
+      symlinkSync(outside, join(fx.root, "link"));
+      // The intermediate `link/new` does not exist yet; the symlinked ancestor
+      // `link` must still be rejected before any mkdir -p runs.
+      await expect(createFolder(fx.deps, fx.slug, "link/new/child")).rejects.toBeInstanceOf(
+        InvalidPathError,
+      );
+      expect(await folderExists(join(outside, "new", "child"))).toBe(false);
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
   test("rejects creating a folder nested under an existing file (ENOTDIR → invalid_path)", async () => {
     const fx = makeVaultFixture();
     writeFileSync(join(fx.root, "notes"), "i am a file");
