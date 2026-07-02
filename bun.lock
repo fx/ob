@@ -15,7 +15,7 @@
         "remark-frontmatter": "5.0.0",
         "remark-gfm": "4.0.1",
         "unist-util-visit": "5.1.0",
-        "unpdf": "^1.6.2",
+        "unpdf": "1.6.2",
         "zod": "3.24.1",
         "zod-to-json-schema": "3.24.1",
       },
