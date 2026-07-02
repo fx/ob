@@ -321,6 +321,35 @@ function rowIdOf(r: Record<string, unknown>): string {
 }
 
 /**
+ * Stable, storage-independent identity for a row: `<path>#<chunk_index>`.
+ * Used as the tie-break key when ranking arms and fusing results so equal
+ * relevance signals resolve to a deterministic order across runs. Unlike
+ * `_rowid` (which reflects physical layout and varies with write
+ * concurrency), this key is derived from content and is therefore stable.
+ */
+function stableIdOf(r: Record<string, unknown> | undefined): string {
+  if (r === undefined) return "";
+  const path = typeof r.path === "string" ? r.path : "";
+  const idx = typeof r.chunk_index === "number" ? r.chunk_index : 0;
+  return `${path}#${idx}`;
+}
+
+/** Read a numeric column, substituting `fallback` for missing/non-finite values. */
+function numOr(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
+/**
+ * Locale-independent (UTF-16 code-unit) string order. Used for tie-breaks
+ * so the resulting order is identical on every machine — `localeCompare`
+ * would fold in the runtime's default locale and could reorder across
+ * environments, undermining the determinism these tie-breaks exist to give.
+ */
+function compareIds(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
  * Build the `WHERE` clause for `pathPrefix` / `tag` filters used by both
  * `search` and `searchHybrid`. Returns `undefined` when no clause is
  * needed so callers can skip `.where()` entirely (a no-op `where("")`
@@ -553,6 +582,15 @@ export async function openVaultStore(opts: OpenVaultStoreOptions): Promise<Vault
         let q = table.vectorSearch(queryVector).limit(perArm).withRowId();
         if (filterClause !== undefined) q = q.where(filterClause);
         const rows = (await q.toArray()) as Record<string, unknown>[];
+        // Order by ascending `_distance` (closest first) with a stable
+        // content-based tie-break so exact-distance ties (e.g. duplicate
+        // chunks) get deterministic ranks rather than physical-layout order.
+        rows.sort(
+          (a, b) =>
+            numOr(a._distance, Number.POSITIVE_INFINITY) -
+              numOr(b._distance, Number.POSITIVE_INFINITY) ||
+            compareIds(stableIdOf(a), stableIdOf(b)),
+        );
         return rows.map((r, i) => ({ rowId: rowIdOf(r), rank: i + 1, row: r }));
       };
       const runFts = async (): Promise<RankedHit[]> => {
@@ -566,6 +604,20 @@ export async function openVaultStore(opts: OpenVaultStoreOptions): Promise<Vault
           .withRowId() as ReturnType<typeof table.query>;
         if (filterClause !== undefined) q = q.where(filterClause);
         const rows = (await q.toArray()) as Record<string, unknown>[];
+        // Below `FTS_INDEX_THRESHOLD` the FTS arm runs un-indexed: LanceDB's
+        // linear scan returns rows in physical storage order, NOT by
+        // descending `_score`. Storage order varies with concurrent-write
+        // layout, so ranking by the returned order makes RRF fusion — and
+        // thus the fused result set — nondeterministic AND relevance-wrong
+        // (a weaker-but-earlier-stored chunk outranks the true best hit).
+        // Sort by `_score` descending with a stable tie-break so ranks
+        // always reflect relevance. (The indexed path already returns score
+        // order, so this is a no-op there.)
+        rows.sort(
+          (a, b) =>
+            numOr(b._score, Number.NEGATIVE_INFINITY) - numOr(a._score, Number.NEGATIVE_INFINITY) ||
+            compareIds(stableIdOf(a), stableIdOf(b)),
+        );
         return rows.map((r, i) => ({ rowId: rowIdOf(r), rank: i + 1, row: r }));
       };
 
@@ -646,8 +698,15 @@ export async function openVaultStore(opts: OpenVaultStoreOptions): Promise<Vault
         }
       }
 
-      // Sort descending by score, materialize SearchHit list.
-      scored.sort((a, b) => b.score - a.score);
+      // Sort descending by score, materialize SearchHit list. Genuine score
+      // ties (e.g. two arms placing different rows symmetrically) break on
+      // the stable content id so the fused order is deterministic across
+      // runs rather than dependent on Map insertion / storage order.
+      scored.sort(
+        (a, b) =>
+          b.score - a.score ||
+          compareIds(stableIdOf(rowMap.get(a.rowId)), stableIdOf(rowMap.get(b.rowId))),
+      );
       const hits: SearchHit[] = [];
       for (const s of scored) {
         const row = rowMap.get(s.rowId);
