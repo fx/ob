@@ -128,4 +128,15 @@ describe("delete_folder", () => {
     expect(r.isError).toBe(true);
     expect((r.parsed as { code: string }).code).toBe("not_found");
   });
+
+  test("a dot path that resolves to the vault root is rejected, not deleted", async () => {
+    const fx = await makeMcpFixture({ label: "tool-dfo-root" });
+    cleanup.push(fx.stop);
+    writeFileSync(join(fx.vaultRoot, "keep.md"), "x");
+    const r = await fx.callTool("delete_folder", { vault: "v", path: ".", recursive: true });
+    expect(r.isError).toBe(true);
+    expect((r.parsed as { code: string }).code).toBe("invalid_path");
+    // Vault root untouched.
+    expect(await fs.readFile(join(fx.vaultRoot, "keep.md"), "utf8")).toBe("x");
+  });
 });

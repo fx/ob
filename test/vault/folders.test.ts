@@ -196,6 +196,11 @@ describe("createFolder", () => {
     );
   });
 
+  test("rejects a dot path that resolves to the vault root", async () => {
+    const fx = makeVaultFixture();
+    await expect(createFolder(fx.deps, fx.slug, ".")).rejects.toBeInstanceOf(InvalidPathError);
+  });
+
   test("non-ENOENT lstat error on the probe propagates", async () => {
     const fx = makeVaultFixture();
     // The first lstat(target) is assertNotSymlinkEscape's leaf probe (ENOENT
@@ -277,6 +282,18 @@ describe("deleteFolder", () => {
     );
   });
 
+  test("refuses to delete the vault root via a dot path (recursive too)", async () => {
+    const fx = makeVaultFixture();
+    writeFileSync(join(fx.root, "keep.md"), "x");
+    await expect(deleteFolder(fx.deps, fx.slug, ".", { recursive: true })).rejects.toBeInstanceOf(
+      InvalidPathError,
+    );
+    // The vault root and its contents are untouched.
+    expect(await folderExists(fx.root)).toBe(true);
+    expect(await fs.readFile(join(fx.root, "keep.md"), "utf8")).toBe("x");
+    expect(fx.calls.drop).toEqual([]);
+  });
+
   test("non-ENOENT lstat error on the pre-check propagates", async () => {
     const fx = makeVaultFixture();
     await fs.mkdir(join(fx.root, "probe"), { recursive: true });
@@ -304,7 +321,10 @@ async function folderExists(abs: string): Promise<boolean> {
  * probe/pre-check, so this exercises the probe's non-ENOENT error branch.
  * Restores the original `fs.lstat` on every exit path.
  */
-async function withLstatFailingOnSecondCall(target: string, fn: () => Promise<void>): Promise<void> {
+async function withLstatFailingOnSecondCall(
+  target: string,
+  fn: () => Promise<void>,
+): Promise<void> {
   const realLstat = fs.lstat;
   let hits = 0;
   const stub = ((p: string, ...rest: unknown[]) => {

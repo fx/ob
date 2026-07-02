@@ -33,8 +33,13 @@ describe("safeJoin", () => {
     expect(() => safeJoin(root, ".DS_Store")).toThrow(InvalidPathError);
   });
 
-  test("a `.` (current dir) input resolves to the root itself", () => {
-    expect(safeJoin(root, "./")).toBe(root);
+  test("rejects a path that resolves to the vault root itself", () => {
+    // Dot-only paths survive `assertSafeRelativePath` but resolve to the root;
+    // the root is never a valid target (it would let a recursive delete wipe
+    // the whole vault), so `safeJoin` rejects it.
+    expect(() => safeJoin(root, "./")).toThrow(InvalidPathError);
+    expect(() => safeJoin(root, ".")).toThrow(InvalidPathError);
+    expect(() => safeJoin(root, "./.")).toThrow(InvalidPathError);
   });
 
   test("rejects the empty string", () => {

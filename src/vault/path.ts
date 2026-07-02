@@ -40,7 +40,16 @@ export function safeJoin(root: string, rel: string): string {
   // `assertSafeRelativePath` throws `InvalidPathError` directly, so we just
   // let it propagate.
   assertSafeRelativePath(rel);
-  return resolve(root, rel);
+  const abs = resolve(root, rel);
+  // A path made only of `.` segments (e.g. `.` or `./.`) survives
+  // `assertSafeRelativePath` (single-dot segments are legal mid-path) but
+  // resolves to the vault root itself. The root is never a valid operation
+  // target — addressing it would let `deleteFolder(root, { recursive })` wipe
+  // the whole vault. Reject it here so every service-core op is protected.
+  if (abs === resolve(root)) {
+    throw new InvalidPathError(rel, "resolves to the vault root");
+  }
+  return abs;
 }
 
 /**
