@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { EmbedderError } from "../../src/embeddings/index.ts";
 import {
   DocNotFoundError,
+  FolderNotEmptyError,
   InvalidBodyError,
   InvalidInputError,
   InvalidPathError,
@@ -66,6 +67,13 @@ describe("mapErrorToHttp", () => {
     expect(env.status).toBe(409);
     expect(env.body.error.code).toBe("patch_ambiguous");
     expect(env.body.error.details).toEqual({ editIndex: 1, occurrences: 4 });
+  });
+
+  test("FolderNotEmptyError → 409 folder_not_empty with path", () => {
+    const env = mapErrorToHttp(new FolderNotEmptyError("notes/full"));
+    expect(env.status).toBe(409);
+    expect(env.body.error.code).toBe("folder_not_empty");
+    expect(env.body.error.details).toEqual({ path: "notes/full" });
   });
 
   test("EmbedderError → 502 embedder_failed", () => {

@@ -30,6 +30,7 @@ export type ErrorCode =
   | "unsupported_media_type"
   | "patch_no_match"
   | "patch_ambiguous"
+  | "folder_not_empty"
   | "embedder_failed"
   | "extraction_failed"
   | "internal";
@@ -48,6 +49,7 @@ export const ERROR_CODES: readonly ErrorCode[] = Object.freeze([
   "unsupported_media_type",
   "patch_no_match",
   "patch_ambiguous",
+  "folder_not_empty",
   "embedder_failed",
   "extraction_failed",
   "internal",
@@ -192,6 +194,21 @@ export class PatchAmbiguousError extends OBError {
     });
     this.editIndex = editIndex;
     this.occurrences = occurrences;
+  }
+}
+
+/**
+ * A folder delete was requested without `recursive` on a folder that still
+ * has children. Distinct from `invalid_path` (structural) and `not_found`
+ * (the folder exists) — the caller can retry with `recursive: true`. Maps to
+ * HTTP 409 / `folder_not_empty`.
+ */
+export class FolderNotEmptyError extends OBError {
+  override readonly code = "folder_not_empty" as const;
+  readonly path: string;
+  constructor(path: string) {
+    super(`folder "${path}" is not empty; pass recursive to delete its contents`, { path });
+    this.path = path;
   }
 }
 

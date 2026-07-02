@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   DocNotFoundError,
   ERROR_CODES,
+  FolderNotEmptyError,
   InvalidBodyError,
   InvalidInputError,
   InvalidPathError,
@@ -119,6 +120,7 @@ describe("typed error classes", () => {
     expect(set.has("unsupported_media_type")).toBe(true);
     expect(set.has("patch_no_match")).toBe(true);
     expect(set.has("patch_ambiguous")).toBe(true);
+    expect(set.has("folder_not_empty")).toBe(true);
     expect(set.has("embedder_failed")).toBe(true);
     expect(set.has("extraction_failed")).toBe(true);
     expect(set.has("internal")).toBe(true);
@@ -135,6 +137,7 @@ describe("typed error classes", () => {
       new UnsupportedMediaTypeError("m"),
       new PatchNoMatchError(0),
       new PatchAmbiguousError(0, 2),
+      new FolderNotEmptyError("p"),
     ];
     const codes = instances.map((e) => e.code);
     // Every code is in the closed set.
@@ -196,6 +199,14 @@ describe("typed error classes", () => {
   test("InvalidPathError details include path and reason", () => {
     const e = new InvalidPathError("p", "bad");
     expect(e.details).toEqual({ path: "p", reason: "bad" });
+  });
+
+  test("FolderNotEmptyError carries code + path", () => {
+    const e = new FolderNotEmptyError("notes/full");
+    expect(e.code).toBe("folder_not_empty");
+    expect(e.path).toBe("notes/full");
+    expect(e.details).toEqual({ path: "notes/full" });
+    expect(e.name).toBe("FolderNotEmptyError");
   });
 
   test("OBError default constructor with no details leaves details undefined", () => {
