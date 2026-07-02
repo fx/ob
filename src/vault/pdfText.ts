@@ -63,6 +63,11 @@ function normalizePage(text: string): string {
  * Extract the text layer from PDF bytes. Resolves with `hasTextLayer: false`
  * and empty `markdown` for image-only PDFs; throws `PdfExtractionError` when
  * the PDF cannot be parsed.
+ *
+ * Extraction is uncached and unbounded: every call re-parses the input bytes,
+ * with no size or page-count ceiling. This is acceptable for typical vault
+ * PDFs; caching (keyed by sha256) and size/page-range limits are deliberately
+ * deferred (see docs/changes/0013-pdf-text-extraction.md Open Questions).
  */
 export async function extractPdfMarkdown(bytes: Uint8Array): Promise<PdfExtraction> {
   let pageTexts: string[];
