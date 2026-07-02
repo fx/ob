@@ -957,6 +957,87 @@ describe("searchHybrid (change 0008)", () => {
     expect(hits.length).toBeGreaterThan(0);
     store.close();
   });
+
+  test("hybrid ranks by relevance, not physical storage order (flaky-eval regression)", async () => {
+    // Regression for the flaky `relevance/eval` REQUIRED test. Below
+    // `FTS_INDEX_THRESHOLD` the FTS arm runs un-indexed, and LanceDB's
+    // linear scan returns rows in physical storage order — NOT by
+    // descending `_score`. When the strongest hit happens to be stored
+    // AFTER weaker matches (which is exactly what concurrent initial-scan
+    // writes produce, in a run-dependent layout), trusting that order gives
+    // the strongest hit a poor FTS rank and RRF then demotes it below a
+    // weaker-but-earlier-stored chunk. We reproduce that layout
+    // deterministically by upserting the best hit LAST.
+    const dir = tmpDir("hybrid-storage-order");
+    const store = await openVaultStore({ dataDir: dir, slug: "v", dim: 4 });
+    // Weaker lexical matches (one occurrence of "principal") stored FIRST.
+    // `d1` also gets a vector close to the query so it's a strong overall
+    // decoy — without the fix its early storage position wins RRF.
+    await store.upsert("d1.md", [
+      row({
+        path: "d1.md",
+        headingPath: [],
+        text: "principal mention",
+        embedText: "d1.md\n\nprincipal mention",
+        vector: Float32Array.from([1, 0.5, 0, 0]),
+      }),
+    ]);
+    await store.upsert("d2.md", [
+      row({
+        path: "d2.md",
+        headingPath: [],
+        text: "principal mention",
+        embedText: "d2.md\n\nprincipal mention",
+        vector: Float32Array.from([0, 1, 0, 0]),
+      }),
+    ]);
+    // Non-matching fillers keep the "principal" document frequency below the
+    // corpus size so the un-indexed FTS arm returns a positive-IDF score.
+    for (let i = 0; i < 4; i++) {
+      await store.upsert(`f${i}.md`, [
+        row({
+          path: `f${i}.md`,
+          headingPath: [],
+          text: `filler ${i} words`,
+          embedText: `f${i}.md\n\nfiller ${i} words`,
+          vector: Float32Array.from([0, 0, i < 2 ? 1 : 0, i < 2 ? 0 : 1]),
+        }),
+      ]);
+    }
+    // The true best hit — exact vector match AND highest FTS score — stored
+    // LAST, i.e. latest in physical layout.
+    await store.upsert("best.md", [
+      row({
+        path: "best.md",
+        headingPath: [],
+        text: "principal principal principal principal principal",
+        embedText: "best.md\n\nprincipal principal principal principal principal",
+        vector: Float32Array.from([1, 0, 0, 0]),
+      }),
+    ]);
+
+    const hits = await store.searchHybrid(Float32Array.from([1, 0, 0, 0]), "principal", {
+      mode: "hybrid",
+      limit: 10,
+    });
+    // Best hit wins on the combined signal regardless of storage order:
+    // exact vector match (vector rank 1) + highest FTS score (FTS rank 1)
+    // saturates the RRF bound → score exactly 1.
+    expect(hits[0]?.path).toBe("best.md");
+    expect(hits[0]?.score).toBe(1);
+    // Fused order is monotonically non-increasing in score.
+    for (let i = 1; i < hits.length; i++) {
+      expect(hits[i]?.score).toBeLessThanOrEqual(hits[i - 1]?.score ?? 1);
+    }
+    // And it's deterministic: a second identical query returns the same
+    // ordering (the stable tie-break removes layout/Map-insertion sensitivity).
+    const again = await store.searchHybrid(Float32Array.from([1, 0, 0, 0]), "principal", {
+      mode: "hybrid",
+      limit: 10,
+    });
+    expect(again.map((h) => h.path)).toEqual(hits.map((h) => h.path));
+    store.close();
+  });
 });
 
 // Best-effort cleanup helper (used by some tests that bypass tempDirSync).
