@@ -72,8 +72,9 @@ function normalizePage(text: string): string {
 export async function extractPdfMarkdown(bytes: Uint8Array): Promise<PdfExtraction> {
   let pageTexts: string[];
   let pages: number;
+  let pdf: Awaited<ReturnType<typeof getDocumentProxy>> | undefined;
   try {
-    const pdf = await getDocumentProxy(bytes);
+    pdf = await getDocumentProxy(bytes);
     const result = await extractText(pdf, { mergePages: false });
     pages = result.totalPages;
     pageTexts = result.text;
@@ -81,6 +82,16 @@ export async function extractPdfMarkdown(bytes: Uint8Array): Promise<PdfExtracti
     const wrapped = new PdfExtractionError(`failed to parse PDF: ${String(e)}`);
     wrapped.cause = e;
     throw wrapped;
+  } finally {
+    // Release the pdf.js document (and its worker/font resources) so extraction
+    // does not leak between calls. When getDocumentProxy threw, `pdf` is still
+    // undefined and there is nothing to free. A teardown failure must never mask
+    // the extraction result or the PdfExtractionError above, so swallow it.
+    try {
+      await pdf?.destroy();
+    } catch {
+      // ignore teardown failures — the real result/error must win
+    }
   }
   const normalized = pageTexts.map(normalizePage);
   const hasTextLayer = normalized.some((page) => page.length > 0);
