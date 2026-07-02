@@ -84,8 +84,11 @@ test("tools/list over HTTP returns every registered tool", async () => {
   expect(names).toEqual(
     [
       "append_file",
+      "create_folder",
       "delete_file",
+      "delete_folder",
       "list_files",
+      "list_folders",
       "list_vaults",
       "patch_file",
       "read_file",

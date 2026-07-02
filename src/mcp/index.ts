@@ -44,8 +44,11 @@ import type { VaultServiceDeps } from "../vault/files.ts";
 import { buildResourceHandler } from "./resources.ts";
 import { type ToolRegistry, buildMcpServer, createToolRegistry } from "./server.ts";
 import { appendFileTool } from "./tools/append_file.ts";
+import { createFolderTool } from "./tools/create_folder.ts";
 import { deleteFileTool } from "./tools/delete_file.ts";
+import { deleteFolderTool } from "./tools/delete_folder.ts";
 import { listFilesTool } from "./tools/list_files.ts";
+import { listFoldersTool } from "./tools/list_folders.ts";
 import { listVaultsTool } from "./tools/list_vaults.ts";
 import { patchFileTool } from "./tools/patch_file.ts";
 import { readFileTool } from "./tools/read_file.ts";
@@ -66,7 +69,7 @@ export interface McpRoutesDeps extends VaultServiceDeps {
 }
 
 /**
- * Build a fresh registry pre-populated with all nine tools. Exported so
+ * Build a fresh registry pre-populated with all tools. Exported so
  * tool tests can use a clean registry without going through the route
  * handler.
  */
@@ -81,6 +84,9 @@ export function buildToolRegistry(deps: McpRoutesDeps): ToolRegistry {
   registry.register(patchFileTool(deps));
   registry.register(appendFileTool(deps));
   registry.register(deleteFileTool(deps));
+  registry.register(listFoldersTool(deps));
+  registry.register(createFolderTool(deps));
+  registry.register(deleteFolderTool(deps));
   registry.register(searchTool(deps));
   return registry;
 }
