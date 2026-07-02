@@ -11,7 +11,10 @@ reviews:
   auto_review:
     enabled: true
     ignore_title_keywords:
+      # release-please's title pattern is `chore${scope}: release ${version}`; the
+      # scope can be present ("chore(main): ...") or empty ("chore: ..."), so cover both.
       - "chore(main): release"
+      - "chore: release"
 knowledge_base:
   code_guidelines:
     enabled: true
