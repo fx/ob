@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { loadPdfFixture } from "../helpers/loadPdfFixture.ts";
 import { makeHttpFixture, waitFor } from "./helpers.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -119,6 +120,52 @@ describe("file CRUD", () => {
     expect(res.status).toBe(406);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("unsupported_media_type");
+  });
+
+  test("GET with Accept: application/json on a PDF returns extracted text", async () => {
+    const fx = await makeHttpFixture("getjsonpdf");
+    cleanup.push(fx.stop);
+    writeFileSync(join(fx.vaultRoot, "paper.pdf"), loadPdfFixture("text.pdf"));
+    const res = await fx.app.request("/v1/vaults/v/files/paper.pdf", {
+      headers: { accept: "application/json" },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      path: string;
+      content: string;
+      contentType: string;
+      pdf: { pages: number; hasTextLayer: boolean };
+      frontmatter?: unknown;
+    };
+    expect(body.path).toBe("paper.pdf");
+    expect(body.content).toBe("alpha\n\n<!-- page 2 -->\n\nbeta");
+    expect(body.contentType).toBe("application/pdf");
+    expect(body.pdf).toEqual({ pages: 2, hasTextLayer: true });
+    expect(body.frontmatter).toBeUndefined();
+  });
+
+  test("plain GET on a PDF still returns verbatim bytes", async () => {
+    const fx = await makeHttpFixture("getbytespdf");
+    cleanup.push(fx.stop);
+    const bytes = loadPdfFixture("text.pdf");
+    writeFileSync(join(fx.vaultRoot, "paper.pdf"), bytes);
+    const res = await fx.app.request("/v1/vaults/v/files/paper.pdf");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/pdf");
+    const got = new Uint8Array(await res.arrayBuffer());
+    expect(Array.from(got)).toEqual(Array.from(bytes));
+  });
+
+  test("GET JSON on a corrupt PDF returns 422 extraction_failed", async () => {
+    const fx = await makeHttpFixture("getjsonpdfbroken");
+    cleanup.push(fx.stop);
+    writeFileSync(join(fx.vaultRoot, "bad.pdf"), loadPdfFixture("broken.pdf"));
+    const res = await fx.app.request("/v1/vaults/v/files/bad.pdf", {
+      headers: { accept: "application/json" },
+    });
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("extraction_failed");
   });
 
   test("PUT binary path: indexed=false, no indexer call", async () => {

@@ -113,5 +113,5 @@ changes:
     path: changes/0013-pdf-text-extraction.md
     description: read_file and the REST JSON read variant return extracted text (via unpdf) for PDFs by default, with format:"binary" / plain GET for verbatim bytes; new extraction_failed error code.
     spec: mcp-server
-    status: draft
+    status: complete
     depends_on: ["0004", "0005"]

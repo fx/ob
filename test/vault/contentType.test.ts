@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { detectContentType, isMarkdownPath, isTextPath } from "../../src/vault/contentType.ts";
+import {
+  detectContentType,
+  isMarkdownPath,
+  isPdfPath,
+  isTextPath,
+} from "../../src/vault/contentType.ts";
 
 describe("detectContentType", () => {
   test("maps the spec'd extensions", () => {
@@ -74,5 +79,15 @@ describe("isMarkdownPath", () => {
     expect(isMarkdownPath("A.MD")).toBe(true);
     expect(isMarkdownPath("a.txt")).toBe(false);
     expect(isMarkdownPath("a.json")).toBe(false);
+  });
+});
+
+describe("isPdfPath", () => {
+  test("only true for .pdf (case-insensitive)", () => {
+    expect(isPdfPath("paper.pdf")).toBe(true);
+    expect(isPdfPath("papers/attention.PDF")).toBe(true);
+    expect(isPdfPath("a.md")).toBe(false);
+    expect(isPdfPath("a.png")).toBe(false);
+    expect(isPdfPath("noext")).toBe(false);
   });
 });

@@ -31,6 +31,7 @@ export type ErrorCode =
   | "patch_no_match"
   | "patch_ambiguous"
   | "embedder_failed"
+  | "extraction_failed"
   | "internal";
 
 /**
@@ -48,6 +49,7 @@ export const ERROR_CODES: readonly ErrorCode[] = Object.freeze([
   "patch_no_match",
   "patch_ambiguous",
   "embedder_failed",
+  "extraction_failed",
   "internal",
 ] as const);
 

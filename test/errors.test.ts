@@ -120,6 +120,7 @@ describe("typed error classes", () => {
     expect(set.has("patch_no_match")).toBe(true);
     expect(set.has("patch_ambiguous")).toBe(true);
     expect(set.has("embedder_failed")).toBe(true);
+    expect(set.has("extraction_failed")).toBe(true);
     expect(set.has("internal")).toBe(true);
   });
 

@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { loadPdfFixture } from "../helpers/loadPdfFixture.ts";
 import { callMcp, callRestBytes, callRestJson, makeParityFixture } from "./helpers.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -45,6 +46,51 @@ test("read_file binary parity (base64 round-trip)", async () => {
   const decoded = Buffer.from(mcpBody.content, "base64");
   expect(Array.from(decoded)).toEqual(Array.from(rest.bytes));
   expect(rest.res.headers.get("content-type")).toBe("image/png");
+});
+
+test("read_file PDF text parity (MCP format:text vs REST JSON)", async () => {
+  const fx = await makeParityFixture({ label: "p-rf-pdf" });
+  cleanup.push(fx.stop);
+  writeFileSync(join(fx.vaultRoot, "paper.pdf"), loadPdfFixture("text.pdf"));
+  const mcp = await callMcp(fx, "read_file", { vault: "v", path: "paper.pdf" });
+  const rest = await callRestJson(fx, "GET", "/v1/vaults/v/files/paper.pdf");
+  expect(mcp.isError).toBe(false);
+  expect(rest.isError).toBe(false);
+  const mcpBody = mcp.body as Record<string, unknown>;
+  expect(mcpBody.encoding).toBe("utf-8");
+  // REST omits the MCP-only `encoding` field; everything else — including the
+  // `pdf` metadata and on-disk `size`/`sha256` — must be structurally equal.
+  const stripped = { ...mcpBody } as Record<string, unknown>;
+  // biome-ignore lint/performance/noDelete: test-only one-off shape normalization
+  delete stripped.encoding;
+  expect(stripped).toEqual(rest.body as Record<string, unknown>);
+});
+
+test("read_file PDF binary parity (MCP format:binary vs REST plain GET)", async () => {
+  const fx = await makeParityFixture({ label: "p-rf-pdf-bin" });
+  cleanup.push(fx.stop);
+  const bytes = loadPdfFixture("text.pdf");
+  writeFileSync(join(fx.vaultRoot, "paper.pdf"), bytes);
+  const mcp = await callMcp(fx, "read_file", { vault: "v", path: "paper.pdf", format: "binary" });
+  const rest = await callRestBytes(fx, "/v1/vaults/v/files/paper.pdf");
+  expect(mcp.isError).toBe(false);
+  expect(rest.status).toBe(200);
+  const mcpBody = mcp.body as { encoding: string; content: string };
+  expect(mcpBody.encoding).toBe("base64");
+  const decoded = Buffer.from(mcpBody.content, "base64");
+  expect(Array.from(decoded)).toEqual(Array.from(rest.bytes));
+});
+
+test("read_file PDF extraction_failed parity", async () => {
+  const fx = await makeParityFixture({ label: "p-rf-pdf-broken" });
+  cleanup.push(fx.stop);
+  writeFileSync(join(fx.vaultRoot, "bad.pdf"), loadPdfFixture("broken.pdf"));
+  const mcp = await callMcp(fx, "read_file", { vault: "v", path: "bad.pdf" });
+  const rest = await callRestJson(fx, "GET", "/v1/vaults/v/files/bad.pdf");
+  expect(mcp.isError).toBe(true);
+  expect(rest.isError).toBe(true);
+  expect((mcp.body as { code: string }).code).toBe((rest.body as { code: string }).code);
+  expect((mcp.body as { code: string }).code).toBe("extraction_failed");
 });
 
 test("read_file 404 parity", async () => {

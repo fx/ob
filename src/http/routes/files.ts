@@ -11,7 +11,7 @@ import grayMatter from "gray-matter";
 import type { Context, Hono } from "hono";
 import { InvalidBodyError, InvalidQueryError, UnsupportedMediaTypeError } from "../../errors.ts";
 import { AppendBody, ListFilesQuery, PatchFileBody, PutMarkdownBody } from "../../schemas/index.ts";
-import { isMarkdownPath } from "../../vault/contentType.ts";
+import { isMarkdownPath, isPdfPath } from "../../vault/contentType.ts";
 import {
   appendFile,
   deleteFile,
@@ -20,6 +20,7 @@ import {
   readFile,
   writeFile,
 } from "../../vault/files.ts";
+import { extractPdfMarkdown } from "../../vault/pdfText.ts";
 import type { RouteDeps } from "./types.ts";
 import { zodIssuesToInvalidInput } from "./zod.ts";
 
@@ -106,29 +107,44 @@ export function mountFileRoutes(app: Hono, deps: RouteDeps): void {
     const wantsJson = accept.includes("application/json");
     const result = await readFile(deps, slug, path);
     if (wantsJson) {
-      if (!isMarkdownPath(path)) {
-        // Spec: JSON variant on non-Markdown returns 406.
-        return c.json(
-          {
-            error: {
-              code: "unsupported_media_type",
-              message: "JSON variant is only available for Markdown files",
-              details: { path },
-            },
-          },
-          406,
-        );
+      if (isMarkdownPath(path)) {
+        const text = new TextDecoder().decode(result.bytes);
+        const parsed = grayMatter(text);
+        return c.json({
+          path: result.path,
+          content: parsed.content,
+          frontmatter: frontmatterToObject(parsed.data),
+          mtimeMs: result.mtimeMs,
+          size: result.size,
+          sha256: result.sha256,
+        });
       }
-      const text = new TextDecoder().decode(result.bytes);
-      const parsed = grayMatter(text);
-      return c.json({
-        path: result.path,
-        content: parsed.content,
-        frontmatter: frontmatterToObject(parsed.data),
-        mtimeMs: result.mtimeMs,
-        size: result.size,
-        sha256: result.sha256,
-      });
+      if (isPdfPath(path)) {
+        // PDFs return extracted text (no frontmatter). Parse failure throws
+        // PdfExtractionError → mapped to 422 `extraction_failed`. `size`/
+        // `sha256` still describe the on-disk bytes.
+        const extraction = await extractPdfMarkdown(result.bytes);
+        return c.json({
+          path: result.path,
+          content: extraction.markdown,
+          contentType: result.contentType,
+          pdf: { pages: extraction.pages, hasTextLayer: extraction.hasTextLayer },
+          mtimeMs: result.mtimeMs,
+          size: result.size,
+          sha256: result.sha256,
+        });
+      }
+      // Spec: JSON variant on any other non-Markdown, non-PDF file → 406.
+      return c.json(
+        {
+          error: {
+            code: "unsupported_media_type",
+            message: "JSON variant is only available for Markdown and PDF files",
+            details: { path },
+          },
+        },
+        406,
+      );
     }
     return new Response(result.bytes, {
       status: 200,

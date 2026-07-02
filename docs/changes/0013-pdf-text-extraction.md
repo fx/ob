@@ -5,7 +5,7 @@
 `read_file` (MCP) and the JSON read variant (REST) return extracted plain-text/Markdown content for PDFs by default, instead of the raw base64/binary payload. Callers can still request the verbatim bytes explicitly. Motivated by real agent failures: a base64-encoded PDF blew past the MCP client's token ceiling (~224k characters for a modest PDF) while carrying zero readable signal for the model.
 
 **Spec:** [MCP Server](../specs/mcp-server/) (and [REST API](../specs/rest-api/) for the mirrored surface)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0004, 0005
 
 ## Motivation
@@ -32,7 +32,7 @@ Skipping or weakening any of these rules to land the PR MUST be treated as a bug
 
 - A shared-core module `src/vault/pdfText.ts` MUST expose `extractPdfMarkdown(bytes: Uint8Array): Promise<PdfExtraction>` where `PdfExtraction = { markdown: string, pages: number, hasTextLayer: boolean }`.
 - Extraction MUST use `unpdf` (`extractText(pdf, { mergePages: false })`) so page boundaries are preserved.
-- Pages MUST be joined with `\n\n<!-- page N -->\n\n` markers (N is the 1-based page number of the page that follows; no marker before page 1). Markers are HTML comments so they never collide with content-derived Markdown structure.
+- Only pages that have text MUST be emitted: empty (image-only) pages are dropped from the join. Each emitted page is preceded by a `\n\n<!-- page N -->\n\n` marker (N is that page's own 1-based physical page number) — with no marker before page 1. Dropping empty pages preserves the whitespace guarantee for mixed text/image PDFs (no leading/trailing blank runs, no marker pointing at empty content). Markers are HTML comments so they never collide with content-derived Markdown structure.
 - Per-page text SHOULD be whitespace-normalized: trim each page, collapse runs of 3+ newlines to 2. No heading/list reconstruction in v1 — output is Markdown-safe plain text, not reflowed Markdown.
 - `hasTextLayer` MUST be `false` when the concatenated, trimmed text of all pages is empty (scanned/image-only PDF). This is a successful result, NOT an error; `markdown` is `""`.
 - If the PDF cannot be parsed (corrupt, encrypted/password-protected), the module MUST throw a typed error that adapters map to error code `extraction_failed`. OCR is OUT OF SCOPE.
@@ -135,15 +135,16 @@ Skipping or weakening any of these rules to land the PR MUST be treated as a bug
 
 ## Tasks
 
-- [ ] Core extraction + contentType helper — add `unpdf` (exact pin); implement `src/vault/pdfText.ts` (`extractPdfMarkdown`, page joining, whitespace normalization, `PdfExtractionError`) and `isPdfPath()` in `src/vault/contentType.ts`; create `test/fixtures/pdf/{text,scanned,broken}.pdf`; unit tests in `test/vault/pdfText.test.ts` covering text-layer, scanned, corrupt, and page-marker format (100% branch)
-- [ ] Adapters + error code — add `format` to MCP `read_file` (schema, branching, updated tool description) with tests in `test/mcp/tools/read_file.test.ts`; extend REST JSON-variant branch in `src/http/routes/files.ts` for PDFs (200 JSON, 422 `extraction_failed`, 406 preserved for other binaries) with tests in `test/http/routes.test.ts`; register `extraction_failed` in the shared error model
-- [ ] Parity + docs — extend `test/parity/read_file.test.ts` with text-format PDF parity, binary-format byte parity, and `extraction_failed` code parity; verify coverage stays 100%; flip this change to complete and update spec changelogs if wording drifted
+- [x] Core extraction + contentType helper — add `unpdf` (exact pin); implement `src/vault/pdfText.ts` (`extractPdfMarkdown`, page joining, whitespace normalization, `PdfExtractionError`) and `isPdfPath()` in `src/vault/contentType.ts`; create `test/fixtures/pdf/{text,scanned,broken}.pdf`; unit tests in `test/vault/pdfText.test.ts` covering text-layer, scanned, corrupt, and page-marker format (100% branch)
+- [x] Adapters + error code — add `format` to MCP `read_file` (schema, branching, updated tool description) with tests in `test/mcp/tools/read_file.test.ts`; extend REST JSON-variant branch in `src/http/routes/files.ts` for PDFs (200 JSON, 422 `extraction_failed`, 406 preserved for other binaries) with tests in `test/http/routes.test.ts`; register `extraction_failed` in the shared error model
+- [x] Parity + docs — extend `test/parity/read_file.test.ts` with text-format PDF parity, binary-format byte parity, and `extraction_failed` code parity; verify coverage stays 100%; flip this change to complete and update spec changelogs if wording drifted
 
 ## Open Questions
 
 - [ ] Should extracted PDF text feed the search index (chunker/embeddings)? — Natural follow-up; needs its own change against [vault-indexer](../specs/vault-indexer/). **Default:** not in this change.
 - [ ] Page-range / truncation controls (`pages: "3-7"`, `maxChars`) for very large PDFs whose *extracted* text still overflows client token limits? — **Default:** not in v1; the extracted text of typical vault PDFs is an order of magnitude smaller than its base64.
 - [ ] Light structure reconstruction (headings from font-size heuristics, e.g. `@opendocsg/pdf2md`)? — **Default:** not in v1; plain text with page markers is sufficient for reading workflows.
+- [ ] Bounding extraction: input size ceiling, per-call timeout/abort (race `getDocumentProxy`/`extractText` against a deadline with best-effort `destroy()`), and a sha256-keyed extraction cache? — Raised by review; belongs with the truncation controls above. **Default:** not in v1; extraction is local compute on operator-controlled vault files.
 
 ## References
 
