@@ -144,6 +144,7 @@ Skipping or weakening any of these rules to land the PR MUST be treated as a bug
 - [ ] Should extracted PDF text feed the search index (chunker/embeddings)? — Natural follow-up; needs its own change against [vault-indexer](../specs/vault-indexer/). **Default:** not in this change.
 - [ ] Page-range / truncation controls (`pages: "3-7"`, `maxChars`) for very large PDFs whose *extracted* text still overflows client token limits? — **Default:** not in v1; the extracted text of typical vault PDFs is an order of magnitude smaller than its base64.
 - [ ] Light structure reconstruction (headings from font-size heuristics, e.g. `@opendocsg/pdf2md`)? — **Default:** not in v1; plain text with page markers is sufficient for reading workflows.
+- [ ] Bounding extraction: input size ceiling, per-call timeout/abort (race `getDocumentProxy`/`extractText` against a deadline with best-effort `destroy()`), and a sha256-keyed extraction cache? — Raised by review; belongs with the truncation controls above. **Default:** not in v1; extraction is local compute on operator-controlled vault files.
 
 ## References
 
