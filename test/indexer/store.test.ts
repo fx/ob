@@ -976,6 +976,7 @@ describe("searchHybrid (change 0008)", () => {
     await store.upsert("d1.md", [
       row({
         path: "d1.md",
+        headingPath: [],
         text: "principal mention",
         embedText: "d1.md\n\nprincipal mention",
         vector: Float32Array.from([1, 0.5, 0, 0]),
@@ -984,6 +985,7 @@ describe("searchHybrid (change 0008)", () => {
     await store.upsert("d2.md", [
       row({
         path: "d2.md",
+        headingPath: [],
         text: "principal mention",
         embedText: "d2.md\n\nprincipal mention",
         vector: Float32Array.from([0, 1, 0, 0]),
@@ -995,6 +997,7 @@ describe("searchHybrid (change 0008)", () => {
       await store.upsert(`f${i}.md`, [
         row({
           path: `f${i}.md`,
+          headingPath: [],
           text: `filler ${i} words`,
           embedText: `f${i}.md\n\nfiller ${i} words`,
           vector: Float32Array.from([0, 0, i < 2 ? 1 : 0, i < 2 ? 0 : 1]),
@@ -1006,6 +1009,7 @@ describe("searchHybrid (change 0008)", () => {
     await store.upsert("best.md", [
       row({
         path: "best.md",
+        headingPath: [],
         text: "principal principal principal principal principal",
         embedText: "best.md\n\nprincipal principal principal principal principal",
         vector: Float32Array.from([1, 0, 0, 0]),
