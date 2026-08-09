@@ -94,10 +94,12 @@ Because `listFiles`, `listFolders`, `readFile`, `writeFile`, `patchFile`, `appen
 
 The indexer is per-vault and stores vault-relative paths, so the wrapper MUST translate at the boundary:
 
+Every rule below is a no-op for the vault-root scope (`prefix === ""`), which MUST behave exactly like today's unscoped indexer access: no prefixing, no forced filter, no stripping.
+
 - `reindex(slug, path)` and `drop(slug, path)` MUST prepend the prefix before delegating.
-- `search(slug, query, opts)` MUST force `filter.pathPrefix` to `` `${prefix}/` `` — **with the trailing slash**. `store.ts` filters with `starts_with(path, …)` (`src/indexer/store.ts:362`), so the bare prefix `agents/a` would also match `agents/ab/note.md`.
-- A caller-supplied `filter.pathPrefix` MUST be validated with `assertSafeRelativePath` and joined UNDER the scope prefix, never used to replace it.
-- Returned `SearchHit.path` values MUST have the prefix stripped before they reach the client. Any hit whose path does not start with the scope prefix MUST be dropped rather than returned unprefixed — a defensive filter, since a stale index entry is otherwise indistinguishable from an in-scope hit after stripping.
+- `search(slug, query, opts)` MUST force `filter.pathPrefix` to `` `${prefix}/` `` — **with the trailing slash**. `store.ts` filters with `starts_with(path, …)` (`src/indexer/store.ts:362`), so the bare prefix `agents/a` would also match `agents/ab/note.md`. With `prefix === ""` the wrapper MUST omit the forced filter entirely rather than emit `"/"`: indexed paths are vault-relative and never start with `/`, so a literal `` `${prefix}/` `` would match nothing and silently empty every search in the vault-root scope.
+- A caller-supplied `filter.pathPrefix` MUST be validated with `assertSafeRelativePath` and joined UNDER the scope prefix, never used to replace it. In the vault-root scope it MUST be validated and passed through unchanged.
+- Returned `SearchHit.path` values MUST have the prefix stripped before they reach the client. Any hit whose path does not start with the scope prefix MUST be dropped rather than returned unprefixed — a defensive filter, since a stale index entry is otherwise indistinguishable from an in-scope hit after stripping. In the vault-root scope no hit is stripped and none is dropped.
 
 #### Status tools
 
@@ -211,6 +213,15 @@ The REST surface stays unscoped in this change. `test/parity/` continues to comp
 - **THEN** the result is `{ items: [], nextCursor: null }` — not an error
 - **AND** a subsequent `write_file { path: "memory.md" }` creates `<vault>/agents/new/memory.md`
 
+#### Scenario: Vault-root scope behaves like the unscoped mount, narrowed to one vault
+
+- **GIVEN** vaults `v` and `w` are configured and indexed
+- **AND** a session initialized on `/mcp/v` (no prefix)
+- **WHEN** the client invokes `list_files` and `search`
+- **THEN** results cover the whole of vault `v` with vault-relative paths — identical to the unscoped mount's results for `v`
+- **AND** the indexer received no forced `filter.pathPrefix`
+- **AND** `vault_status { vault: "w" }` is `isError: true` with `code: "vault_not_found"`
+
 #### Scenario: Unscoped mount is unchanged
 
 - **GIVEN** a session initialized on `/mcp`
@@ -297,7 +308,7 @@ Routing changes are confined to `buildMcpRoutes`: the three method handlers gain
   - [ ] `assertScopeRootSafe(scopeRoot, vaultRoot)` wrapping `assertNotSymlinkEscape`
   - [ ] `scopeDeps(deps, scope)` — vault lookup substitution, indexer `reindex` / `drop` prefixing, `search` filter forcing + hit stripping + out-of-scope hit rejection
   - [ ] `scopeStatusDeps(deps, scope)` — supervisor/indexer listings filtered to the scoped slug
-  - [ ] Tests in `test/mcp/scope.test.ts` covering: prefix validation (`..`, leading `/`, hidden segment, NUL, over-length), alias normalization (`agents/a`, `agents/a/`, `agents/./a` → one scope key), empty prefix accepted as the vault-root scope, boundary non-collision (`agents/a` vs `agents/ab`), symlinked scope root, hit stripping, out-of-scope hit rejection, caller `pathPrefix` nesting and rejection
+  - [ ] Tests in `test/mcp/scope.test.ts` covering: prefix validation (`..`, leading `/`, hidden segment, NUL, over-length), alias normalization (`agents/a`, `agents/a/`, `agents/./a` → one scope key), empty prefix accepted as the vault-root scope (no prefixing, no forced search filter, no hit stripping), boundary non-collision (`agents/a` vs `agents/ab`), symlinked scope root, hit stripping, out-of-scope hit rejection, caller `pathPrefix` nesting and rejection
 - [ ] **Routing + session binding: `src/mcp/index.ts`**
   - [ ] `/:slug` and `/:slug/*` variants on POST / GET / DELETE
   - [ ] `resolveScope(c)` returning an `McpScope` or a rejection `Response` (400 `-32000` invalid scope, 404 `-32000` unknown vault)
