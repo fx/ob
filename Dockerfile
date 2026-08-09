@@ -11,10 +11,12 @@
 # Layer order (per change 0006 design): apt → npm globals → bun deps →
 # app source. Source edits invalidate only the cheap final layers.
 #
-# Every external version is captured as a build ARG below. Bumps are
-# one-edit changes; reproducing a historical build is a single
-# `docker build --build-arg ...`. ARGs declared before the first FROM are
-# "global" — each stage that wants to read one must redeclare it.
+# The toolchain versions (Node, Bun, obsidian-headless) are captured as build
+# ARGs below. Bumps are one-edit changes, and a historical toolchain
+# reproduces exactly via `docker build --build-arg ...`. The runtime stage's
+# apt packages are deliberately NOT pinned — see the note above that
+# `RUN apt-get`. ARGs declared before the first FROM are "global" — each
+# stage that wants to read one must redeclare it.
 
 # Node 22 toolchain (must remain at the same major as `mise.toml`'s
 # `node = "22.X.Y"`). Latest 22-bookworm-slim patch at PR time.
@@ -27,16 +29,6 @@ ARG BUN_VERSION=1.3.13
 # obsidian-headless is pre-1.0; lock the exact patch and bump deliberately,
 # per change 0006's "Open Questions".
 ARG OBSIDIAN_HEADLESS_VERSION=0.0.8
-
-# apt package versions in oven/bun:${BUN_VERSION} (Debian trixie) at PR time.
-# Pinned so rebuilds are reproducible. When Debian publishes a security
-# update, `apt-get install` will fail until these strings are bumped — which
-# is the desired forcing function. Re-discover with:
-#   docker run --rm oven/bun:${BUN_VERSION} bash -c \
-#     'apt-get update -qq && apt-cache policy tini curl ca-certificates'
-ARG TINI_VERSION=0.19.0-3+b7
-ARG CURL_VERSION=8.14.1-2+deb13u3
-ARG CA_CERTIFICATES_VERSION=20250419
 
 # Git revision baked into the image's OCI labels. CI sets this to the 7-char
 # short SHA; local `docker build` falls back to "dev". Mirrors the
@@ -89,9 +81,6 @@ RUN bun install --frozen-lockfile --production \
 # ── Stage 3: runtime ─────────────────────────────────────────────────────────
 # Final stage. Same Bun base as bun-deps so the embedded glibc matches.
 FROM oven/bun:${BUN_VERSION} AS runtime
-ARG TINI_VERSION
-ARG CURL_VERSION
-ARG CA_CERTIFICATES_VERSION
 ARG GIT_SHA
 
 # OCI image metadata. `docker/metadata-action` writes its own labels in CI;
@@ -103,14 +92,18 @@ LABEL org.opencontainers.image.source="https://github.com/fx/ob" \
       org.opencontainers.image.licenses="MIT"
 
 # tini (PID 1 signal forwarder), curl (HEALTHCHECK), ca-certificates (TLS for
-# HuggingFace + OpenAI). Each package version is pinned via build ARG so
-# rebuilds are reproducible. Bump these in the same PR that bumps the Bun
-# base when Debian rotates a point release.
+# HuggingFace + OpenAI). Installed unpinned on purpose: exact apt pins were
+# dropped because Debian removes superseded versions from the archive on every
+# point release, which broke unrelated builds. Whatever Debian trixie currently
+# ships for these three is what we want — the pinned base image is what makes
+# the layer reproducible. DL3008 asks for exactly the pins we dropped, so it is
+# silenced for this one instruction (hadolint 2.12 rejects a same-line reason).
+# hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      "tini=${TINI_VERSION}" \
-      "curl=${CURL_VERSION}" \
-      "ca-certificates=${CA_CERTIFICATES_VERSION}" \
+      tini \
+      curl \
+      ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 # Pull Node 22 + the global obsidian-headless install over from node-tools.
