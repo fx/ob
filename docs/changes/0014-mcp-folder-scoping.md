@@ -2,7 +2,7 @@
 
 ## Summary
 
-Make the MCP mount scopeable by URL: `POST /mcp/<slug>/<prefix...>` binds the session to one vault and one folder prefix, and presents that prefix to the client as if it were the vault root. `/mcp` (unscoped) is unchanged. A scoped session can read, write, list, and search only inside its prefix, and every path it sees or sends is relative to that prefix — it never learns the prefix at all. Implements the Session scoping section newly added to the [MCP Server spec](../specs/mcp-server/index.md#session-scoping).
+Make the MCP mount scopeable by URL: POST/GET/DELETE `/mcp/:slug/:prefix{.+}` binds the session to one vault and one folder prefix, and presents that prefix to the client as if it were the vault root. `/mcp` (unscoped) is unchanged. A scoped session can read, write, list, and search only inside its prefix, and every path it sees or sends is relative to that prefix — it never learns the prefix at all. Implements the Session scoping section newly added to the [MCP Server spec](../specs/mcp-server/index.md#session-scoping).
 
 **Spec:** [MCP Server](../specs/mcp-server/)
 **Status:** draft
