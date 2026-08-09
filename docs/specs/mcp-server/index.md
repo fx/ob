@@ -14,13 +14,33 @@ The MCP server exposes the same multi-vault CRUD and search surface as the REST 
 
 ### Transport
 
-- The MCP server MUST be mounted at a single endpoint `/mcp` on the existing Hono app, handling three methods:
+- The MCP server MUST be mounted at `/mcp` on the existing Hono app (plus the scoped variants in [Session scoping](#session-scoping)), handling three methods:
   - `POST /mcp` — client → server JSON-RPC. The response MUST be `Content-Type: application/json` for a single response, or `Content-Type: text/event-stream` when the server needs to stream notifications/responses related to that request.
   - `GET /mcp` — opens a long-lived server → client SSE stream for messages not tied to an in-flight request (server-initiated notifications, late tool results). MAY return `405 Method Not Allowed` if the server has nothing to push, but the implementation SHOULD support it.
   - `DELETE /mcp` — explicit session termination by the client.
 - The server MUST issue a session id in the `Mcp-Session-Id` response header on the first request of a session and MUST require that header on every subsequent request for the session.
 - The server MUST NOT bind a separate port; it shares `HTTP_PORT`.
 - The server MUST emit `tools/list_changed` notifications only when vault membership actually changes (which today is only at startup; this is a forward hook).
+
+### Session scoping
+
+A session MAY be confined to one vault and one folder prefix, so a client (typically an LLM agent using the vault as a memory store) can be given a private root inside a shared vault. The scope is carried by the connection URL and MUST NOT be selectable by any tool argument.
+
+| Route | Scope |
+|---|---|
+| `POST\|GET\|DELETE /mcp` | Unscoped — the whole configured vault set. |
+| `POST\|GET\|DELETE /mcp/:slug` | Vault `:slug`, prefix empty (vault root). |
+| `POST\|GET\|DELETE /mcp/:slug/*prefix` | Vault `:slug`, folder prefix `*prefix` (e.g. `/mcp/v/agents/claude-1`). |
+
+- A scoped session MUST see its prefix AS the vault root: every path it sends and every path it receives — in tool arguments, tool results, pagination cursors, `obvault://` resource URIs, and error envelopes — MUST be relative to the prefix. The prefix itself MUST NOT appear in any client-visible value.
+- A scoped session MUST NOT be able to read, write, list, or search anything outside its prefix, and MUST NOT be able to address any other vault (`vault_not_found`).
+- The prefix MUST be percent-decoded and validated with the same rules as every other vault-relative path (`..`, absolute paths, hidden segments, NUL, over-length are rejected). An invalid prefix MUST be rejected with HTTP `400` and JSON-RPC error `-32000`; an unknown `:slug` with HTTP `404` and `-32000`. Neither may allocate a session.
+- The scope root MUST be checked for symlink escape when the session is bound — the per-operation symlink guards only walk up to the root they are given.
+- The scope MUST be bound at `initialize` and stored with the session. A request whose URL scope differs from the scope stored for its `Mcp-Session-Id` MUST be rejected as an unknown session (HTTP `404`, `-32001`) and MUST NOT be executed.
+- In a scoped session the `vault` argument MUST become optional (defaulting to the scoped slug) and the advertised `inputSchema` MUST drop `"vault"` from `required`. A different slug MUST surface `vault_not_found`.
+- A scoped session's `initialize` result MUST carry an `instructions` string stating that all paths are relative to a private root, that `vault` may be omitted, and that nothing outside the root is reachable.
+- Vault-level counts reported by `vault_status` (`documents`, `chunks`, `pending`, `errors`) remain vault-wide in a scoped session; the tool description MUST say so.
+- Scoping is a **containment** mechanism for a cooperating client, NOT an authentication or authorization boundary — see [Constraints](#constraints).
 
 ### Tool surface
 
@@ -149,6 +169,7 @@ src/mcp/
     delete_file.ts
     search.ts
   resources.ts    # obvault:// URI handlers
+  scope.ts        # URL scope parsing + scoped service-deps wrapper
 ```
 
 ### Tool implementation pattern
@@ -179,8 +200,8 @@ All tool handlers MUST call into the same internal service modules used by REST 
 
 ## Constraints
 
-- No auth in v1 (mirrors REST).
-- Tool list is fixed; clients MUST NOT discover dynamic, vault-specific tool variants. Multi-vault is handled by the `vault` argument on each tool, not by per-vault tool names.
+- No auth in v1 (mirrors REST). [Session scoping](#session-scoping) does NOT change this: a scoped URL confines a cooperating client, but any caller that can reach a scoped mount can also reach the unscoped `/mcp` and address the whole vault. Scoping MUST NOT be documented or relied on as an authentication or authorization boundary until the auth open question below is resolved.
+- Tool names are fixed; clients MUST NOT discover dynamic, vault-specific tool variants. Multi-vault is handled by the `vault` argument on each tool, not by per-vault tool names. A scoped session advertises the same tool names with the same schemas, differing only in that `vault` is not `required`.
 - Streaming tool responses are NOT used in v1; every tool returns a single response payload.
 
 ## Open Questions
@@ -204,3 +225,4 @@ All tool handlers MUST call into the same internal service modules used by REST 
 | 2026-05-03 | `search` tool input gains `mode`, `threshold`, `mmrLambda`, `maxPerPath` knobs (mirroring REST) | [Change 0008](../../changes/0008-search-relevance.md) |
 | 2026-05-25 | Added `list_folders` / `create_folder` / `delete_folder` tools mirroring the new REST `/v1/vaults/:slug/folders` surface. Required so empty folders (invisible to `list_files`) are reachable. | [Change 0012](../../changes/0012-folder-operations.md) |
 | 2026-07-01 | `read_file` gains `format?: "text" \| "binary"` (default `"text"`): PDFs now return extracted text with `pdf: { pages, hasTextLayer }` metadata by default; `format: "binary"` returns verbatim base64 for any file. New error code `extraction_failed` for unparseable PDFs. | [Change 0013](../../changes/0013-pdf-text-extraction.md) |
+| 2026-08-09 | Added Session scoping: `/mcp/:slug/*prefix` binds a session to one vault and folder prefix, presented to the client as the vault root. Scoped sessions make `vault` optional, carry `instructions`, and reject session ids presented on a different scope. Containment only — not an auth boundary. | [Change 0014](../../changes/0014-mcp-folder-scoping.md) |
