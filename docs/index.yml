@@ -121,4 +121,4 @@ changes:
     description: Optional URL-carried MCP session scope (/mcp/:slug/*prefix) that confines a session to one vault and folder prefix and presents that prefix as the vault root, so agents can use a shared vault as private memory.
     spec: mcp-server
     status: draft
-    depends_on: ["0005", "0012"]
+    depends_on: ["0005", "0008", "0012"]

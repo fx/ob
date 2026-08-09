@@ -6,7 +6,7 @@ Make the MCP mount scopeable by URL: `POST /mcp/<slug>/<prefix...>` binds the se
 
 **Spec:** [MCP Server](../specs/mcp-server/)
 **Status:** draft
-**Depends On:** 0005, 0012
+**Depends On:** 0005, 0008, 0012
 
 ## Motivation
 
@@ -53,6 +53,7 @@ A client configures it exactly like any other HTTP MCP server:
 
 Rules:
 
+- A decoded segment that itself contains a path separator (`/` or `\`) MUST be rejected outright. A percent-encoded separator is never legitimate inside one scope segment, and rejecting it early stops `%2Fetc` from being quietly rewritten into the relative prefix `etc` by the empty-segment normalization below (containment holds either way, but silently reinterpreting an absolute path as a relative one is not a behavior worth having).
 - The `prefix` segments MUST be percent-decoded **exactly once**, joined with `/`, stripped of any trailing `/`, and normalized by dropping empty and single-dot (`.`) segments — and only then validated. Order matters in both directions: validating before decoding would let `%2e%2e%2f` through, and decoding a second time would turn a literal `%252e%252e` into `..` after validation had already passed. The implementation MUST establish which decode the router already performed and MUST NOT add another. Normalization is what makes `/mcp/v/agents/a`, `/mcp/v/agents/a/`, and `/mcp/v/agents/./a` one scope rather than three — they resolve to the same root, so they MUST produce the same scope key, or the per-scope memo and the session scope-match check below would treat aliases of one scope as distinct.
 - A prefix that is empty after normalization (`/mcp/:slug`, or a prefix of only `.` / `/` segments) is the **vault-root scope**. It MUST be accepted, and it MUST NOT be passed to `assertSafeRelativePath` — that function rejects the empty string outright (`src/errors.ts:241-243`). The vault-root scope is exactly today's unscoped behavior narrowed to a single vault.
 - Every non-empty normalized prefix MUST be validated with the existing `assertSafeRelativePath`. `..`, absolute paths, NUL bytes, hidden (leading-dot) segments, drive prefixes, and over-length paths MUST be rejected — the same closed set the file surface already rejects.
@@ -247,7 +248,10 @@ The whole change lives in the MCP adapter. `src/vault/` is untouched, because th
 ```ts
 // src/mcp/scope.ts — the load-bearing 20 lines.
 export function scopeDeps(deps: McpRoutesDeps, scope: McpScope): McpRoutesDeps {
-  const inner = deps.vault(scope.slug);              // null → caller already rejected the scope
+  const inner = deps.vault(scope.slug);
+  // `vault()` is nullable. `parseScope` already rejected unknown slugs with a 404,
+  // so reaching here with null is a wiring bug, not a client input — fail loudly.
+  if (inner === null) throw new Error(`scope references unknown vault "${scope.slug}"`);
   const root = join(inner.root, scope.prefix);
   const under = (p: string): string => (scope.prefix === "" ? p : `${scope.prefix}/${p}`);
   const strip = (p: string): string | null =>
@@ -283,7 +287,7 @@ Routing changes are confined to `buildMcpRoutes`: the three method handlers gain
 ### Decisions
 
 - **Decision:** Present the scope as a chroot (paths relative to the prefix) rather than filtering visible full paths.
-  - **Why:** The agent never learns its own folder name, so the id cannot leak into note bodies, wikilinks, or search filters, and renaming an agent's folder does not invalidate anything it wrote. It also makes the prompt portable: the same memory prompt works for every agent with no per-agent path templating. Mechanically it is also the *smaller* change — one deps wrapper versus a rejection check plus result filtering at every list, search, and resource site.
+  - **Why:** The agent never learns its own folder name, so it never has to embed the id in note bodies, wikilinks, or search filters, and renaming an agent's folder does not invalidate anything it wrote. It also makes the prompt portable: the same memory prompt works for every agent with no per-agent path templating. Mechanically it is also the *smaller* change — one deps wrapper versus a rejection check plus result filtering at every list, search, and resource site.
   - **Alternatives considered:** **Visible full paths + reject out-of-prefix** — the agent must know and repeat `agents/<id>/` in every call, and every listing/search/resource result still needs filtering, so it is strictly more code for worse ergonomics. **A separate vault per agent** — `VAULTS_JSON` is operator-configured and each vault is a separate `ob sync` child process plus a separate LanceDB store; that is a heavyweight, operator-mediated lifecycle for what should be a folder.
 - **Decision:** Carry the scope in the URL path.
   - **Why:** Every MCP client can configure a URL; not every client can set custom headers. The URL is also the one piece of configuration that is already per-agent, and it keeps the server stateless — no registry, no mapping table, nothing to provision.
