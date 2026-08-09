@@ -77,7 +77,12 @@ interface ParsedCursor {
  */
 const RESOURCE_NOT_FOUND = -32002;
 
-function notFound(uri: string): McpError {
+/**
+ * Canonical "this URI addresses nothing" error. Exported so the scoped
+ * resource guard in `src/mcp/scope.ts` can surface a rejected scope root
+ * through the exact same shape rather than minting a parallel one.
+ */
+export function notFound(uri: string): McpError {
   return new McpError(RESOURCE_NOT_FOUND, `resource "${uri}" not found`, {
     code: "not_found",
     uri,
