@@ -43,7 +43,9 @@ The MCP sub-app MUST accept the scope as URL path segments after `/mcp`:
 |---|---|
 | `POST\|GET\|DELETE /mcp` | Unscoped. Behavior identical to today. |
 | `POST\|GET\|DELETE /mcp/:slug` | Scoped to vault `:slug`, prefix empty (vault root). |
-| `POST\|GET\|DELETE /mcp/:slug/*prefix` | Scoped to vault `:slug`, folder prefix `*prefix`. |
+| `POST\|GET\|DELETE /mcp/:slug/:prefix{.+}` | Scoped to vault `:slug`, folder prefix `:prefix`. |
+
+The `:prefix{.+}` pattern is the same named-regex form the REST file and folder routes already use for multi-segment paths (`src/http/routes/files.ts:94`), so the two adapters stay consistent.
 
 A client configures it exactly like any other HTTP MCP server:
 
@@ -53,8 +55,11 @@ A client configures it exactly like any other HTTP MCP server:
 
 Rules:
 
-- A decoded segment that itself contains a path separator (`/` or `\`) MUST be rejected outright. A percent-encoded separator is never legitimate inside one scope segment, and rejecting it early stops `%2Fetc` from being quietly rewritten into the relative prefix `etc` by the empty-segment normalization below (containment holds either way, but silently reinterpreting an absolute path as a relative one is not a behavior worth having).
-- The `prefix` segments MUST be percent-decoded **exactly once**, joined with `/`, stripped of any trailing `/`, and normalized by dropping empty and single-dot (`.`) segments — and only then validated. Order matters in both directions: validating before decoding would let `%2e%2e%2f` through, and decoding a second time would turn a literal `%252e%252e` into `..` after validation had already passed. The implementation MUST establish which decode the router already performed and MUST NOT add another. Normalization is what makes `/mcp/v/agents/a`, `/mcp/v/agents/a/`, and `/mcp/v/agents/./a` one scope rather than three — they resolve to the same root, so they MUST produce the same scope key, or the per-scope memo and the session scope-match check below would treat aliases of one scope as distinct.
+- The scope MUST be parsed from the RAW pathname (`new URL(c.req.url).pathname`), split on `/`, with `decodeURIComponent` applied to each segment exactly once — NOT from `c.req.param("prefix")`. Hono decodes route params for you, which folds `%2F` into the path structure and makes an encoded separator indistinguishable from a real one after the fact. Parsing the raw pathname is what makes the next two rules checkable at all; the route pattern is used only to match.
+- A segment that decodes to contain a path separator (`/` or `\`) MUST be rejected. A percent-encoded separator is never legitimate inside one scope segment, and rejecting it stops `%2Fetc` from being quietly rewritten into the relative prefix `etc` by the empty-segment normalization below (containment holds either way, but silently reinterpreting an absolute path as a relative one is not a behavior worth having).
+- A malformed percent escape (`%ZZ`, a truncated `%2`) makes `decodeURIComponent` throw `URIError`. That MUST be caught and mapped to the same `400` rejection envelope below — an uncaught `URIError` would surface as a `500` from a purely client-side mistake.
+- The decoded segments MUST be joined with `/`, stripped of any trailing `/`, and normalized by dropping empty and single-dot (`.`) segments — and only then validated. Order matters in both directions: validating before decoding would let `%2e%2e%2f` through, and decoding a second time would turn a literal `%252e%252e` into `..` after validation had already passed. Exactly one decode, on the raw segment, is the rule. Normalization is what makes `/mcp/v/agents/a`, `/mcp/v/agents/a/`, and `/mcp/v/agents/./a` one scope rather than three — they resolve to the same root, so they MUST produce the same scope key, or the per-scope memo and the session scope-match check below would treat aliases of one scope as distinct.
+- The canonical **scope key** MUST be derived from the resolved `McpScope` — `` `${slug}\0${prefix}` `` with both fields already normalized — never from raw URL text. The same key MUST be used for the per-scope registry memo and for the session scope-match comparison, so the two cannot disagree about what "the same scope" means. The unscoped mount has no key; its sessions are matched only against other unscoped requests.
 - A prefix that is empty after normalization (`/mcp/:slug`, or a prefix of only `.` / `/` segments) is the **vault-root scope**. It MUST be accepted, and it MUST NOT be passed to `assertSafeRelativePath` — that function rejects the empty string outright (`src/errors.ts:241-243`). The vault-root scope is exactly today's unscoped behavior narrowed to a single vault.
 - Every non-empty normalized prefix MUST be validated with the existing `assertSafeRelativePath`. `..`, absolute paths, NUL bytes, hidden (leading-dot) segments, drive prefixes, and over-length paths MUST be rejected — the same closed set the file surface already rejects.
 - An invalid prefix MUST be rejected with HTTP `400` and the JSON-RPC envelope `{ jsonrpc: "2.0", error: { code: -32000, message: "Bad Request: invalid MCP scope" }, id: null }`, matching the shape of the existing `rejectMissingSession` fast path in `src/mcp/index.ts`. No transport and no server instance may be allocated for a rejected scope.
@@ -122,7 +127,7 @@ In a scoped session the vault is already fixed by the URL, and an agent has no w
 
 #### Session instructions
 
-The scoped per-session `Server` MUST be constructed with the SDK's `instructions` option set to a short statement that all paths are relative to a private root, that the vault argument may be omitted, and that nothing outside the root is reachable. This is how the agent learns its situation — tool descriptions MUST NOT be forked per scope.
+The scoped per-session `Server` MUST be constructed with the SDK's `instructions` option set to a short statement that all paths are relative to a scoped root, that the vault argument may be omitted, and that nothing outside that root is reachable **through this session**. It MUST NOT call the root "private" or otherwise imply isolation from other clients: the server has no auth, so the same files remain reachable through the unscoped mount. This is how the agent learns its situation — tool descriptions MUST NOT be forked per scope.
 
 ### Error and leak rules
 
@@ -337,7 +342,7 @@ Routing changes are confined to `buildMcpRoutes`: the three method handlers gain
   - [ ] Tests in `test/mcp/scope.test.ts` covering: prefix validation (`..`, percent-encoded `%2e%2e%2f`, double-encoded `%252e%252e`, leading `/`, hidden segment, NUL, over-length), alias normalization (`agents/a`, `agents/a/`, `agents/./a` → one scope key), empty prefix accepted as the vault-root scope (no prefixing, no forced search filter, no hit stripping), boundary non-collision (`agents/a` vs `agents/ab`), symlinked scope root at bind AND swapped to a symlink after bind, hit stripping, out-of-scope hit rejection, caller `pathPrefix` nesting and rejection
 - [ ] **Routing + session binding: `src/mcp/index.ts`**
   - [ ] `/:slug` and `/:slug/*` variants on POST / GET / DELETE
-  - [ ] `resolveScope(c)` returning an `McpScope` or a rejection `Response` (400 `-32000` invalid scope, 404 `-32000` unknown vault)
+  - [ ] `resolveScope(c)` parsing the raw pathname and returning an `McpScope` or a rejection `Response` (400 `-32000` invalid scope, 404 `-32000` unknown vault), including route coverage for encoded separators (`%2F`, `%5C`), malformed escapes (`%ZZ`), and double-encoded traversal (`%252e%252e`)
   - [ ] `scopeKey` on `SessionPair` + mismatch rejection (404 `-32001`)
   - [ ] LRU-bounded per-scope registry + resource-handler memo
   - [ ] Tests in `test/mcp/scope-routes.test.ts` covering every routing / session scenario above, asserting on-disk effects
