@@ -70,7 +70,7 @@ Rules:
 
 ### Scoped service dependencies
 
-A new module `src/mcp/scope.ts` MUST expose a single wrapper:
+A new module `src/mcp/scope.ts` MUST expose two wrappers — one for the path-addressing tools, one for the status tools, which take a different deps shape (`StatusDeps` = `{ supervisor, indexer }`, see `src/vault/status.ts`):
 
 ```ts
 export interface McpScope {
@@ -80,7 +80,10 @@ export interface McpScope {
 }
 
 export function scopeDeps(deps: McpRoutesDeps, scope: McpScope): McpRoutesDeps;
+export function scopeStatusDeps(deps: StatusDeps, scope: McpScope): StatusDeps;
 ```
+
+Both MUST be applied when the scoped registry is built. `buildToolRegistry` currently passes a `statusDeps = { supervisor, indexer }` object to `listVaultsTool` and `vaultStatusTool` and the full deps to everything else (`src/mcp/index.ts`); in a scoped registry the former MUST come from `scopeStatusDeps` and the latter from `scopeDeps`. Wrapping only `scopeDeps` would leave both status tools reporting every configured vault, which is the one place the vault-lookup substitution does not reach.
 
 The returned deps MUST behave as follows. Everything below is achieved by wrapping the deps — no service-core function in `src/vault/` may be modified by this change.
 
@@ -329,7 +332,8 @@ Routing changes are confined to `buildMcpRoutes`: the three method handlers gain
   - [ ] `McpScope`, `parseScope(slug, prefixSegments)` — percent-decode, normalize (trailing `/`, empty and `.` segments), accept the empty result as the vault-root scope, validate everything else; returns a validated scope or a typed rejection (invalid prefix vs unknown vault)
   - [ ] `assertScopeRootSafe(scopeRoot, vaultRoot)` wrapping `assertNotSymlinkEscape`, plus the per-call wrapper that runs it before every `ToolDefinition.call`, `resources/list`, and `resources/read` in a scoped session
   - [ ] `scopeDeps(deps, scope)` — vault lookup substitution, indexer `reindex` / `drop` prefixing, `search` filter forcing + hit stripping + out-of-scope hit rejection
-  - [ ] `scopeStatusDeps(deps, scope)` — supervisor/indexer listings filtered to the scoped slug
+  - [ ] `scopeStatusDeps(deps, scope)` — supervisor/indexer listings filtered to the scoped slug, wired into `listVaultsTool` / `vaultStatusTool` where the scoped registry is built
+  - [ ] Tests asserting BOTH status tools in a two-vault deployment: `list_vaults` returns one entry, `vault_status` on the other slug is `vault_not_found`
   - [ ] Tests in `test/mcp/scope.test.ts` covering: prefix validation (`..`, percent-encoded `%2e%2e%2f`, double-encoded `%252e%252e`, leading `/`, hidden segment, NUL, over-length), alias normalization (`agents/a`, `agents/a/`, `agents/./a` → one scope key), empty prefix accepted as the vault-root scope (no prefixing, no forced search filter, no hit stripping), boundary non-collision (`agents/a` vs `agents/ab`), symlinked scope root at bind AND swapped to a symlink after bind, hit stripping, out-of-scope hit rejection, caller `pathPrefix` nesting and rejection
 - [ ] **Routing + session binding: `src/mcp/index.ts`**
   - [ ] `/:slug` and `/:slug/*` variants on POST / GET / DELETE
