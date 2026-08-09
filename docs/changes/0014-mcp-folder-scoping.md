@@ -123,7 +123,7 @@ The scoped per-session `Server` MUST be constructed with the SDK's `instructions
 ### Error and leak rules
 
 - Every error envelope produced in a scoped session MUST report scope-relative paths. The existing errors already echo the caller-supplied path (`InvalidPathError`, `DocNotFoundError`), and `toPosixRelative` in `src/vault/path.ts` computes against the root it is given, which is the scope root — so this holds by construction and MUST be asserted by tests.
-- No response, error message, or log field surfaced to a scoped client may contain the absolute vault path or the scope prefix.
+- No server-computed path in a response, error message, or log field surfaced to a scoped client may contain the absolute vault path or the scope prefix. This governs paths the server produces; it does not extend to note content (see the hit-field rule above), which is returned verbatim even when a note mentions its own folder.
 - No new error code is introduced. Out-of-scope addressing surfaces as the existing `invalid_path`, `not_found`, or `vault_not_found`.
 
 ### Resource surface
