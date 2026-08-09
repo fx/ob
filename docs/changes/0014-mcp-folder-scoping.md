@@ -53,7 +53,7 @@ A client configures it exactly like any other HTTP MCP server:
 
 Rules:
 
-- The `prefix` segments MUST be percent-decoded, joined with `/`, stripped of any trailing `/`, and normalized by dropping empty and single-dot (`.`) segments before validation. Normalization is what makes `/mcp/v/agents/a`, `/mcp/v/agents/a/`, and `/mcp/v/agents/./a` one scope rather than three — they resolve to the same root, so they MUST produce the same scope key, or the per-scope memo and the session scope-match check below would treat aliases of one scope as distinct.
+- The `prefix` segments MUST be percent-decoded **exactly once**, joined with `/`, stripped of any trailing `/`, and normalized by dropping empty and single-dot (`.`) segments — and only then validated. Order matters in both directions: validating before decoding would let `%2e%2e%2f` through, and decoding a second time would turn a literal `%252e%252e` into `..` after validation had already passed. The implementation MUST establish which decode the router already performed and MUST NOT add another. Normalization is what makes `/mcp/v/agents/a`, `/mcp/v/agents/a/`, and `/mcp/v/agents/./a` one scope rather than three — they resolve to the same root, so they MUST produce the same scope key, or the per-scope memo and the session scope-match check below would treat aliases of one scope as distinct.
 - A prefix that is empty after normalization (`/mcp/:slug`, or a prefix of only `.` / `/` segments) is the **vault-root scope**. It MUST be accepted, and it MUST NOT be passed to `assertSafeRelativePath` — that function rejects the empty string outright (`src/errors.ts:241-243`). The vault-root scope is exactly today's unscoped behavior narrowed to a single vault.
 - Every non-empty normalized prefix MUST be validated with the existing `assertSafeRelativePath`. `..`, absolute paths, NUL bytes, hidden (leading-dot) segments, drive prefixes, and over-length paths MUST be rejected — the same closed set the file surface already rejects.
 - An invalid prefix MUST be rejected with HTTP `400` and the JSON-RPC envelope `{ jsonrpc: "2.0", error: { code: -32000, message: "Bad Request: invalid MCP scope" }, id: null }`, matching the shape of the existing `rejectMissingSession` fast path in `src/mcp/index.ts`. No transport and no server instance may be allocated for a rejected scope.
@@ -100,6 +100,7 @@ Every rule below is a no-op for the vault-root scope (`prefix === ""`), which MU
 - `search(slug, query, opts)` MUST force `filter.pathPrefix` to `` `${prefix}/` `` — **with the trailing slash**. `store.ts` filters with `starts_with(path, …)` (`src/indexer/store.ts:362`), so the bare prefix `agents/a` would also match `agents/ab/note.md`. With `prefix === ""` the wrapper MUST omit the forced filter entirely rather than emit `"/"`: indexed paths are vault-relative and never start with `/`, so a literal `` `${prefix}/` `` would match nothing and silently empty every search in the vault-root scope.
 - A caller-supplied `filter.pathPrefix` MUST be validated with `assertSafeRelativePath` and joined UNDER the scope prefix, never used to replace it. In the vault-root scope it MUST be validated and passed through unchanged.
 - Returned `SearchHit.path` values MUST have the prefix stripped before they reach the client. Any hit whose path does not start with the scope prefix MUST be dropped rather than returned unprefixed — a defensive filter, since a stale index entry is otherwise indistinguishable from an in-scope hit after stripping. In the vault-root scope no hit is stripped and none is dropped.
+- A hit's `text`, `frontmatter`, `tags`, and `links` MUST be passed through unchanged. These are note *content*, not server-computed paths: `links` holds raw wikilink targets extracted from the body (`[[Name]]`, `[[Name|alias]]` — see `extractWikilinks` in `src/indexer/chunker.ts:127`), never resolved vault-relative paths. Because every surviving hit is in-scope, its body is content the session may already read in full, so rewriting or filtering these fields would corrupt the client's view of its own notes without withholding anything it could not already see. `path` is the only server-computed path on a hit and therefore the only field that is translated.
 
 #### Status tools
 
@@ -194,11 +195,13 @@ The REST surface stays unscoped in this change. `test/parity/` continues to comp
 
 #### Scenario: Malformed scope never allocates a session
 
-- **GIVEN** an `initialize` request to `/mcp/v/../../etc`
+- **GIVEN** an `initialize` request to `/mcp/v/agents/%2e%2e%2fetc` (percent-encoded traversal) or to `/mcp/v/.obsidian` (hidden segment)
 - **WHEN** the server handles it
 - **THEN** the response is `400` with JSON-RPC error code `-32000`
 - **AND** no `Mcp-Session-Id` header is returned
 - **AND** a subsequent `initialize` on a valid scope still succeeds
+
+A literal `..` in the request path (`/mcp/v/../../etc`) is NOT a useful test of this rule: clients and URL parsers resolve dot segments before the request is sent, so the server sees `/etc` and answers with the app's ordinary `404`. The percent-encoded form is what actually reaches the wildcard route, which is why the decode-then-validate order below is the load-bearing part.
 
 #### Scenario: Symlinked scope root is refused
 
@@ -308,7 +311,7 @@ Routing changes are confined to `buildMcpRoutes`: the three method handlers gain
   - [ ] `assertScopeRootSafe(scopeRoot, vaultRoot)` wrapping `assertNotSymlinkEscape`
   - [ ] `scopeDeps(deps, scope)` — vault lookup substitution, indexer `reindex` / `drop` prefixing, `search` filter forcing + hit stripping + out-of-scope hit rejection
   - [ ] `scopeStatusDeps(deps, scope)` — supervisor/indexer listings filtered to the scoped slug
-  - [ ] Tests in `test/mcp/scope.test.ts` covering: prefix validation (`..`, leading `/`, hidden segment, NUL, over-length), alias normalization (`agents/a`, `agents/a/`, `agents/./a` → one scope key), empty prefix accepted as the vault-root scope (no prefixing, no forced search filter, no hit stripping), boundary non-collision (`agents/a` vs `agents/ab`), symlinked scope root, hit stripping, out-of-scope hit rejection, caller `pathPrefix` nesting and rejection
+  - [ ] Tests in `test/mcp/scope.test.ts` covering: prefix validation (`..`, percent-encoded `%2e%2e%2f`, double-encoded `%252e%252e`, leading `/`, hidden segment, NUL, over-length), alias normalization (`agents/a`, `agents/a/`, `agents/./a` → one scope key), empty prefix accepted as the vault-root scope (no prefixing, no forced search filter, no hit stripping), boundary non-collision (`agents/a` vs `agents/ab`), symlinked scope root, hit stripping, out-of-scope hit rejection, caller `pathPrefix` nesting and rejection
 - [ ] **Routing + session binding: `src/mcp/index.ts`**
   - [ ] `/:slug` and `/:slug/*` variants on POST / GET / DELETE
   - [ ] `resolveScope(c)` returning an `McpScope` or a rejection `Response` (400 `-32000` invalid scope, 404 `-32000` unknown vault)
