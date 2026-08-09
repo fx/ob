@@ -101,7 +101,9 @@ LABEL org.opencontainers.image.source="https://github.com/fx/ob" \
 # dropped because Debian removes superseded versions from the archive on every
 # point release, which broke unrelated builds. Whatever Debian trixie currently
 # ships for these three is what we want — the pinned base image is what makes
-# the layer reproducible.
+# the layer reproducible. DL3008 asks for exactly the pins we dropped, so it is
+# silenced for this one instruction (hadolint 2.12 rejects a same-line reason).
+# hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       tini \
