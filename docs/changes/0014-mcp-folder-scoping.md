@@ -45,7 +45,7 @@ The MCP sub-app MUST accept the scope as URL path segments after `/mcp`:
 | POST/GET/DELETE `/mcp/:slug` | Scoped to vault `:slug`, prefix empty (vault root). |
 | POST/GET/DELETE `/mcp/:slug/:prefix{.+}` | Scoped to vault `:slug`, folder prefix `:prefix`. |
 
-The `:prefix{.+}` pattern is the same named-regex form the REST file and folder routes already use for multi-segment paths (`src/http/routes/files.ts:94`), so the two adapters stay consistent.
+`:prefix{.+}` is the same Hono named-regex wildcard form the REST adapter already uses for multi-segment paths — there spelled `:path{.+}` on the file routes (`src/http/routes/files.ts:94`) and the folder routes (`src/http/routes/folders.ts:38`) — so the two adapters stay consistent in form, differing only in the parameter name.
 
 A client configures it exactly like any other HTTP MCP server:
 
