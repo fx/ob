@@ -43,6 +43,7 @@
 import { join } from "node:path";
 import { InvalidPathError, assertSafeRelativePath } from "../errors.ts";
 import type { Indexer, SearchHit, SearchOptions } from "../indexer/index.ts";
+import type { Logger } from "../log.ts";
 import { assertNotSymlinkEscape } from "../vault/path.ts";
 import type { StatusDeps } from "../vault/status.ts";
 import { mapErrorToMcpResult } from "./errors.ts";
@@ -155,6 +156,9 @@ export function scopeRootPath(vaultRoot: string, scope: McpScope): string {
   return join(vaultRoot, scope.prefix);
 }
 
+/** Client-visible text for an operational scope-root failure. Carries no path. */
+const SCOPE_ROOT_CHECK_FAILED = "scope root check failed";
+
 /**
  * Reject a scope root that is (or sits under) a symbolic link.
  *
@@ -162,22 +166,53 @@ export function scopeRootPath(vaultRoot: string, scope: McpScope): string {
  * that does not exist yet is NOT a rejection — an empty scope lists as empty
  * and the first `write_file` / `create_folder` creates it.
  *
- * The thrown error is re-wrapped: `assertNotSymlinkEscape` reports the path
- * RELATIVE TO `vaultRoot`, which is precisely the scope prefix the session is
- * never supposed to learn. `"."` is the scope root as the client sees it.
+ * `logger`, when supplied, receives the ORIGINAL failure for the operational
+ * branch. It is the only place that detail survives; nothing reaches the
+ * client.
  */
-export async function assertScopeRootSafe(scopeRoot: string, vaultRoot: string): Promise<void> {
+export async function assertScopeRootSafe(
+  scopeRoot: string,
+  vaultRoot: string,
+  logger?: Logger,
+): Promise<void> {
   try {
     await assertNotSymlinkEscape(scopeRoot, vaultRoot);
-  } catch {
-    throw new InvalidPathError(".", "scope root is not a directory inside the vault");
+  } catch (e) {
+    // Two constraints pull against each other here and BOTH are binding.
+    //
+    // 1. Classification. `assertNotSymlinkEscape` throws `InvalidPathError`
+    //    for the symlink and ENOTDIR cases and rethrows the raw `fs` error for
+    //    everything else (EACCES, EPERM, EIO, ENAMETOOLONG). Presenting that
+    //    second group as `invalid_path` would blame the client for an
+    //    operational fault and bury the incident in a 4xx-shaped envelope.
+    // 2. Confinement. No error a scoped session sees may carry the absolute
+    //    vault path or the scope prefix. `InvalidPathError` from the walk
+    //    reports the path RELATIVE TO `vaultRoot` — precisely the prefix the
+    //    session must never learn — and a raw `fs` error's `message` embeds
+    //    the ABSOLUTE path (`EACCES: permission denied, lstat
+    //    '/data/vaults/v/agents/a'`). So neither may be rethrown as-is.
+    //
+    // Hence: re-wrap the containment rejection as `InvalidPathError(".")` —
+    // `"."` is the scope root as the client sees it — and replace anything
+    // else with a fresh, path-free `Error`. A non-`OBError` is exactly what
+    // `mapErrorToMcpResult` renders as `{ code: "internal", message:
+    // "internal server error" }`, discarding even this message, so the
+    // operational branch reaches the client as a server error and nothing more.
+    if (e instanceof InvalidPathError) {
+      throw new InvalidPathError(".", "scope root is not a directory inside the vault");
+    }
+    logger?.error(SCOPE_ROOT_CHECK_FAILED, { err: String(e) });
+    throw new Error(SCOPE_ROOT_CHECK_FAILED);
   }
 }
 
 /**
- * Run `check()` before delegating to `tool.call`. A rejection becomes the
- * ordinary typed-error envelope (`invalid_path`) — no new error code, and no
- * scope prefix in the payload (see `assertScopeRootSafe`).
+ * Run `check()` before delegating to `tool.call`. A containment rejection
+ * becomes the ordinary typed-error envelope (`invalid_path`) — no new error
+ * code, and no scope prefix in the payload (see `assertScopeRootSafe`). An
+ * operational failure is a non-`OBError` and so lands on `mapErrorToMcpResult`'s
+ * `internal` path, which is both the honest classification and the shape that
+ * discards the message entirely.
  */
 export function guardToolDefinition(
   tool: ToolDefinition,
@@ -201,9 +236,9 @@ export function guardToolDefinition(
  * guard as much as `read` does: `listFiles` walks the root itself, so an
  * unguarded `resources/list` would enumerate a swapped-in symlink target.
  *
- * A rejection surfaces as the module's canonical `not_found` `McpError` —
- * the same shape any other unaddressable resource produces, carrying neither
- * the absolute vault path nor the scope prefix.
+ * A containment rejection surfaces as the module's canonical `not_found`
+ * `McpError` — the same shape any other unaddressable resource produces,
+ * carrying neither the absolute vault path nor the scope prefix.
  */
 export function guardResourceHandler(
   handler: ResourceHandler,
@@ -212,8 +247,16 @@ export function guardResourceHandler(
   const guard = async (uri: string): Promise<void> => {
     try {
       await check();
-    } catch {
-      throw notFound(uri);
+    } catch (e) {
+      // Only the expected containment rejection means "this URI addresses
+      // nothing". An operational fault (EACCES, EIO, …) is not a missing
+      // resource, and reporting it as one would hide the incident behind a
+      // routine 404 — let it propagate to the SDK's generic JSON-RPC server
+      // error instead. Propagating is safe because `assertScopeRootSafe`
+      // already replaced any raw `fs` error with a path-free one, so nothing
+      // here can carry the absolute vault path or the scope prefix.
+      if (e instanceof InvalidPathError) throw notFound(uri);
+      throw e;
     }
   };
   return {
