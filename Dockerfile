@@ -11,10 +11,12 @@
 # Layer order (per change 0006 design): apt → npm globals → bun deps →
 # app source. Source edits invalidate only the cheap final layers.
 #
-# Every external version is captured as a build ARG below. Bumps are
-# one-edit changes; reproducing a historical build is a single
-# `docker build --build-arg ...`. ARGs declared before the first FROM are
-# "global" — each stage that wants to read one must redeclare it.
+# The toolchain versions (Node, Bun, obsidian-headless) are captured as build
+# ARGs below. Bumps are one-edit changes, and a historical toolchain
+# reproduces exactly via `docker build --build-arg ...`. The runtime stage's
+# apt packages are deliberately NOT pinned — see the note above that
+# `RUN apt-get`. ARGs declared before the first FROM are "global" — each
+# stage that wants to read one must redeclare it.
 
 # Node 22 toolchain (must remain at the same major as `mise.toml`'s
 # `node = "22.X.Y"`). Latest 22-bookworm-slim patch at PR time.
@@ -27,13 +29,6 @@ ARG BUN_VERSION=1.3.13
 # obsidian-headless is pre-1.0; lock the exact patch and bump deliberately,
 # per change 0006's "Open Questions".
 ARG OBSIDIAN_HEADLESS_VERSION=0.0.8
-
-# Note: the runtime stage's apt packages are deliberately NOT version-pinned.
-# Debian drops superseded versions from the archive the moment a point release
-# lands, so an exact pin turns into `E: Version '...' was not found` and breaks
-# every build — including unrelated PRs — until someone hand-edits the string.
-# Reproducibility of the runtime layer rests on the pinned `oven/bun` base
-# image above, not on apt version strings.
 
 # Git revision baked into the image's OCI labels. CI sets this to the 7-char
 # short SHA; local `docker build` falls back to "dev". Mirrors the
