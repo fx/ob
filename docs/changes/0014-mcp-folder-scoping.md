@@ -250,6 +250,14 @@ export function scopeDeps(deps: McpRoutesDeps, scope: McpScope): McpRoutesDeps {
     ...deps,
     vault: (s) => (s === scope.slug ? { ...inner, root } : null),
     indexer: {
+      // `McpRoutesDeps.indexer` is the full `Indexer`, so `status`, `list`, and
+      // `stop` MUST be delegated — the status tools and the readiness probe
+      // depend on them, and omitting them does not type-check. They pass
+      // through unchanged here; narrowing the reported vault set to the scope
+      // is `scopeStatusDeps`' job, so there is exactly one place that does it.
+      status: (s) => deps.indexer.status(s),
+      list: () => deps.indexer.list(),
+      stop: () => deps.indexer.stop(),
       reindex: (s, p) => deps.indexer.reindex(s, under(p)),
       drop: (s, p) => deps.indexer.drop(s, under(p)),
       search: async (s, q, opts) => {
