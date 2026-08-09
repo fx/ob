@@ -64,7 +64,7 @@ Rules:
 - Every non-empty normalized prefix MUST be validated with the existing `assertSafeRelativePath`. `..`, absolute paths, NUL bytes, hidden (leading-dot) segments, drive prefixes, and over-length paths MUST be rejected — the same closed set the file surface already rejects.
 - An invalid prefix MUST be rejected with HTTP `400` and the JSON-RPC envelope `{ jsonrpc: "2.0", error: { code: -32000, message: "Bad Request: invalid MCP scope" }, id: null }`, matching the shape of the existing `rejectMissingSession` fast path in `src/mcp/index.ts`. No transport and no server instance may be allocated for a rejected scope.
 - A `:slug` that is not a configured vault MUST be rejected with HTTP `404` and the same envelope shape carrying `message: "Not Found: unknown vault \"<slug>\""`. This is deliberately identical in shape to a mistyped-scope rejection so a scan of the URL space yields no more information than the already-public `GET /v1/vaults`.
-- The scope root MUST be checked with `assertNotSymlinkEscape(scopeRoot, vaultRoot)` when the session is bound **and again at the start of every scoped request handler — `tools/call`, `resources/list`, and `resources/read`**. `safeJoin` and the per-operation symlink guards only walk up to the root they are given — which, for a scoped session, IS the scope root — so nothing else ever inspects it. A bind-time-only check would leave a session-lifetime window in which the scope directory is replaced by a symlink (by `ob sync` pulling a crafted tree, or by anything else with write access to the vault) and every subsequent operation follows it out of the prefix. The re-check is one `lstat` per prefix segment against a warm dentry cache, on an operation that is already doing filesystem I/O. The residual check-then-act window is the same one every existing `assertNotSymlinkEscape` call site already accepts, and closing it entirely would require `openat`-style handle pinning that Bun's `fs` does not expose.
+- The scope root MUST be checked with `assertNotSymlinkEscape(scopeRoot, vaultRoot)` when the session is bound **and again at the start of every scoped request handler — `tools/call`, `resources/list`, and `resources/read`**. `safeJoin` and the per-operation symlink guards only walk up to the root they are given — which, for a scoped session, IS the scope root — so nothing else ever inspects it. A bind-time-only check would leave a session-lifetime window in which the scope directory is replaced by a symlink (by `ob sync` pulling a crafted tree, or by anything else with write access to the vault) and every subsequent operation follows it out of the prefix. A scope root that does not exist yet is NOT a rejection — `assertNotSymlinkEscape` walks up past `ENOENT` levels, which is what lets an empty scope list as empty and defers creation to the first `write_file` / `create_folder`. The re-check is one `lstat` per prefix segment against a warm dentry cache, on an operation that is already doing filesystem I/O. The residual check-then-act window is the same one every existing `assertNotSymlinkEscape` call site already accepts, and closing it entirely would require `openat`-style handle pinning that Bun's `fs` does not expose.
 - The scope root MUST NOT be created eagerly. `walkVault` / `walkVaultFolders` already treat a missing root as empty, and `write_file` / `create_folder` create parents on first use, so a typo'd URL leaves no directory behind.
 
 ### Session binding
@@ -281,7 +281,12 @@ export function scopeDeps(deps: McpRoutesDeps, scope: McpScope): McpRoutesDeps {
       drop: (s, p) => deps.indexer.drop(s, under(p)),
       search: async (s, q, opts) => {
         const hits = await deps.indexer.search(s, q, withScopedFilter(opts, scope));
-        return hits.map((h) => ({ ...h, path: strip(h.path) })).filter((h) => h.path !== null);
+        // flatMap, not map+filter: `strip` returns `string | null`, and filtering
+        // afterwards would not narrow the type back to `SearchHit[]`.
+        return hits.flatMap((h) => {
+          const path = strip(h.path);
+          return path === null ? [] : [{ ...h, path }];
+        });
       },
     },
   };
@@ -335,13 +340,13 @@ Routing changes are confined to `buildMcpRoutes`: the three method handlers gain
   - [x] Add this change to `docs/index.yml` (`status: draft`) and a row to the `docs/index.md` Changes table
 - [ ] **Scope resolution + scoped deps: `src/mcp/scope.ts`**
   - [ ] `McpScope`, `parseScope(slug, prefixSegments)` — percent-decode, normalize (trailing `/`, empty and `.` segments), accept the empty result as the vault-root scope, validate everything else; returns a validated scope or a typed rejection (invalid prefix vs unknown vault)
-  - [ ] `assertScopeRootSafe(scopeRoot, vaultRoot)` wrapping `assertNotSymlinkEscape`, plus the per-call wrapper that runs it before every `ToolDefinition.call`, `resources/list`, and `resources/read` in a scoped session
+  - [ ] `assertScopeRootSafe(scopeRoot, vaultRoot)` wrapping `assertNotSymlinkEscape` (which already tolerates a not-yet-created scope root by walking up the chain — a missing root is an empty scope, not a rejection), plus the per-call wrapper that runs it before every `ToolDefinition.call`, `resources/list`, and `resources/read` in a scoped session
   - [ ] `scopeDeps(deps, scope)` — vault lookup substitution, indexer `reindex` / `drop` prefixing, `search` filter forcing + hit stripping + out-of-scope hit rejection
   - [ ] `scopeStatusDeps(deps, scope)` — supervisor/indexer listings filtered to the scoped slug, wired into `listVaultsTool` / `vaultStatusTool` where the scoped registry is built
   - [ ] Tests asserting BOTH status tools in a two-vault deployment: `list_vaults` returns one entry, `vault_status` on the other slug is `vault_not_found`
   - [ ] Tests in `test/mcp/scope.test.ts` covering: prefix validation (`..`, percent-encoded `%2e%2e%2f`, double-encoded `%252e%252e`, leading `/`, hidden segment, NUL, over-length), alias normalization (`agents/a`, `agents/a/`, `agents/./a` → one scope key), empty prefix accepted as the vault-root scope (no prefixing, no forced search filter, no hit stripping), boundary non-collision (`agents/a` vs `agents/ab`), symlinked scope root at bind AND swapped to a symlink after bind, hit stripping, out-of-scope hit rejection, caller `pathPrefix` nesting and rejection
 - [ ] **Routing + session binding: `src/mcp/index.ts`**
-  - [ ] `/:slug` and `/:slug/*` variants on POST / GET / DELETE
+  - [ ] `/:slug` and `/:slug/:prefix{.+}` variants on POST / GET / DELETE
   - [ ] `resolveScope(c)` parsing the raw pathname and returning an `McpScope` or a rejection `Response` (400 `-32000` invalid scope, 404 `-32000` unknown vault), including route coverage for encoded separators (`%2F`, `%5C`), malformed escapes (`%ZZ`), and double-encoded traversal (`%252e%252e`)
   - [ ] `scopeKey` on `SessionPair` + mismatch rejection (404 `-32001`)
   - [ ] LRU-bounded per-scope registry + resource-handler memo
