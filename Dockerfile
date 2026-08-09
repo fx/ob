@@ -28,15 +28,12 @@ ARG BUN_VERSION=1.3.13
 # per change 0006's "Open Questions".
 ARG OBSIDIAN_HEADLESS_VERSION=0.0.8
 
-# apt package versions in oven/bun:${BUN_VERSION} (Debian trixie) at PR time.
-# Pinned so rebuilds are reproducible. When Debian publishes a security
-# update, `apt-get install` will fail until these strings are bumped — which
-# is the desired forcing function. Re-discover with:
-#   docker run --rm oven/bun:${BUN_VERSION} bash -c \
-#     'apt-get update -qq && apt-cache policy tini curl ca-certificates'
-ARG TINI_VERSION=0.19.0-3+b7
-ARG CURL_VERSION=8.14.1-2+deb13u3
-ARG CA_CERTIFICATES_VERSION=20250419
+# Note: the runtime stage's apt packages are deliberately NOT version-pinned.
+# Debian drops superseded versions from the archive the moment a point release
+# lands, so an exact pin turns into `E: Version '...' was not found` and breaks
+# every build — including unrelated PRs — until someone hand-edits the string.
+# Reproducibility of the runtime layer rests on the pinned `oven/bun` base
+# image above, not on apt version strings.
 
 # Git revision baked into the image's OCI labels. CI sets this to the 7-char
 # short SHA; local `docker build` falls back to "dev". Mirrors the
@@ -89,9 +86,6 @@ RUN bun install --frozen-lockfile --production \
 # ── Stage 3: runtime ─────────────────────────────────────────────────────────
 # Final stage. Same Bun base as bun-deps so the embedded glibc matches.
 FROM oven/bun:${BUN_VERSION} AS runtime
-ARG TINI_VERSION
-ARG CURL_VERSION
-ARG CA_CERTIFICATES_VERSION
 ARG GIT_SHA
 
 # OCI image metadata. `docker/metadata-action` writes its own labels in CI;
@@ -103,14 +97,16 @@ LABEL org.opencontainers.image.source="https://github.com/fx/ob" \
       org.opencontainers.image.licenses="MIT"
 
 # tini (PID 1 signal forwarder), curl (HEALTHCHECK), ca-certificates (TLS for
-# HuggingFace + OpenAI). Each package version is pinned via build ARG so
-# rebuilds are reproducible. Bump these in the same PR that bumps the Bun
-# base when Debian rotates a point release.
+# HuggingFace + OpenAI). Installed unpinned on purpose: exact apt pins were
+# dropped because Debian removes superseded versions from the archive on every
+# point release, which broke unrelated builds. Whatever Debian trixie currently
+# ships for these three is what we want — the pinned base image is what makes
+# the layer reproducible.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      "tini=${TINI_VERSION}" \
-      "curl=${CURL_VERSION}" \
-      "ca-certificates=${CA_CERTIFICATES_VERSION}" \
+      tini \
+      curl \
+      ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 # Pull Node 22 + the global obsidian-headless install over from node-tools.
