@@ -13,7 +13,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { InvalidPathError, MAX_PATH_BYTES } from "../../src/errors.ts";
+import { InvalidPathError, MAX_PATH_BYTES, OBError } from "../../src/errors.ts";
 import type { Indexer, IndexerStatus, SearchHit, SearchOptions } from "../../src/indexer/index.ts";
 import type { McpRoutesDeps } from "../../src/mcp/index.ts";
 import type { ResourceHandler } from "../../src/mcp/resources.ts";
@@ -158,6 +158,15 @@ function makeScopeFixture(slugs: readonly string[] = ["v"]): ScopeFixture {
 /** Every configured slug in the fixtures below. */
 const hasV = (s: string): boolean => s === "v";
 
+/**
+ * A path component past POSIX `NAME_MAX` (255). `lstat` on it fails
+ * ENAMETOOLONG on every filesystem and for every user, which makes it the one
+ * deterministic way to drive `assertNotSymlinkEscape`'s raw-rethrow branch —
+ * a `chmod 000` EACCES fixture would silently stop failing when the suite runs
+ * as root.
+ */
+const LONG_SEGMENT = "a".repeat(300);
+
 function expectOk(result: ReturnType<typeof parseScope>): McpScope {
   if (!result.ok) throw new Error(`expected ok, got ${JSON.stringify(result.rejection)}`);
   return result.scope;
@@ -209,12 +218,34 @@ describe("parseScope", () => {
     );
   });
 
-  test("scope keys do not collide across slug/prefix boundaries", () => {
-    // NUL is the separator precisely so `("v", "a")` and `("v\0a", "")` — which
-    // naive concatenation would fuse — remain unreachable from real input.
+  test("scope keys distinguish a prefix from a longer one sharing its bytes", () => {
+    // The boundary case a per-scope registry memo actually has to survive:
+    // `agents/a` and `agents/ab` share a byte prefix and must not share a key.
     expect(scopeKey({ slug: "v", prefix: "agents/a" })).not.toBe(
       scopeKey({ slug: "v", prefix: "agents/ab" }),
     );
+  });
+
+  test("no reachable scope can put NUL in either key field", () => {
+    // The NUL separator is unambiguous only because neither field can contain
+    // it. It is worth being precise about what that does and does NOT mean:
+    // `scopeKey({slug:"v",prefix:"a"})` and `scopeKey({slug:"v\0a",prefix:""})`
+    // ARE equal — the guarantee is that the second is unreachable, not that
+    // the two keys differ. Assert the reachability side directly.
+    //
+    // Prefix half: this module owns it — `assertSafeRelativePath` rejects NUL.
+    expect(parseScope(["v", "a\0b"], hasV)).toEqual({
+      ok: false,
+      rejection: { kind: "invalid_prefix" },
+    });
+    // Slug half: owned by `src/config/index.ts`, whose `slugify` reduces every
+    // configured slug to `[a-z0-9-]`. A NUL-bearing slug is therefore never a
+    // configured vault, which `parseScope` reports as `unknown_vault` — it
+    // never reaches `scopeKey` at all.
+    expect(parseScope(["v\0a"], hasV)).toEqual({
+      ok: false,
+      rejection: { kind: "unknown_vault", slug: "v\0a" },
+    });
   });
 
   describe("rejects", () => {
@@ -383,6 +414,70 @@ describe("assertScopeRootSafe", () => {
       InvalidPathError,
     );
   });
+
+  test("surfaces an operational failure as an internal error, not invalid_path", async () => {
+    // A path component past NAME_MAX makes `lstat` fail ENAMETOOLONG — an
+    // operational error `assertNotSymlinkEscape` rethrows raw, standing in for
+    // the EACCES / EPERM / EIO family. It is the client's fault only in this
+    // synthetic fixture; the classification must not depend on that.
+    const fx = makeScopeFixture();
+    const root = fx.root("v");
+    const err = await assertScopeRootSafe(join(root, LONG_SEGMENT), root).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(OBError);
+    // The raw error's message embeds the ABSOLUTE path; the replacement must
+    // carry neither it nor the prefix.
+    const typed = err as Error;
+    expect(typed.message).toBe("scope root check failed");
+    expect(typed.message).not.toContain(root);
+    expect(typed.message).not.toContain(LONG_SEGMENT);
+  });
+
+  test("logs the original operational failure when a logger is supplied", async () => {
+    const fx = makeScopeFixture();
+    const root = fx.root("v");
+    const logged: { msg: string; fields?: Record<string, unknown> }[] = [];
+    const logger = {
+      trace: () => undefined,
+      debug: () => undefined,
+      info: () => undefined,
+      warn: () => undefined,
+      error: (msg: string, fields?: Record<string, unknown>) => {
+        logged.push({ msg, fields });
+      },
+    };
+    await expect(
+      assertScopeRootSafe(join(root, LONG_SEGMENT), root, logger),
+    ).rejects.toBeInstanceOf(Error);
+    expect(logged.length).toBe(1);
+    // The operator DOES get the detail the client is denied — that is the
+    // whole point of routing it here instead of dropping it.
+    expect(String(logged[0]?.fields?.err)).toContain("ENAMETOOLONG");
+  });
+
+  test("does not log a containment rejection as an operational failure", async () => {
+    const fx = makeScopeFixture();
+    const root = fx.root("v");
+    mkdirSync(join(root, "agents"), { recursive: true });
+    symlinkSync(mkdtempSync(join(tmpdir(), "ob-outside-")), join(root, "agents", "evil"));
+    const logged: string[] = [];
+    const logger = {
+      trace: () => undefined,
+      debug: () => undefined,
+      info: () => undefined,
+      warn: () => undefined,
+      error: (msg: string) => {
+        logged.push(msg);
+      },
+    };
+    await expect(
+      assertScopeRootSafe(join(root, "agents", "evil"), root, logger),
+    ).rejects.toBeInstanceOf(InvalidPathError);
+    expect(logged).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -432,6 +527,27 @@ describe("guardToolDefinition", () => {
     expect(result.isError).toBe(true);
     const body = JSON.parse(result.content[0]?.text ?? "") as { code: string; message: string };
     expect(body.code).toBe("invalid_path");
+    expect(seen).toEqual([]);
+  });
+
+  test("maps an operational check failure to the internal envelope", async () => {
+    const fx = makeScopeFixture();
+    const root = fx.root("v");
+    const seen: unknown[] = [];
+    const wrapped = guardToolDefinition(echoTool(seen), () =>
+      assertScopeRootSafe(join(root, LONG_SEGMENT), root),
+    );
+    const result = (await wrapped.call({ path: "memory.md" })) as {
+      isError?: boolean;
+      content: readonly { text: string }[];
+    };
+    expect(result.isError).toBe(true);
+    const body = JSON.parse(result.content[0]?.text ?? "") as { code: string; message: string };
+    // NOT `invalid_path` — an I/O fault is the server's problem, not a bad
+    // path from the client. `mapErrorToMcpResult` also discards the message
+    // for any non-`OBError`, so the envelope is path-free by construction.
+    expect(body.code).toBe("internal");
+    expect(body.message).toBe("internal server error");
     expect(seen).toEqual([]);
   });
 
@@ -551,6 +667,26 @@ describe("guardResourceHandler", () => {
     symlinkSync(mkdtempSync(join(tmpdir(), "ob-outside-")), scopeRoot);
     await expect(wrapped.list(undefined)).rejects.toThrow();
     expect(inner.listed.length).toBe(1);
+  });
+
+  test("propagates an operational check failure instead of calling it not_found", async () => {
+    // "Not found" is a routine, unalarming answer. An I/O fault reported that
+    // way disappears; it has to reach the SDK as a server error.
+    const fx = makeScopeFixture();
+    const root = fx.root("v");
+    const inner = recordingResources();
+    const wrapped = guardResourceHandler(inner, () =>
+      assertScopeRootSafe(join(root, LONG_SEGMENT), root),
+    );
+    const err = await wrapped.read("obvault://v/note.md").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    const typed = err as Error & { data?: { code?: string } };
+    expect(typed.data?.code).toBeUndefined();
+    expect(typed.message).toBe("scope root check failed");
+    expect(typed.message).not.toContain(root);
+    expect(inner.read_).toEqual([]);
   });
 });
 
@@ -803,15 +939,36 @@ describe("scopeStatusDeps", () => {
     expect(vaultStatus(fx.statusDeps, "w")?.slug).toBe("w");
   });
 
-  test("falls back to the empty indexer status when the indexer has no entry", () => {
-    // `indexer.list()` is filtered to the scope, so a mismatched supervisor
-    // entry would surface `starting` rather than throwing. Exercised here via
-    // the scoped indexer's own `status` on the scoped slug.
+  test("filters both indexer accessors to the scoped slug", () => {
     const fx = makeScopeFixture(["v"]);
     const scoped = scopeStatusDeps(fx.statusDeps, AGENTS_A);
     expect(scoped.indexer.status("v")).toEqual(idxStatus("v"));
     expect(scoped.indexer.status("w")).toBe(null);
     expect(scoped.indexer.list().map((i) => i.slug)).toEqual(["v"]);
+  });
+
+  test("listVaults falls back to the empty indexer status when the indexer has no entry", () => {
+    // Startup race: the supervisor knows the vault but the indexer has not
+    // registered it yet. Filtering an already-empty indexer listing keeps it
+    // empty, so `listVaults` must still report the scoped vault — with the
+    // `starting` placeholder from `src/vault/status.ts` — rather than dropping
+    // it or throwing.
+    const fx = makeScopeFixture(["v"]);
+    const racing: StatusDeps = {
+      supervisor: fx.statusDeps.supervisor,
+      indexer: { list: () => [], status: () => null },
+    };
+    const summaries = listVaults(scopeStatusDeps(racing, AGENTS_A));
+    expect(summaries.map((s) => s.slug)).toEqual(["v"]);
+    expect(summaries[0]?.indexer).toEqual({
+      slug: "v",
+      state: "starting",
+      documents: 0,
+      chunks: 0,
+      lastIndexedAt: null,
+      pending: 0,
+      errors: 0,
+    });
   });
 
   test("delegates supervisor.stop", async () => {
