@@ -85,6 +85,54 @@ The image's `HEALTHCHECK` deliberately probes `/healthz` rather than
 Orchestrators that want readiness-gated traffic should configure their own
 probe against `/readyz`.
 
+### Scoped MCP sessions
+
+The MCP mount takes an optional scope in the URL path. A scoped session is
+confined to one vault and one folder inside it, and that folder is presented
+to the client **as if it were the vault root** — every path the client sends
+and every path it receives is relative to the folder, and the client is never
+told what the folder is.
+
+| URL | Session sees |
+|-----|--------------|
+| `/mcp` | Every configured vault, addressed by `vault` + vault-relative path. Unchanged. |
+| `/mcp/<slug>` | Vault `<slug>` only, whole-vault paths. |
+| `/mcp/<slug>/<folder>/<subfolder>` | Vault `<slug>`, rooted at that folder. |
+
+The intended use is **memory per agent**: give each agent its own folder in a
+shared vault and hand it a scoped URL, with no server-side provisioning — no
+registry, no credentials, nothing to create before an agent connects.
+
+```jsonc
+// agent "claude-1"
+{ "mcpServers": { "memory": { "type": "http", "url": "https://ob.example/mcp/v/agents/claude-1" } } }
+// agent "claude-2"
+{ "mcpServers": { "memory": { "type": "http", "url": "https://ob.example/mcp/v/agents/claude-2" } } }
+```
+
+Each agent then writes `write_file { path: "decisions.md", … }` and searches
+its own notes without seeing — or overwriting — the other's, and without
+carrying its own folder name in any prompt, note body, or search filter. In a
+scoped session the `vault` argument is optional and defaults to the session's
+vault; `search` results, `list_files` pages, resource `obvault://` URIs, and
+error messages are all folder-relative. The `vault_status` document and chunk
+counts are the exception: they come from the per-vault indexer and stay
+vault-wide.
+
+The scope binds at `initialize` and is checked on every later request, so a
+session id issued for one scope is rejected on another. `..`, absolute paths,
+percent-encoded separators, hidden (leading-dot) segments, and a scope folder
+that is a symlink out of the vault are all refused; a scope folder that does
+not exist yet is fine — it lists as empty and is created on first write.
+
+> **Scoping is not an authentication or authorization boundary.** The server
+> has no auth (see the [MCP Server spec](docs/specs/mcp-server/index.md)), so
+> anything that can reach `/mcp/v/agents/claude-1` can also reach `/mcp` and
+> address the whole vault. Scoping confines a *cooperating* client that was
+> configured with a scoped URL; it does not defend against a hostile one. Put
+> the listener behind your own authenticated proxy if the network is not
+> trusted.
+
 ## Specs
 
 The system is fully spec-driven. Every behavior the running container exposes

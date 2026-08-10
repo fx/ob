@@ -5,7 +5,7 @@
 Make the MCP mount scopeable by URL: POST/GET/DELETE `/mcp/:slug/:prefix{.+}` binds the session to one vault and one folder prefix, and presents that prefix to the client as if it were the vault root. `/mcp` (unscoped) is unchanged. A scoped session can read, write, list, and search only inside its prefix, and every path it sees or sends is relative to that prefix — it never learns the prefix at all. Implements the Session scoping section newly added to the [MCP Server spec](../specs/mcp-server/index.md#session-scoping).
 
 **Spec:** [MCP Server](../specs/mcp-server/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0005, 0008, 0012
 
 ## Motivation
@@ -339,29 +339,29 @@ Routing changes are confined to `buildMcpRoutes`: the three method handlers gain
   - [x] Add the Session scoping section to `docs/specs/mcp-server/index.md`, extend its module layout, and note in Constraints that scoping is not an auth boundary
   - [x] Append a row to the MCP Server spec Changelog table
   - [x] Add this change to `docs/index.yml` (`status: draft`) and a row to the `docs/index.md` Changes table
-- [ ] **Scope resolution + scoped deps: `src/mcp/scope.ts`**
+- [x] **Scope resolution + scoped deps: `src/mcp/scope.ts`**
   - [x] `McpScope`, `parseScope(slug, prefixSegments)` — percent-decode, normalize (trailing `/`, empty and `.` segments), accept the empty result as the vault-root scope, validate everything else; returns a validated scope or a typed rejection (invalid prefix vs unknown vault) (PR #17)
   - [x] `assertScopeRootSafe(scopeRoot, vaultRoot)` wrapping `assertNotSymlinkEscape` (which already tolerates a not-yet-created scope root by walking up the chain — a missing root is an empty scope, not a rejection), plus the per-call wrapper that runs it before every `ToolDefinition.call`, `resources/list`, and `resources/read` in a scoped session (PR #17)
   - [x] `scopeDeps(deps, scope)` — vault lookup substitution, indexer `reindex` / `drop` prefixing, `search` filter forcing + hit stripping + out-of-scope hit rejection (PR #17)
-  - [ ] `scopeStatusDeps(deps, scope)` — supervisor/indexer listings filtered to the scoped slug, wired into `listVaultsTool` / `vaultStatusTool` where the scoped registry is built
+  - [x] `scopeStatusDeps(deps, scope)` — supervisor/indexer listings filtered to the scoped slug (PR #17), wired into `listVaultsTool` / `vaultStatusTool` where the scoped registry is built (this PR)
   - [x] Tests asserting BOTH status tools in a two-vault deployment: `list_vaults` returns one entry, `vault_status` on the other slug is `vault_not_found` (PR #17)
   - [x] Tests in `test/mcp/scope.test.ts` covering: prefix validation (`..`, percent-encoded `%2e%2e%2f`, double-encoded `%252e%252e`, leading `/`, hidden segment, NUL, over-length), alias normalization (`agents/a`, `agents/a/`, `agents/./a` → one scope key), empty prefix accepted as the vault-root scope (no prefixing, no forced search filter, no hit stripping), boundary non-collision (`agents/a` vs `agents/ab`), symlinked scope root at bind AND swapped to a symlink after bind, hit stripping, out-of-scope hit rejection, caller `pathPrefix` nesting and rejection (PR #17)
-- [ ] **Routing + session binding: `src/mcp/index.ts`**
-  - [ ] `/:slug` and `/:slug/:prefix{.+}` variants on POST / GET / DELETE
-  - [ ] `resolveScope(c)` parsing the raw pathname and returning an `McpScope` or a rejection `Response` (400 `-32000` invalid scope, 404 `-32000` unknown vault), including route coverage for encoded separators (`%2F`, `%5C`), malformed escapes (`%ZZ`), and double-encoded traversal (`%252e%252e`)
-  - [ ] `scopeKey` on `SessionPair` + mismatch rejection (404 `-32001`)
-  - [ ] LRU-bounded per-scope registry + resource-handler memo, the latter built with a slug provider returning only the scoped slug
-  - [ ] Adapter-level test that the chosen raw-target accessor preserves `%2e%2e`, `%2F`, and `%252e%252e` up to the validator
-  - [ ] Tests in `test/mcp/scope-routes.test.ts` covering every routing / session scenario above, asserting on-disk effects
-- [ ] **Scoped resource surface**
-  - [ ] Two-vault scoped `resources/list` test asserting only the scoped vault's documents are paginated, with scope-relative `obvault://` URIs
-- [ ] **Scoped tool surface**
-  - [ ] Optional `vault` argument in scoped registries: default-injection plus the `required`-array transform on the advertised `inputSchema`
-  - [ ] `instructions` on the scoped per-session `Server`
-  - [ ] Scoped `vault_status` description stating that counts are vault-wide
-  - [ ] Tests asserting `tools/list` schemas differ only in `required`, that omitted / matching / mismatched `vault` arguments behave per spec, and that `initialize` carries `instructions`
-- [ ] **README**
-  - [ ] Document the scoped mount URL form, the memory-per-agent use case, and the explicit "not an auth boundary" caveat
+- [x] **Routing + session binding: `src/mcp/index.ts`**
+  - [x] `/:slug` and `/:slug/:prefix{.+}` variants on POST / GET / DELETE (this PR)
+  - [x] `resolveScope(c)` parsing the raw pathname and returning an `McpScope` or a rejection `Response` (400 `-32000` invalid scope, 404 `-32000` unknown vault), including route coverage for encoded separators (`%2F`, `%5C`), malformed escapes (`%ZZ`), and double-encoded traversal (`%252e%252e`) (this PR)
+  - [x] `scopeKey` on `SessionPair` + mismatch rejection (404 `-32001`) (this PR)
+  - [x] LRU-bounded per-scope registry + resource-handler memo, the latter built with a slug provider returning only the scoped slug (this PR)
+  - [x] Adapter-level test that the chosen raw-target accessor preserves `%2e%2e`, `%2F`, and `%252e%252e` up to the validator (this PR)
+  - [x] Tests in `test/mcp/scope-routes.test.ts` covering every routing / session scenario above, asserting on-disk effects (this PR)
+- [x] **Scoped resource surface**
+  - [x] Two-vault scoped `resources/list` test asserting only the scoped vault's documents are paginated, with scope-relative `obvault://` URIs (this PR)
+- [x] **Scoped tool surface**
+  - [x] Optional `vault` argument in scoped registries: default-injection plus the `required`-array transform on the advertised `inputSchema` (PR #16, wired in this PR)
+  - [x] `instructions` on the scoped per-session `Server` (this PR)
+  - [x] Scoped `vault_status` description stating that counts are vault-wide (PR #16, wired in this PR)
+  - [x] Tests asserting `tools/list` schemas differ only in `required`, that omitted / matching / mismatched `vault` arguments behave per spec, and that `initialize` carries `instructions` (this PR)
+- [x] **README**
+  - [x] Document the scoped mount URL form, the memory-per-agent use case, and the explicit "not an auth boundary" caveat (this PR)
 
 ## References
 
