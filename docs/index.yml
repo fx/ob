@@ -120,5 +120,5 @@ changes:
     path: changes/0014-mcp-folder-scoping.md
     description: Optional URL-carried MCP session scope (/mcp/:slug/:prefix{.+}, or /mcp/:slug for a vault-root scope) that confines a session to one vault and folder prefix and presents that prefix as the vault root, so agents can use a shared vault as agent-scoped memory.
     spec: mcp-server
-    status: draft
+    status: complete
     depends_on: ["0005", "0008", "0012"]

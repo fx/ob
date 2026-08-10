@@ -77,8 +77,19 @@ export function createToolRegistry(): ToolRegistry {
 /**
  * Build a fresh `Server` instance with the given registry + resource handler
  * bound. Call once per session.
+ *
+ * `instructions` is the SDK's `initialize`-time advisory string. Scoped
+ * sessions (`src/mcp/scope.ts`) pass `SCOPED_INSTRUCTIONS` so the agent learns
+ * its situation once, at the exact lifetime of the fact, rather than through
+ * N forked tool descriptions. Unscoped sessions omit it: the SDK stores
+ * `options?.instructions` verbatim and only emits the field when it is truthy,
+ * so passing `undefined` is byte-identical to not passing it at all.
  */
-export function buildMcpServer(registry: ToolRegistry, resources: ResourceHandler): Server {
+export function buildMcpServer(
+  registry: ToolRegistry,
+  resources: ResourceHandler,
+  instructions?: string,
+): Server {
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
@@ -86,6 +97,7 @@ export function buildMcpServer(registry: ToolRegistry, resources: ResourceHandle
         tools: { listChanged: true },
         resources: { listChanged: false },
       },
+      instructions,
     },
   );
 
