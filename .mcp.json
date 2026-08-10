@@ -3,6 +3,10 @@
     "ob": {
       "type": "http",
       "url": "http://localhost:3000/mcp"
+    },
+    "ob-memory": {
+      "type": "http",
+      "url": "http://localhost:3000/mcp/v/agents/claude-code"
     }
   }
 }

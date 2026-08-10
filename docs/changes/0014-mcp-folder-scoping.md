@@ -351,7 +351,7 @@ Routing changes are confined to `buildMcpRoutes`: the three method handlers gain
   - [x] `resolveScope(c)` parsing the raw pathname and returning an `McpScope` or a rejection `Response` (400 `-32000` invalid scope, 404 `-32000` unknown vault), including route coverage for encoded separators (`%2F`, `%5C`), malformed escapes (`%ZZ`), and double-encoded traversal (`%252e%252e`) (this PR)
   - [x] `scopeKey` on `SessionPair` + mismatch rejection (404 `-32001`) (this PR)
   - [x] LRU-bounded per-scope registry + resource-handler memo, the latter built with a slug provider returning only the scoped slug (this PR)
-  - [x] Adapter-level test that the chosen raw-target accessor preserves `%2e%2e`, `%2F`, and `%252e%252e` up to the validator (this PR)
+  - [x] Adapter-level test that the chosen raw-target accessor preserves `%2F`, `%252e%252e`, and `%2e%2e%2f` up to the validator (this PR). A bare `%2e%2e` occupying a whole segment is NOT among them: Bun's URL parser resolves it as a dot segment when the `Request` is constructed, before any accessor runs, so `/mcp/v/agents/%2e%2e/etc` reaches the app already collapsed to `/mcp/v/etc` — which is a different, ordinary scope (slug `v`, prefix `etc`) and is validated and confined as such. This is the same "parsers resolve dot segments before the server sees them" behavior noted above for a literal `..`, which is exactly why the percent-encoded-separator forms are the ones that matter.
   - [x] Tests in `test/mcp/scope-routes.test.ts` covering every routing / session scenario above, asserting on-disk effects (this PR)
 - [x] **Scoped resource surface**
   - [x] Two-vault scoped `resources/list` test asserting only the scoped vault's documents are paginated, with scope-relative `obvault://` URIs (this PR)
