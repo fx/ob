@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.3.0](https://github.com/fx/ob/compare/v1.2.0...v1.3.0) (2026-08-10)
+
+
+### Features
+
+* **mcp:** add scope resolution and scoped service deps ([#17](https://github.com/fx/ob/issues/17)) ([5b0a7f7](https://github.com/fx/ob/commit/5b0a7f7b4c4541d4e26df4d29064760cb408f93e))
+* **mcp:** add scoped tool-surface helpers ([#16](https://github.com/fx/ob/issues/16)) ([20e86db](https://github.com/fx/ob/commit/20e86db9cd313c737ada634740a8b707d3b2f3f7))
+* **mcp:** scope MCP sessions to a vault folder by URL ([#20](https://github.com/fx/ob/issues/20)) ([d4d8f36](https://github.com/fx/ob/commit/d4d8f36641a66a020f34c866aa63211e669f4d68))
+
+
+### Bug Fixes
+
+* **docker:** drop exact apt version pins that break on point releases ([#18](https://github.com/fx/ob/issues/18)) ([9b2dc9a](https://github.com/fx/ob/commit/9b2dc9a6b68a9bd07fce2585aa8d01a4f4d45dc6))
+
 ## [1.2.0](https://github.com/fx/ob/compare/v1.1.0...v1.2.0) (2026-07-02)
 
 
