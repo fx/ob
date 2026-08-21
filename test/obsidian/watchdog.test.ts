@@ -7,8 +7,8 @@
  * wall-clock time or a real filesystem. `watchdog.real.test.ts` covers the
  * same feature areas against a real `Bun.tmpdirSync()` tree.
  *
- * Stall detection is NOT in this PR: nothing here asserts a kill, and a
- * resolved log reports `tailing` rather than `armed`.
+ * Stall detection is driven the same way: the anchor, the threshold, and the
+ * verdict all move through `driver.advance()`, never through real time.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -106,11 +106,15 @@ function seedVaultDir(
   if (opts.log !== undefined) fs.write(logPathOf(dir), opts.log, opts.logMtime ?? 1_000);
 }
 
+/** Default verdict sink for the tests that are not about stall detection. */
+const ignoreStall = (_reason: string): void => undefined;
+
 function start(
   fs: FakeWatchdogFs,
   driver: PollDriver,
   log: Capture,
   over: Partial<WatchdogDeps> = {},
+  onStall: (reason: string) => void = ignoreStall,
 ): WatchdogHandle {
   const deps: WatchdogDeps = {
     now: driver.now,
@@ -121,7 +125,7 @@ function start(
     config: TAIL_ON,
     ...over,
   };
-  return startWatchdog(VAULT, deps);
+  return startWatchdog(VAULT, deps, onStall);
 }
 
 describe("watchdogSnapshot / watchdogIsDisabled", () => {
@@ -180,7 +184,7 @@ describe("watchdog — resolution", () => {
     const wd = start(fs, driver, log);
     await driver.settle();
     const snap = wd.snapshot();
-    expect(snap.watchdog.state).toBe("tailing");
+    expect(snap.watchdog.state).toBe("armed");
     expect(snap.watchdog.logPath).toBe(logPathOf("bbb"));
     expect(log.of("sync log resolved")).toHaveLength(1);
     wd.stop();
@@ -242,7 +246,7 @@ describe("watchdog — resolution", () => {
     fs.addDir(SYNC_DIR, ["aaa"]);
     seedVaultDir(fs, "aaa", { log: "" });
     await driver.nextPoll();
-    expect(wd.snapshot().watchdog.state).toBe("tailing");
+    expect(wd.snapshot().watchdog.state).toBe("armed");
     wd.stop();
   });
 
@@ -347,7 +351,7 @@ describe("watchdog — resolution", () => {
 
     fs.write(logPathOf("aaa"), "", 1_000);
     await driver.nextPoll();
-    expect(wd.snapshot().watchdog.state).toBe("tailing");
+    expect(wd.snapshot().watchdog.state).toBe("armed");
     wd.stop();
   });
 
@@ -695,7 +699,7 @@ describe("watchdog — tail", () => {
     await driver.nextPoll();
     expect(log.tailed()).toEqual([]);
     expect(wd.snapshot().lastSyncActivityAt).toBe(2_000);
-    expect(wd.snapshot().watchdog.state).toBe("tailing");
+    expect(wd.snapshot().watchdog.state).toBe("armed");
     expect(fs.rangeCalls.filter((c) => c.path === logPathOf("aaa"))).toHaveLength(0);
     wd.stop();
   });
@@ -716,7 +720,7 @@ describe("watchdog — activity reporting and memory", () => {
     fs.append(logPathOf("aaa"), "tick\n", 2_222);
     await driver.nextPoll();
     expect(wd.snapshot().lastSyncActivityAt).toBe(2_222);
-    // Nothing is ever killed in this PR, so the count stays at zero.
+    // A log that keeps moving is never killed, so the count stays at zero.
     expect(wd.snapshot().watchdog.stallKills).toBe(0);
     wd.stop();
   });
@@ -730,7 +734,7 @@ describe("watchdog — activity reporting and memory", () => {
 
     const wd = start(fs, driver, log);
     await driver.settle();
-    expect(wd.snapshot().watchdog.state).toBe("tailing");
+    expect(wd.snapshot().watchdog.state).toBe("armed");
 
     fs.remove(logPathOf("aaa"));
     await driver.nextPoll();
@@ -743,7 +747,7 @@ describe("watchdog — activity reporting and memory", () => {
     // Re-resolves cleanly once the log comes back, without replaying it.
     fs.write(logPathOf("aaa"), "reborn\n", 3_000);
     await driver.nextPoll();
-    expect(wd.snapshot().watchdog.state).toBe("tailing");
+    expect(wd.snapshot().watchdog.state).toBe("armed");
     expect(log.tailed()).toEqual([]);
     wd.stop();
   });
@@ -768,15 +772,19 @@ describe("watchdog — activity reporting and memory", () => {
     // The replacement child starts unresolved but still shows the evidence.
     const driver2 = createPollDriver();
     const fs2 = createFakeWatchdogFs();
-    const second = startWatchdog(VAULT, {
-      now: driver2.now,
-      sleep: driver2.sleep,
-      fs: fs2,
-      logger: log.logger,
-      syncDir: SYNC_DIR,
-      config: TAIL_ON,
-      memory,
-    });
+    const second = startWatchdog(
+      VAULT,
+      {
+        now: driver2.now,
+        sleep: driver2.sleep,
+        fs: fs2,
+        logger: log.logger,
+        syncDir: SYNC_DIR,
+        config: TAIL_ON,
+        memory,
+      },
+      ignoreStall,
+    );
     await driver2.settle();
     const snap = second.snapshot();
     expect(snap.watchdog.state).toBe("resolving");
@@ -906,7 +914,7 @@ describe("watchdog — lifecycle", () => {
     release();
     for (let i = 0; i < 50; i++) await Promise.resolve();
     expect(log.of("resolved sync log became unreadable; returning to resolving")).toHaveLength(0);
-    expect(wd.snapshot().watchdog.state).toBe("tailing");
+    expect(wd.snapshot().watchdog.state).toBe("armed");
   });
 
   test("a rejecting sleep stands the watchdog down instead of escaping as an unhandled rejection", async () => {
@@ -943,5 +951,279 @@ describe("watchdog — lifecycle", () => {
     await driver.nextPoll();
     expect(log.of("sync log poll failed")).toHaveLength(2);
     wd.stop();
+  });
+});
+
+describe("watchdog — stall detection", () => {
+  /** Seed one resolvable vault directory and start an armed watchdog. */
+  function armed(
+    over: Partial<WatchdogDeps> = {},
+    opts: { log?: string; logMtime?: number } = {},
+  ): {
+    fs: FakeWatchdogFs;
+    driver: PollDriver;
+    log: Capture;
+    wd: WatchdogHandle;
+    stalls: string[];
+  } {
+    const fs = createFakeWatchdogFs();
+    const driver = createPollDriver();
+    const log = capture();
+    fs.addDir(SYNC_DIR, ["aaa"]);
+    seedVaultDir(fs, "aaa", {
+      log: opts.log ?? "",
+      ...(opts.logMtime !== undefined ? { logMtime: opts.logMtime } : {}),
+    });
+    const stalls: string[] = [];
+    const wd = start(fs, driver, log, over, (reason) => stalls.push(reason));
+    return { fs, driver, log, wd, stalls };
+  }
+
+  test("a wedged child is killed exactly one threshold after the anchor", async () => {
+    const fx = armed({}, { logMtime: 1_000 });
+    await fx.driver.settle();
+    expect(fx.wd.snapshot().watchdog.state).toBe("armed");
+
+    // One tick short of the threshold: still no verdict.
+    fx.driver.advance(299_999);
+    await fx.driver.nextPoll();
+    expect(fx.stalls).toEqual([]);
+
+    fx.driver.advance(1);
+    await fx.driver.nextPoll();
+    expect(fx.stalls).toEqual([
+      "sync stalled: no sync.log activity for 300000ms (last activity 1970-01-01T00:00:01.000Z)",
+    ]);
+    expect(fx.wd.snapshot().watchdog.stallKills).toBe(1);
+    fx.wd.stop();
+  });
+
+  test("the stall error carries the fields an operator needs", async () => {
+    const fx = armed({}, { logMtime: 1_000 });
+    await fx.driver.settle();
+    fx.driver.advance(300_000);
+    await fx.driver.nextPoll();
+    const errors = fx.log.of("sync log stalled; killing child");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.level).toBe("error");
+    expect(errors[0]?.fields).toEqual({
+      vault: "v",
+      logPath: logPathOf("aaa"),
+      lastSyncActivityAt: 1_000,
+      stalledForMs: 300_000,
+      thresholdMs: 300_000,
+    });
+    fx.wd.stop();
+  });
+
+  test("staleness anchors at resolution, so an already-ancient mtime is not a kill", async () => {
+    // The production wedge left an mtime four and a half days old. Measuring
+    // `now - mtime` would kill this child on its very first poll.
+    const fx = armed({}, { logMtime: 0 });
+    fx.driver.advance(4 * 24 * 3_600_000);
+    await fx.driver.settle();
+    expect(fx.stalls).toEqual([]);
+    expect(fx.wd.snapshot().lastSyncActivityAt).toBe(0);
+
+    // And it still gets its full threshold from the anchor, not a moment less.
+    fx.driver.advance(299_999);
+    await fx.driver.nextPoll();
+    expect(fx.stalls).toEqual([]);
+    fx.wd.stop();
+  });
+
+  test("time spent unresolved contributes nothing to staleness", async () => {
+    const fs = createFakeWatchdogFs();
+    const driver = createPollDriver();
+    const log = capture();
+    const stalls: string[] = [];
+    fs.addDir(SYNC_DIR, []);
+    const wd = start(fs, driver, log, {}, (reason) => stalls.push(reason));
+
+    // Ten minutes of a sync directory that does not exist yet.
+    await driver.settle();
+    for (let i = 0; i < 20; i++) {
+      driver.advance(30_000);
+      await driver.nextPoll();
+    }
+    expect(stalls).toEqual([]);
+    expect(wd.snapshot().watchdog.state).toBe("resolving");
+
+    // The log appears; the clock starts here.
+    fs.addDir(SYNC_DIR, ["aaa"]);
+    seedVaultDir(fs, "aaa", { log: "", logMtime: 1_000 });
+    await driver.nextPoll();
+    expect(wd.snapshot().watchdog.state).toBe("armed");
+    driver.advance(299_999);
+    await driver.nextPoll();
+    expect(stalls).toEqual([]);
+    driver.advance(1);
+    await driver.nextPoll();
+    expect(stalls).toHaveLength(1);
+    wd.stop();
+  });
+
+  test("a progressing sync is never killed however long it runs", async () => {
+    const fx = armed({}, { logMtime: 1_000 });
+    await fx.driver.settle();
+    // An hour of a healthy 30-second write cadence.
+    for (let i = 1; i <= 120; i++) {
+      fx.fs.append(logPathOf("aaa"), `Fully synced ${i}\n`, 1_000 + i * 30_000);
+      fx.driver.advance(30_000);
+      await fx.driver.nextPoll();
+    }
+    expect(fx.stalls).toEqual([]);
+    expect(fx.wd.snapshot().watchdog.stallKills).toBe(0);
+    expect(fx.wd.snapshot().lastSyncActivityAt).toBe(1_000 + 120 * 30_000);
+    fx.wd.stop();
+  });
+
+  test("a slow-but-writing first sync survives past many thresholds", async () => {
+    // Slowness is not the signal; total silence is.
+    const fx = armed({ config: { ...TAIL_ON, logTail: false } }, { logMtime: 1_000 });
+    await fx.driver.settle();
+    for (let i = 1; i <= 40; i++) {
+      fx.fs.append(logPathOf("aaa"), "progress\n", 1_000 + i * 120_000);
+      fx.driver.advance(120_000);
+      await fx.driver.nextPoll();
+    }
+    expect(fx.stalls).toEqual([]);
+    fx.wd.stop();
+  });
+
+  test("a rotation carrying the same mtime counts as activity, not silence", async () => {
+    const fx = armed({}, { logMtime: 1_000 });
+    await fx.driver.settle();
+    fx.driver.advance(299_000);
+    // Same mtime, brand-new inode: mtime alone would read this as silence.
+    fx.fs.replaceFile(logPathOf("aaa"), "", { mtimeMs: 1_000, inode: "rotated" });
+    await fx.driver.nextPoll();
+    expect(fx.stalls).toEqual([]);
+
+    // The clock restarted at the rotation, so one threshold from THERE.
+    fx.driver.advance(299_999);
+    await fx.driver.nextPoll();
+    expect(fx.stalls).toEqual([]);
+    fx.driver.advance(1);
+    await fx.driver.nextPoll();
+    expect(fx.stalls).toHaveLength(1);
+    fx.wd.stop();
+  });
+
+  test("an mtime that moves backwards is still activity", async () => {
+    const fx = armed({}, { logMtime: 5_000 });
+    await fx.driver.settle();
+    fx.driver.advance(299_000);
+    fx.fs.append(logPathOf("aaa"), "restored\n", 1_000);
+    await fx.driver.nextPoll();
+    fx.driver.advance(299_999);
+    await fx.driver.nextPoll();
+    expect(fx.stalls).toEqual([]);
+    fx.wd.stop();
+  });
+
+  test("at most one verdict per child lifetime", async () => {
+    const fx = armed({}, { logMtime: 1_000 });
+    await fx.driver.settle();
+    fx.driver.advance(300_000);
+    await fx.driver.nextPoll();
+    expect(fx.stalls).toHaveLength(1);
+    // The child ignores the signal and the silence goes on; nothing re-fires.
+    for (let i = 0; i < 5; i++) {
+      fx.driver.advance(300_000);
+      await fx.driver.nextPoll();
+    }
+    expect(fx.stalls).toHaveLength(1);
+    expect(fx.wd.snapshot().watchdog.stallKills).toBe(1);
+    fx.wd.stop();
+  });
+
+  test("stop() before the deciding poll suppresses the verdict entirely", async () => {
+    const fx = armed({}, { logMtime: 1_000 });
+    await fx.driver.settle();
+    fx.driver.advance(600_000);
+    fx.wd.stop();
+    fx.driver.release();
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    expect(fx.stalls).toEqual([]);
+    expect(fx.wd.snapshot().watchdog.stallKills).toBe(0);
+  });
+
+  test("stop() landing mid-poll suppresses the verdict", async () => {
+    const fx = armed({}, { logMtime: 1_000 });
+    await fx.driver.settle();
+    fx.driver.advance(600_000);
+
+    // Hold the stat open so `stop()` lands after the poll has begun.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const realStat = fx.fs.stat.bind(fx.fs);
+    Object.assign(fx.fs, {
+      stat: async (p: string) => {
+        await gate;
+        return realStat(p);
+      },
+    });
+    fx.driver.release();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    fx.wd.stop();
+    release();
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    expect(fx.stalls).toEqual([]);
+  });
+
+  test("threshold 0 keeps the tail running and never kills — the `tailing` state", async () => {
+    const fx = armed({ config: { stallTimeoutMs: 0, pollIntervalMs: 30_000, logTail: true } });
+    await fx.driver.settle();
+    expect(fx.wd.snapshot().watchdog.state).toBe("tailing");
+    expect(fx.wd.snapshot().watchdog.thresholdMs).toBe(0);
+
+    fx.fs.append(logPathOf("aaa"), "still tailing\n", 2_000);
+    fx.driver.advance(24 * 3_600_000);
+    await fx.driver.nextPoll();
+    expect(fx.log.tailed()).toEqual(["still tailing"]);
+    expect(fx.stalls).toEqual([]);
+    expect(fx.wd.snapshot().watchdog.stallKills).toBe(0);
+    fx.wd.stop();
+  });
+
+  test("a log that vanishes re-anchors on re-resolution rather than stalling", async () => {
+    const fx = armed({}, { logMtime: 1_000 });
+    await fx.driver.settle();
+    fx.driver.advance(200_000);
+    fx.fs.remove(logPathOf("aaa"));
+    await fx.driver.nextPoll();
+    expect(fx.wd.snapshot().watchdog.state).toBe("resolving");
+
+    // Ignorance is not a stall: nothing is killed while unresolved.
+    fx.driver.advance(600_000);
+    await fx.driver.nextPoll();
+    expect(fx.stalls).toEqual([]);
+
+    fx.fs.write(logPathOf("aaa"), "", 1_000);
+    await fx.driver.nextPoll();
+    expect(fx.wd.snapshot().watchdog.state).toBe("armed");
+    fx.driver.advance(299_999);
+    await fx.driver.nextPoll();
+    expect(fx.stalls).toEqual([]);
+    fx.driver.advance(1);
+    await fx.driver.nextPoll();
+    expect(fx.stalls).toHaveLength(1);
+    fx.wd.stop();
+  });
+
+  test("stallKills carried in from a previous child keeps counting up", async () => {
+    const fx = armed(
+      { memory: { logPath: logPathOf("aaa"), lastSyncActivityAt: 1, stallKills: 2 } },
+      { logMtime: 1_000 },
+    );
+    await fx.driver.settle();
+    fx.driver.advance(300_000);
+    await fx.driver.nextPoll();
+    expect(fx.wd.snapshot().watchdog.stallKills).toBe(3);
+    expect(fx.wd.memory().stallKills).toBe(3);
+    fx.wd.stop();
   });
 });

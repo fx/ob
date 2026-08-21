@@ -5,7 +5,7 @@
 Detect an `ob sync --continuous` child that has stopped making progress but is still alive, kill it so the existing restart loop can replace it, forward the upstream sync log into the parent's structured logs, and report per-vault sync liveness on `/readyz`. Implements the Sync-activity-log and Sync-stall-watchdog sections newly added to the [Obsidian Sync spec](../specs/obsidian-sync/index.md#sync-activity-log), the liveness/readiness split newly pinned in [Architecture › Observability](../specs/architecture/index.md#observability), and the `/readyz` body contract newly added to [REST API › Health endpoints](../specs/rest-api/index.md#health-endpoints).
 
 **Spec:** [Obsidian Sync](../specs/obsidian-sync/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0002, 0011
 
 ## Motivation
@@ -208,15 +208,15 @@ The poll loop uses the injected `sleep` raced against a per-lifetime stop signal
   - [x] At least one test per feature area against a real `Bun.tmpdirSync()` tree
   - [x] `src/http/index.ts`: add `ok` to the `/readyz` body on both paths, and emit one `indexers` entry per configured vault — synthesizing `starting` for a vault the indexer has not registered — replacing the current `idx === undefined ? true` shortcut; update `test/http.test.ts`'s supervisor-only 200 case accordingly and add a test that an unregistered indexer holds `/readyz` at 503
 
-- [ ] **PR 3 — Stall detection, kill escalation, and accounting**
-  - [ ] `src/obsidian/watchdog.ts`: anchor-on-resolution, activity-on-mtime-change, staleness evaluation against the injected clock, one-verdict-per-child guard, and the `onStall` callback carrying the `lastError` text (threshold plus last observed mtime)
-  - [ ] `src/obsidian/child.ts`: flip the vault out of `running` and set `lastError` on the verdict itself (before the signal), SIGTERM, SIGKILL after the grace period, `stallReason` consumed after `exited` settles to select `lastError`, suppress the healthy-uptime reset, push to both `crashTimes` and the new stall window, flip to `failed` on either ceiling, and increment `watchdog.stallKills`
-  - [ ] Tests in `test/obsidian/child.test.ts` (or a sibling) covering every spec scenario: wedged child killed and restarted, SIGTERM ignored then SIGKILL, progressing sync never killed, third stall in an hour fails the vault, stall kill does not reset crash counters, no verdict after `requestStop()`, and watchdog fully disabled
-  - [ ] Test that a stalled vault is reported through `/readyz` with 503 while `/healthz` still returns 200
-  - [ ] `README.md`: the three env vars in the configuration table, a short "recognizing a stalled vault" operations note, and the explicit "keep liveness on `/healthz`" statement
-  - [ ] `README.md`: correct the two XDG base expressions (lines 27 and 39) to the canonical `${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}`. Both currently read `${XDG_CONFIG_HOME:-/home/ob/.config}`, dropping the `HOME` layer — the same defect the spec sweep fixed, left to this PR because the README is already this PR's deliverable and touching it in the docs PR would widen that commit
-  - [ ] `.env.example`: commented block for the three vars
-  - [ ] Flip this change document to `**Status:** complete` and sync `docs/index.yml` and `docs/index.md`
+- [x] **PR 3 — Stall detection, kill escalation, and accounting** (this PR)
+  - [x] `src/obsidian/watchdog.ts`: anchor-on-resolution, activity-on-mtime-change, staleness evaluation against the injected clock, one-verdict-per-child guard, and the `onStall` callback carrying the `lastError` text (threshold plus last observed mtime)
+  - [x] `src/obsidian/child.ts`: flip the vault out of `running` and set `lastError` on the verdict itself (before the signal), SIGTERM, SIGKILL after the grace period, `stallReason` consumed after `exited` settles to select `lastError`, suppress the healthy-uptime reset, push to both `crashTimes` and the new stall window, flip to `failed` on either ceiling, and increment `watchdog.stallKills`
+  - [x] Tests in `test/obsidian/child.test.ts` (or a sibling) covering every spec scenario: wedged child killed and restarted, SIGTERM ignored then SIGKILL, progressing sync never killed, third stall in an hour fails the vault, stall kill does not reset crash counters, no verdict after `requestStop()`, and watchdog fully disabled
+  - [x] Test that a stalled vault is reported through `/readyz` with 503 while `/healthz` still returns 200
+  - [x] `README.md`: the three env vars in the configuration table, a short "recognizing a stalled vault" operations note, and the explicit "keep liveness on `/healthz`" statement
+  - [x] `README.md`: correct the two XDG base expressions (lines 27 and 39) to the canonical `${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}`. Both currently read `${XDG_CONFIG_HOME:-/home/ob/.config}`, dropping the `HOME` layer — the same defect the spec sweep fixed, left to this PR because the README is already this PR's deliverable and touching it in the docs PR would widen that commit
+  - [x] `.env.example`: commented block for the three vars
+  - [x] Flip this change document to `**Status:** complete` and sync `docs/index.yml` and `docs/index.md`
 
 ## Risks / Open Questions
 

@@ -913,7 +913,7 @@ describe("startSupervisor — sync-log watchdog wiring", () => {
       { dataDir: cfgDataDir },
     );
 
-    await waitFor(() => sup.get("v")?.watchdog.state === "tailing", "watchdog resolved");
+    await waitFor(() => sup.get("v")?.watchdog.state === "armed", "watchdog resolved");
     const resolved = sup.get("v");
     expect(resolved?.watchdog.logPath).toBe(join(syncEntry, "sync.log"));
     expect(resolved?.watchdog.thresholdMs).toBe(300_000);
@@ -996,7 +996,7 @@ describe("startSupervisor — sync-log watchdog wiring", () => {
       },
       { dataDir: cfgDataDir },
     );
-    await waitFor(() => sup.get("v")?.watchdog.state === "tailing", "watchdog resolved");
+    await waitFor(() => sup.get("v")?.watchdog.state === "armed", "watchdog resolved");
     writeFileSync(join(syncEntry, "sync.log"), `${"a".repeat(64)}\nkept\n`);
     await driver.nextPoll();
     expect(tailed).toEqual(["kept"]);

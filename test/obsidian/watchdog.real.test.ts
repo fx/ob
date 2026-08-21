@@ -4,8 +4,8 @@
  * `watchdog.test.ts` drives every branch through the injected `WatchdogFs`;
  * this file exists so that surface cannot drift from real `fs` semantics —
  * at least one test per feature area (resolution, no-backlog tail, rotation
- * and truncation, tail-off, and error dispositions) runs against a real
- * temporary tree through `defaultWatchdogFs`.
+ * and truncation, tail-off, error dispositions, and stall detection) runs
+ * against a real temporary tree through `defaultWatchdogFs`.
  *
  * The tree is a `Bun.tmpdirSync()`-style throwaway directory, built the way
  * the rest of this suite builds them (`mkdtempSync` under `os.tmpdir()`).
@@ -14,7 +14,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SyncWatchdogConfig } from "../../src/config/index.ts";
@@ -61,12 +61,15 @@ interface Fixture {
   readonly driver: PollDriver;
   readonly lines: string[];
   readonly warns: string[];
+  /** Stall verdicts, in order. */
+  readonly stalls: string[];
 }
 
 function startReal(tree: Tree, config: SyncWatchdogConfig = TAIL_ON): Fixture {
   const driver = createPollDriver();
   const lines: string[] = [];
   const warns: string[] = [];
+  const stalls: string[] = [];
   const logger = createLogger({
     level: "trace",
     write: (raw) => {
@@ -85,8 +88,9 @@ function startReal(tree: Tree, config: SyncWatchdogConfig = TAIL_ON): Fixture {
       syncDir: tree.syncDir,
       config,
     },
+    (reason) => stalls.push(reason),
   );
-  return { wd, driver, lines, warns };
+  return { wd, driver, lines, warns, stalls };
 }
 
 describe("watchdog against a real filesystem", () => {
@@ -102,7 +106,7 @@ describe("watchdog against a real filesystem", () => {
 
       const fx = startReal(tree);
       await fx.driver.settle();
-      expect(fx.wd.snapshot().watchdog.state).toBe("tailing");
+      expect(fx.wd.snapshot().watchdog.state).toBe("armed");
       expect(fx.wd.snapshot().watchdog.logPath).toBe(wanted);
       fx.wd.stop();
     } finally {
@@ -212,7 +216,7 @@ describe("watchdog against a real filesystem", () => {
       await fx.driver.nextPoll();
       expect(fx.lines).toEqual([]);
       const snap = fx.wd.snapshot();
-      expect(snap.watchdog.state).toBe("tailing");
+      expect(snap.watchdog.state).toBe("armed");
       expect(typeof snap.lastSyncActivityAt).toBe("number");
       fx.wd.stop();
     } finally {
@@ -230,6 +234,51 @@ describe("watchdog against a real filesystem", () => {
       const fx = startReal(tree);
       await fx.driver.settle();
       expect(fx.wd.snapshot().watchdog.logPath).toBe(wanted);
+      fx.wd.stop();
+    } finally {
+      rmSync(tree.root, { recursive: true, force: true });
+    }
+  });
+  test("a real silent log produces a verdict one threshold after the anchor", async () => {
+    const tree = makeTree();
+    try {
+      seed(tree, "aaa", tree.vaultPath, "existing\n");
+      const fx = startReal(tree);
+      await fx.driver.settle();
+      expect(fx.wd.snapshot().watchdog.state).toBe("armed");
+
+      // The file's real mtime is "now" in wall-clock terms, but the anchor is
+      // the injected clock's zero — so only `driver.advance()` can produce a
+      // verdict, and no real time is waited on.
+      fx.driver.advance(299_999);
+      await fx.driver.nextPoll();
+      expect(fx.stalls).toEqual([]);
+
+      fx.driver.advance(1);
+      await fx.driver.nextPoll();
+      expect(fx.stalls).toHaveLength(1);
+      expect(fx.stalls[0]).toContain("sync stalled: no sync.log activity for 300000ms");
+      expect(fx.wd.snapshot().watchdog.stallKills).toBe(1);
+      fx.wd.stop();
+    } finally {
+      rmSync(tree.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a real append refreshes the staleness clock", async () => {
+    const tree = makeTree();
+    try {
+      const logPath = seed(tree, "aaa", tree.vaultPath, "");
+      const fx = startReal(tree);
+      await fx.driver.settle();
+      fx.driver.advance(299_000);
+      appendFileSync(logPath, "Fully synced\n");
+      await fx.driver.nextPoll();
+      expect(fx.lines).toEqual(["Fully synced"]);
+
+      fx.driver.advance(299_999);
+      await fx.driver.nextPoll();
+      expect(fx.stalls).toEqual([]);
       fx.wd.stop();
     } finally {
       rmSync(tree.root, { recursive: true, force: true });

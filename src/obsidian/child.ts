@@ -10,6 +10,15 @@
  * `failed` and stops further restart attempts for that vault only —
  * isolation between vaults is the whole point of one child per vault.
  *
+ * A hung-but-alive child never settles `exited`, so the crash machinery above
+ * is blind to it. The sync-log watchdog supplies that missing signal: on a
+ * stall verdict this module takes the vault out of `running`, SIGTERMs the
+ * child, SIGKILLs it if the grace period elapses, and lets the ordinary
+ * restart path take over. A stall kill is credited to BOTH the crash window
+ * and a separate rolling stall window, because a stall can only happen once
+ * per threshold and ten of them can never land inside the crash window's five
+ * minutes — the crash ceiling alone could never fire on stalls.
+ *
  * `now()` and the sleep primitive are injected so crash-loop tests can
  * collapse a 5-minute window down to a deterministic sequence of fake
  * timestamps.
@@ -85,6 +94,34 @@ export const DEFAULT_CRASH_LOOP: CrashLoop = {
 };
 
 /**
+ * Stall-loop config. Separate from `CrashLoop` on purpose: a stall kill can
+ * only occur once per stall threshold, so with the 300-second default ten of
+ * them cannot land inside `DEFAULT_CRASH_LOOP.windowMs`, and a child wedged
+ * for 300 s also clears the healthy-uptime bar. Counting stalls toward
+ * `crashTimes` alone therefore never escalates — wedge, kill, wedge, kill,
+ * forever. Defaults match the spec: ≥ 3 stall kills in 60 min.
+ */
+export interface StallLoop {
+  readonly windowMs: number;
+  readonly maxStalls: number;
+}
+
+export const DEFAULT_STALL_LOOP: StallLoop = {
+  windowMs: 60 * 60_000,
+  maxStalls: 3,
+};
+
+/** Grace between the stall SIGTERM and the SIGKILL that follows it. */
+export const DEFAULT_STALL_KILL_GRACE_MS = 10_000;
+
+/**
+ * Race arms for the stall-kill grace period, as named module-level functions
+ * so each stays one independently coverable callable.
+ */
+const raceChildExited = (): true => true;
+const raceGraceElapsed = (): false => false;
+
+/**
  * Everything the sync-log watchdog needs, minus the clock and the logger,
  * which the child already owns. Omitting this block entirely means no
  * watchdog is wired at all, which the status surface reports as `disabled`.
@@ -104,6 +141,9 @@ export interface ChildDeps {
   readonly sleep: (ms: number) => Promise<void>;
   readonly backoff?: ChildBackoff;
   readonly crashLoop?: CrashLoop;
+  readonly stallLoop?: StallLoop;
+  /** Grace between the stall SIGTERM and the SIGKILL. Default 10 s. */
+  readonly stallKillGraceMs?: number;
   readonly obBin?: string;
   readonly watchdog?: ChildWatchdogDeps;
 }
@@ -123,6 +163,22 @@ interface MutableStatus {
 export function childBackoffDelay(b: ChildBackoff, attemptIndex: number): number {
   const raw = b.initialMs * b.factor ** attemptIndex;
   return Math.min(raw, b.capMs);
+}
+
+/**
+ * Drop leading entries that have aged out of a rolling window. Shared by the
+ * crash window and the stall window so the two can never drift apart in how
+ * they age.
+ */
+function trimWindow(times: number[], windowStart: number): void {
+  while (times.length > 0) {
+    const head = times[0];
+    if (head !== undefined && head < windowStart) {
+      times.shift();
+    } else {
+      break;
+    }
+  }
 }
 
 /**
@@ -173,6 +229,22 @@ export class VaultChild {
   private readonly deps: ChildDeps;
   private readonly status: MutableStatus;
   private readonly crashTimes: number[] = [];
+  /**
+   * Rolling window of stall-kill instants. Cleared only by kills ageing out
+   * of it — never by healthy uptime and never by an ordinary crash in
+   * between, because a vault that alternates between crashing and wedging is
+   * not healthier than one that only wedges.
+   */
+  private readonly stallTimes: number[] = [];
+  /**
+   * The verdict recorded for the attempt currently in flight, or `null`.
+   * This — never the exit code — is what classifies the attempt: a child with
+   * a SIGTERM handler exits 0, and reading that as a clean exit would skip
+   * stall accounting entirely and let a wedging vault restart forever without
+   * approaching a ceiling. Cleared at the top of every attempt and again once
+   * consumed, so a later ordinary crash cannot inherit it.
+   */
+  private stallReason: string | null = null;
   private currentHandle: SpawnHandle | null = null;
   private childExitedAt = 0;
   private childStartedAt = 0;
@@ -233,7 +305,7 @@ export class VaultChild {
   }
 
   /** Start the per-child watchdog. No-op when none is wired. */
-  private beginWatchdog(): void {
+  private beginWatchdog(handle: SpawnHandle): void {
     const wd = this.watchdogDeps;
     if (wd === null) return;
     this.watchdogHandle = startWatchdog(
@@ -248,7 +320,53 @@ export class VaultChild {
         memory: this.watchdogMemory,
         ...(wd.maxTailBytes !== undefined ? { maxTailBytes: wd.maxTailBytes } : {}),
       },
+      (reason) => this.onStallVerdict(handle, reason),
     );
+  }
+
+  /**
+   * Act on a stall verdict for the child currently in flight.
+   *
+   * The vault leaves `running` and gains its `lastError` HERE, before the
+   * signal — not when the child finally exits. A child that ignores SIGTERM
+   * stays alive for the whole grace period, and a vault the supervisor has
+   * already declared unhealthy must not hold `/readyz` at 200 for that
+   * window. `starting` is the state any other loss of a child produces; the
+   * move to `failed` happens only if a ceiling is reached.
+   */
+  private onStallVerdict(handle: SpawnHandle, reason: string): void {
+    this.stallReason = reason;
+    this.status.state = "starting";
+    this.status.lastError = reason;
+    handle.kill("SIGTERM");
+    this.escalateStallKill(handle);
+  }
+
+  /**
+   * SIGKILL a stalled child that did not honour the SIGTERM within the grace
+   * period. Fire-and-forget: the run loop is already parked on
+   * `handle.exited`, and a child that exits in time makes this a no-op.
+   */
+  private escalateStallKill(handle: SpawnHandle): void {
+    const graceMs = this.deps.stallKillGraceMs ?? DEFAULT_STALL_KILL_GRACE_MS;
+    void (async () => {
+      // Both arms use one handler for fulfilment and rejection. A rejected
+      // `exited` is still an ended attempt; a rejected `sleep` means we
+      // cannot honour the grace at all, and a child already declared stalled
+      // and signalled must still be killed rather than left to wedge. Either
+      // way nothing escapes this fire-and-forget task as an unhandled
+      // rejection and takes the process down with it.
+      const exitedInTime = await Promise.race([
+        handle.exited.then(raceChildExited, raceChildExited),
+        this.deps.sleep(graceMs).then(raceGraceElapsed, raceGraceElapsed),
+      ]);
+      if (exitedInTime) return;
+      this.deps.logger.warn("stalled child ignored SIGTERM; sending SIGKILL", {
+        vault: this.vault.slug,
+        graceMs,
+      });
+      handle.kill("SIGKILL");
+    })();
   }
 
   /**
@@ -286,6 +404,7 @@ export class VaultChild {
   private async runLoop(): Promise<void> {
     const backoff = this.deps.backoff ?? DEFAULT_CHILD_BACKOFF;
     const crashCfg = this.deps.crashLoop ?? DEFAULT_CRASH_LOOP;
+    const stallCfg = this.deps.stallLoop ?? DEFAULT_STALL_LOOP;
     const obBin = this.deps.obBin ?? "ob";
 
     let consecutiveFailures = 0;
@@ -298,6 +417,8 @@ export class VaultChild {
       // and we treat it that way to keep the supervisor running.
       let attemptCode: number;
       this.childStartedAt = this.deps.now();
+      // A verdict must never outlive the attempt that produced it.
+      this.stallReason = null;
       try {
         const handle = this.deps.spawner.run(obBin, [
           "sync",
@@ -320,7 +441,7 @@ export class VaultChild {
 
         // The watchdog polls only while a child is running — never during
         // restart backoff, `sync-setup`, or `sync-config`.
-        this.beginWatchdog();
+        this.beginWatchdog(handle);
         try {
           attemptCode = await handle.exited;
           // Wait for log streams to finish flushing before deciding what to do.
@@ -342,6 +463,11 @@ export class VaultChild {
       this.currentHandle = null;
       this.childExitedAt = this.deps.now();
       this.status.pid = null;
+      // Consume the verdict. Read it here and clear it in the same breath:
+      // everything below classifies off `stallReason`, never off
+      // `attemptCode`, and the next ordinary crash must not inherit it.
+      const stallReason = this.stallReason;
+      this.stallReason = null;
 
       // Per the spec, a vault that just exited is no longer ready. Flip
       // back to `starting`; the next successful spawn will return us to
@@ -357,34 +483,43 @@ export class VaultChild {
         return;
       }
 
-      // Healthy uptime resets the failure counter and crash-window history.
+      // Healthy uptime resets the failure counter and crash-window history —
+      // but a child the watchdog had to kill was never healthy, however long
+      // it stayed alive. Without this exemption a child wedged for the full
+      // healthy-uptime window would clear the counters on its way out and
+      // nothing could ever escalate.
       const uptimeMs = this.childExitedAt - this.childStartedAt;
-      if (uptimeMs >= crashCfg.healthyResetMs) {
+      if (stallReason === null && uptimeMs >= crashCfg.healthyResetMs) {
         consecutiveFailures = 0;
         this.crashTimes.length = 0;
       }
 
       this.status.restarts += 1;
       // Preserve a "spawn threw" error message if the catch already set one.
-      if (this.status.lastError === null || !this.status.lastError.startsWith("spawn/exited")) {
+      if (stallReason !== null) {
+        this.status.lastError = stallReason;
+      } else if (
+        this.status.lastError === null ||
+        !this.status.lastError.startsWith("spawn/exited")
+      ) {
         this.status.lastError = `ob sync exited with code ${attemptCode}`;
       }
       this.deps.logger.warn("ob sync exited", {
         vault: this.vault.slug,
         code: attemptCode,
         restarts: this.status.restarts,
+        stalled: stallReason !== null,
       });
 
-      // Track this crash for the rolling window.
+      // Track this crash for the rolling window. A stall kill counts here as
+      // well as in its own window, so a vault mixing real crashes with stalls
+      // still trips the original ceiling.
       this.crashTimes.push(this.childExitedAt);
-      const windowStart = this.childExitedAt - crashCfg.windowMs;
-      while (this.crashTimes.length > 0) {
-        const head = this.crashTimes[0];
-        if (head !== undefined && head < windowStart) {
-          this.crashTimes.shift();
-        } else {
-          break;
-        }
+      trimWindow(this.crashTimes, this.childExitedAt - crashCfg.windowMs);
+
+      if (stallReason !== null) {
+        this.stallTimes.push(this.childExitedAt);
+        trimWindow(this.stallTimes, this.childExitedAt - stallCfg.windowMs);
       }
 
       if (this.crashTimes.length >= crashCfg.maxCrashes) {
@@ -394,6 +529,17 @@ export class VaultChild {
           vault: this.vault.slug,
           crashes: this.crashTimes.length,
           windowMs: crashCfg.windowMs,
+        });
+        return;
+      }
+
+      if (this.stallTimes.length >= stallCfg.maxStalls) {
+        this.status.state = "failed";
+        this.status.lastError = `sync stall-loop: ${this.stallTimes.length} stall kills within ${stallCfg.windowMs}ms`;
+        this.deps.logger.error("ob sync stall-loop ceiling reached", {
+          vault: this.vault.slug,
+          stallKills: this.stallTimes.length,
+          windowMs: stallCfg.windowMs,
         });
         return;
       }
@@ -420,8 +566,8 @@ export class VaultChild {
     // Wake any in-flight backoff sleep so the run loop notices `stopRequested`.
     this.resolveStopSignal();
     // Stop the watchdog here as well as in the run loop's `finally`: shutdown
-    // must not wait out a poll interval, and (from PR 3 on) a stall verdict
-    // must not land between the SIGTERM and the loop noticing.
+    // must not wait out a poll interval, and a stall verdict must not land
+    // between the SIGTERM and the loop noticing.
     this.endWatchdog();
     if (this.currentHandle !== null) {
       this.currentHandle.kill(signal);
