@@ -39,7 +39,8 @@ The REST API exposes vault-scoped CRUD over arbitrary files (Markdown, images, P
 - `GET /readyz` MUST return `200` only when **all** of the following hold; otherwise it MUST return `503`:
   - at least one vault is configured;
   - every configured vault's supervisor state is `running`;
-  - every indexer the indexer service reports is `ready`, and it reports at least one. A process composed without an indexer at all — the partial wiring used by tests and by the pre-indexer bootstrap — satisfies this condition vacuously and reports `indexers: []`.
+  - every configured vault has an entry in `indexers` whose state is `ready`.
+- `vaults` and `indexers` MUST each carry exactly one entry per configured vault. A configured vault the indexer service has not registered yet MUST appear as a synthesized entry in state `starting`, never be omitted — an omitted component is one that cannot hold the response at 503 when it is unhealthy, which is the failure mode this contract exists to prevent. This mirrors the synthesis `GET /v1/vaults` already performs for the same startup race.
 - `ok` MUST equal `status === 200`. It exists so an alerting rule can key on one boolean instead of re-deriving the aggregate from the arrays.
 - The body MUST be identical in shape on 200 and 503 — the 503 path MUST NOT truncate, omit, or reorder the arrays. An operator diagnosing a 503 needs the per-component detail in the same place they found it when things were healthy.
 - Every critical long-lived component MUST appear in the body. A component that is not represented MUST NOT be able to keep `/readyz` at 200 while it is unhealthy.
