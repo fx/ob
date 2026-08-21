@@ -70,24 +70,38 @@ function trimToUndefined(v: string | undefined): string | undefined {
 }
 
 /**
+ * Resolve the XDG config base — `${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}`
+ * minus the container default, which the caller supplies as `homeDir`.
+ *
+ * Returns `null` when neither input resolves to a non-empty path;
+ * `path.join("", "obsidian-headless")` would otherwise produce a relative
+ * path against the process's CWD, which is the footgun this guard closes.
+ *
+ * This is the single definition of the base. Everything the supervisor keeps
+ * under it — the credential file and the per-vault `obsidian-headless/sync/`
+ * tree the stall watchdog reads — MUST resolve it through this function, so
+ * the two can never search different trees.
+ */
+export function resolveXdgConfigBase(
+  input: Pick<BootstrapInput, "xdgConfigHome" | "homeDir">,
+): string | null {
+  const xdg = trimToUndefined(input.xdgConfigHome);
+  if (xdg !== undefined) return xdg;
+  const home = trimToUndefined(input.homeDir);
+  return home === undefined ? null : join(home, ".config");
+}
+
+/**
  * Resolve the absolute auth_token path the supervisor will write to.
  *
  * Throws `AuthMissingError` if neither `xdgConfigHome` nor `homeDir`
- * resolves to a non-empty path — `path.join("", "obsidian-headless")` would
- * otherwise produce a relative path against the process's CWD, which is the
- * exact footgun this guard exists to close.
+ * resolves to a non-empty path.
  */
 export function resolveAuthTokenPath(
   input: Pick<BootstrapInput, "xdgConfigHome" | "homeDir">,
 ): string {
-  const xdg = trimToUndefined(input.xdgConfigHome);
-  const home = trimToUndefined(input.homeDir);
-  let root: string;
-  if (xdg !== undefined) {
-    root = xdg;
-  } else if (home !== undefined) {
-    root = join(home, ".config");
-  } else {
+  const root = resolveXdgConfigBase(input);
+  if (root === null) {
     throw new AuthMissingError(
       "neither XDG_CONFIG_HOME nor HOME resolves to a non-empty path; cannot locate auth_token",
     );

@@ -23,6 +23,39 @@ test("vault_status parity (success)", async () => {
   expect(mcp.body).toEqual(rest.body);
 });
 
+test("the new sync-status fields reach /readyz, both REST vault routes, and MCP alike", async () => {
+  // Spec scenario "Status fields reach every surface": all four surfaces
+  // MUST report identical `lastSyncActivityAt` and `watchdog` values.
+  const fx = await makeParityFixture({ label: "p-vs-wd" });
+  cleanup.push(fx.stop);
+  await waitFor(() => fx.indexer.status("v")?.state === "ready");
+
+  const mcp = await callMcp(fx, "vault_status", { vault: "v" });
+  const restOne = await callRestJson(fx, "GET", "/v1/vaults/v");
+  const restList = await callRestJson(fx, "GET", "/v1/vaults");
+  const readyz = await callRestJson(fx, "GET", "/readyz");
+
+  const expected = {
+    lastSyncActivityAt: 1_700_000_000_000,
+    watchdog: {
+      state: "tailing",
+      logPath: "/cfg/obsidian-headless/sync/v/sync.log",
+      thresholdMs: 300_000,
+      pollIntervalMs: 30_000,
+      stallKills: 0,
+    },
+  };
+  const pick = (sync: unknown): unknown => {
+    const s = sync as { lastSyncActivityAt: unknown; watchdog: unknown };
+    return { lastSyncActivityAt: s.lastSyncActivityAt, watchdog: s.watchdog };
+  };
+
+  expect(pick((mcp.body as { sync: unknown }).sync)).toEqual(expected);
+  expect(pick((restOne.body as { sync: unknown }).sync)).toEqual(expected);
+  expect(pick((restList.body as { sync: unknown }[])[0]?.sync)).toEqual(expected);
+  expect(pick((readyz.body as { vaults: unknown[] }).vaults[0])).toEqual(expected);
+});
+
 test("vault_status parity (vault_not_found)", async () => {
   const fx = await makeParityFixture({ label: "p-vs-404" });
   cleanup.push(fx.stop);

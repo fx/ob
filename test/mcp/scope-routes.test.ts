@@ -40,6 +40,7 @@ import {
 import { SCOPED_INSTRUCTIONS, VAULT_WIDE_COUNTS_NOTE } from "../../src/mcp/scope-tools.ts";
 import type { Supervisor } from "../../src/obsidian/index.ts";
 import type { VaultDescriptor } from "../../src/vault/files.ts";
+import { TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
 import { waitFor } from "./helpers.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -65,14 +66,7 @@ function silent(): Logger {
 }
 
 function fakeSupervisor(slugs: readonly string[]): Supervisor {
-  const statuses = slugs.map((slug) => ({
-    slug,
-    name: slug,
-    state: "running" as const,
-    pid: 1,
-    restarts: 0,
-    lastError: null,
-  }));
+  const statuses = slugs.map((slug) => makeVaultStatus({ slug }));
   return {
     list: () => statuses.slice(),
     get: (slug) => statuses.find((s) => s.slug === slug) ?? null,
@@ -115,6 +109,7 @@ async function makeScopeFixture(
     embeddingModel: "x",
     logLevel: "error",
     syncConfigEnv: {},
+    syncWatchdog: TEST_WATCHDOG_OFF,
   };
 
   const real = await startIndexer(cfg, { logger: silent(), embedder: buildHashEmbedder(8) });

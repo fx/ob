@@ -18,7 +18,13 @@ export interface StatusDeps {
   readonly indexer: Pick<Indexer, "list" | "status">;
 }
 
-function emptyIndexer(slug: string): IndexerStatus {
+/**
+ * Placeholder for a configured vault the indexer service has not registered
+ * yet. Exported because `/readyz` synthesizes the same entry for the same
+ * startup race: a component that can be omitted from a status surface is one
+ * that cannot hold the response at 503 when it is unhealthy.
+ */
+export function startingIndexerStatus(slug: string): IndexerStatus {
   return {
     slug,
     state: "starting",
@@ -42,13 +48,13 @@ export function listVaults(deps: StatusDeps): VaultSummary[] {
     slug: sync.slug,
     name: sync.name,
     sync,
-    indexer: idxBySlug.get(sync.slug) ?? emptyIndexer(sync.slug),
+    indexer: idxBySlug.get(sync.slug) ?? startingIndexerStatus(sync.slug),
   }));
 }
 
 export function vaultStatus(deps: StatusDeps, slug: string): VaultSummary | null {
   const sync = deps.supervisor.get(slug);
   if (sync === null) return null;
-  const indexer = deps.indexer.status(slug) ?? emptyIndexer(slug);
+  const indexer = deps.indexer.status(slug) ?? startingIndexerStatus(slug);
   return { slug: sync.slug, name: sync.name, sync, indexer };
 }

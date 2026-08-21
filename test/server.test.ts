@@ -15,6 +15,7 @@ import {
   startServer,
   withTimeout,
 } from "../src/server.ts";
+import { TEST_WATCHDOG_OFF, makeVaultStatus } from "./helpers/vaultStatus.ts";
 
 const TOKEN = "tk";
 const VAULTS = '[{"name":"v"}]';
@@ -80,6 +81,7 @@ function baseConfig(overrides: Partial<Config> = {}): Config {
     embeddingModel: "Xenova/all-MiniLM-L6-v2",
     logLevel: "error",
     syncConfigEnv: {},
+    syncWatchdog: TEST_WATCHDOG_OFF,
     ...overrides,
   };
   return cfg;
@@ -372,9 +374,7 @@ describe("main", () => {
       LOG_LEVEL: "error",
       ...tmpEnv(),
     };
-    const sup = fakeSupervisor([
-      { slug: "v", name: "v", state: "starting", pid: null, restarts: 0, lastError: null },
-    ]);
+    const sup = fakeSupervisor([makeVaultStatus({ slug: "v", state: "starting", pid: null })]);
     const running = await main(
       env,
       () => undefined,
@@ -405,9 +405,7 @@ describe("main", () => {
       LOG_LEVEL: "error",
       ...tmpEnv(),
     };
-    const sup = fakeSupervisor([
-      { slug: "v", name: "v", state: "running", pid: 1234, restarts: 0, lastError: null },
-    ]);
+    const sup = fakeSupervisor([makeVaultStatus({ slug: "v", pid: 1234 })]);
     const running = await main(
       env,
       () => undefined,

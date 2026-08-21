@@ -14,6 +14,7 @@ import { buildHttpApp } from "../../src/http/index.ts";
 import { type Indexer, startIndexer } from "../../src/indexer/index.ts";
 import type { Logger } from "../../src/log.ts";
 import type { Supervisor, VaultStatus } from "../../src/obsidian/index.ts";
+import { TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
 
 function silent(): Logger {
   return {
@@ -58,6 +59,7 @@ export async function makeHttpFixture(label = "http"): Promise<HttpFixture> {
     embeddingModel: "x",
     logLevel: "error",
     syncConfigEnv: {},
+    syncWatchdog: TEST_WATCHDOG_OFF,
   };
 
   const indexer = await startIndexer(cfg, {
@@ -65,9 +67,7 @@ export async function makeHttpFixture(label = "http"): Promise<HttpFixture> {
     embedder: buildHashEmbedder(8),
   });
 
-  const supervisor = fakeSupervisor([
-    { slug, name: slug, state: "running", pid: 1, restarts: 0, lastError: null },
-  ]);
+  const supervisor = fakeSupervisor([makeVaultStatus({ slug })]);
 
   const app = buildHttpApp({ supervisor, indexer, config: cfg, logger: silent() });
 

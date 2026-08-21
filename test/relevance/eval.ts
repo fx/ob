@@ -20,6 +20,7 @@ import { buildHashEmbedder } from "../../src/embeddings/fake.ts";
 import type { Embedder } from "../../src/embeddings/index.ts";
 import { startIndexer } from "../../src/indexer/index.ts";
 import { type Logger, createLogger } from "../../src/log.ts";
+import { TEST_WATCHDOG_OFF } from "../helpers/vaultStatus.ts";
 
 export interface EvalQuery {
   readonly query: string;
@@ -151,6 +152,7 @@ function makeConfig(dataDir: string): Config {
     embeddingModel: "x",
     logLevel: "error",
     syncConfigEnv: {},
+    syncWatchdog: TEST_WATCHDOG_OFF,
   };
 }
 

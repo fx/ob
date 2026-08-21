@@ -47,6 +47,20 @@ export interface SyncConfigEnv {
   readonly configs?: string;
 }
 
+/**
+ * Resolved sync-watchdog knobs (`OB_SYNC_STALL_TIMEOUT_SECONDS`,
+ * `OB_SYNC_STALL_POLL_SECONDS`, `OB_SYNC_LOG_TAIL`), in milliseconds.
+ *
+ * `stallTimeoutMs === 0` means stall detection is off; log resolution and
+ * tailing continue. `stallTimeoutMs === 0 && logTail === false` is the only
+ * combination that switches the watchdog off entirely.
+ */
+export interface SyncWatchdogConfig {
+  readonly stallTimeoutMs: number;
+  readonly pollIntervalMs: number;
+  readonly logTail: boolean;
+}
+
 export interface Config {
   /**
    * Value of `OBSIDIAN_AUTH_TOKEN`. OPTIONAL at the env layer because the
@@ -71,6 +85,8 @@ export interface Config {
    * skips `ob sync-config` entirely when every field is `undefined`.
    */
   readonly syncConfigEnv: SyncConfigEnv;
+  /** Resolved sync-log watchdog knobs (validated). */
+  readonly syncWatchdog: SyncWatchdogConfig;
 }
 
 /**
@@ -289,6 +305,78 @@ export function loadSyncConfigEnv(env: Record<string, string | undefined>): Sync
   };
 }
 
+/**
+ * Upper bound (in seconds) on both watchdog durations — 24 hours.
+ *
+ * An unbounded value converts to a millisecond duration far outside any
+ * useful range against a 30-second upstream heartbeat, and a watchdog that
+ * reports a threshold it can never reach is the exact silent failure this
+ * feature exists to remove. Rejecting outright beats clamping.
+ */
+const MAX_SYNC_WATCHDOG_SECONDS = 86_400;
+const DEFAULT_STALL_TIMEOUT_SECONDS = 300;
+const DEFAULT_STALL_POLL_SECONDS = 30;
+
+function parseWatchdogSeconds(varName: string, raw: string): number {
+  if (!/^\d+$/.test(raw)) {
+    throw new ConfigError(
+      `${varName} must be a non-negative integer number of seconds, got "${raw}"`,
+    );
+  }
+  const n = Number.parseInt(raw, 10);
+  if (n > MAX_SYNC_WATCHDOG_SECONDS) {
+    throw new ConfigError(
+      `${varName} must be at most ${MAX_SYNC_WATCHDOG_SECONDS} (24 hours), got ${n}`,
+    );
+  }
+  return n;
+}
+
+/**
+ * Resolve and validate the sync-watchdog env vars into millisecond durations.
+ *
+ * Pure over its `env` argument, like every other loader here, so the whole
+ * accept/reject matrix is unit-testable without touching `process.env`.
+ * Throws `ConfigError` (exit 78) naming the offending variable and value.
+ */
+export function loadSyncWatchdogConfig(
+  env: Record<string, string | undefined>,
+): SyncWatchdogConfig {
+  const timeoutRaw = env.OB_SYNC_STALL_TIMEOUT_SECONDS;
+  const timeoutSeconds =
+    timeoutRaw !== undefined
+      ? parseWatchdogSeconds("OB_SYNC_STALL_TIMEOUT_SECONDS", timeoutRaw)
+      : DEFAULT_STALL_TIMEOUT_SECONDS;
+
+  const pollRaw = env.OB_SYNC_STALL_POLL_SECONDS;
+  const pollSeconds =
+    pollRaw !== undefined
+      ? parseWatchdogSeconds("OB_SYNC_STALL_POLL_SECONDS", pollRaw)
+      : DEFAULT_STALL_POLL_SECONDS;
+
+  if (pollSeconds < 1) {
+    throw new ConfigError(`OB_SYNC_STALL_POLL_SECONDS must be at least 1, got ${pollSeconds}`);
+  }
+  // With stall detection disabled the poll interval only paces the tail, so
+  // it is deliberately left unconstrained against the (zero) threshold.
+  if (timeoutSeconds > 0 && pollSeconds > timeoutSeconds) {
+    throw new ConfigError(
+      `OB_SYNC_STALL_POLL_SECONDS (${pollSeconds}) must be less than or equal to OB_SYNC_STALL_TIMEOUT_SECONDS (${timeoutSeconds})`,
+    );
+  }
+
+  const tailRaw = env.OB_SYNC_LOG_TAIL;
+  if (tailRaw !== undefined && tailRaw !== "true" && tailRaw !== "false") {
+    throw new ConfigError(`OB_SYNC_LOG_TAIL must be exactly "true" or "false", got "${tailRaw}"`);
+  }
+
+  return {
+    stallTimeoutMs: timeoutSeconds * 1_000,
+    pollIntervalMs: pollSeconds * 1_000,
+    logTail: tailRaw !== "false",
+  };
+}
+
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const tokenRaw = env.OBSIDIAN_AUTH_TOKEN;
   // OBSIDIAN_AUTH_TOKEN is OPTIONAL at the env layer. A pre-existing
@@ -335,6 +423,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   const logLevel: LogLevel = env.LOG_LEVEL !== undefined ? parseLevel(env.LOG_LEVEL) : "info";
 
   const syncConfigEnv = loadSyncConfigEnv(env);
+  const syncWatchdog = loadSyncWatchdogConfig(env);
 
   const cfg: Config = {
     // Trimmed token, or `undefined` when unset/whitespace-only —
@@ -350,6 +439,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     ...(openaiBaseUrl !== undefined ? { openaiBaseUrl } : {}),
     logLevel,
     syncConfigEnv,
+    syncWatchdog,
   };
   return cfg;
 }

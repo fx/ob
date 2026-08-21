@@ -214,6 +214,14 @@ describe("VaultSummary, VaultsListResponse, VaultSyncStatus, VaultIndexerStatus"
     pid: 1,
     restarts: 0,
     lastError: null,
+    lastSyncActivityAt: 1_700_000_000_000,
+    watchdog: {
+      state: "tailing",
+      logPath: "/cfg/obsidian-headless/sync/abc/sync.log",
+      thresholdMs: 300_000,
+      pollIntervalMs: 30_000,
+      stallKills: 0,
+    },
   };
   const indexer = {
     slug: "v",
@@ -229,6 +237,26 @@ describe("VaultSummary, VaultsListResponse, VaultSyncStatus, VaultIndexerStatus"
   });
   test("VaultIndexerStatus parses", () => {
     expect(() => VaultIndexerStatus.parse(indexer)).not.toThrow();
+  });
+  test("VaultSyncStatus accepts a null lastSyncActivityAt and a disabled watchdog", () => {
+    expect(() =>
+      VaultSyncStatus.parse({
+        ...sync,
+        lastSyncActivityAt: null,
+        watchdog: {
+          state: "disabled",
+          logPath: null,
+          thresholdMs: 0,
+          pollIntervalMs: 30_000,
+          stallKills: 0,
+        },
+      }),
+    ).not.toThrow();
+  });
+  test("VaultSyncStatus rejects an unknown watchdog state", () => {
+    expect(() =>
+      VaultSyncStatus.parse({ ...sync, watchdog: { ...sync.watchdog, state: "stalled" } }),
+    ).toThrow();
   });
   test("VaultSummary + list", () => {
     const summary = { slug: "v", name: "v", sync, indexer };

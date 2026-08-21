@@ -6,10 +6,10 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Config } from "../../src/config/index.ts";
+import type { Config, SyncWatchdogConfig } from "../../src/config/index.ts";
 import { createLogger } from "../../src/log.ts";
 import {
   AuthMissingError,
@@ -18,6 +18,8 @@ import {
   startSupervisor,
 } from "../../src/obsidian/index.ts";
 import { createFakeSpawner } from "../helpers/fakeSpawner.ts";
+import { createFakeWatchdogFs, createPollDriver } from "../helpers/fakeWatchdogFs.ts";
+import { TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
 
 const silentLog = createLogger({ level: "error", write: () => undefined });
 
@@ -37,6 +39,7 @@ function buildConfig(over: Partial<Config> = {}): Config {
     embeddingModel: "Xenova/all-MiniLM-L6-v2",
     logLevel: "error",
     syncConfigEnv: {},
+    syncWatchdog: TEST_WATCHDOG_OFF,
     ...over,
   };
 }
@@ -737,22 +740,315 @@ describe("startSupervisor — sync-config wiring", () => {
   });
 });
 
+describe("startSupervisor — sync-log watchdog wiring", () => {
+  const WATCHDOG_ON: SyncWatchdogConfig = {
+    stallTimeoutMs: 300_000,
+    pollIntervalMs: 30_000,
+    logTail: true,
+  };
+
+  /** A supervisor whose vault is already set up, with its `ob sync` child pinned open. */
+  async function startWithWatchdog(
+    over: Parameters<typeof startSupervisor>[1],
+    cfgOver: Partial<Config> = {},
+  ): Promise<{ sup: Awaited<ReturnType<typeof startSupervisor>>; release: () => void }> {
+    const cfg = buildConfig({ syncWatchdog: WATCHDOG_ON, ...cfgOver });
+    const sp = createFakeSpawner();
+    sp.enqueue({ exitCode: 0 }); // sync-status: already configured
+    let resolveSync!: (n: number) => void;
+    sp.enqueue({
+      exitWhen: new Promise<number>((r) => {
+        resolveSync = r;
+      }),
+    });
+    const sup = await startSupervisor(cfg, { spawner: sp, ...over });
+    return { sup, release: () => resolveSync(0) };
+  }
+
+  test("derives the sync directory from XDG_CONFIG_HOME even when auth bootstrap is skipped", async () => {
+    // The defect this closes: resolving the base inside the bootstrap branch
+    // gave every skip-bootstrap caller a different sync directory than
+    // production would use.
+    const xdg = makeTmp("ob-xdg-");
+    const driver = createPollDriver();
+    const seen: string[] = [];
+    const fs = createFakeWatchdogFs();
+    Object.assign(fs, {
+      readDir: async (p: string): Promise<readonly string[]> => {
+        seen.push(p);
+        return [];
+      },
+    });
+
+    const { sup, release } = await startWithWatchdog({
+      logger: silentLog,
+      sleep: driver.sleep,
+      xdgConfigHome: xdg,
+      homeDir: makeTmp("ob-home-"),
+      skipAuthBootstrap: true,
+      watchdogFs: fs,
+    });
+    await waitFor(() => seen.length > 0, "watchdog readDir");
+    expect(seen[0]).toBe(join(xdg, "obsidian-headless", "sync"));
+    release();
+    await sup.stop();
+  });
+
+  test("falls back to <HOME>/.config when XDG_CONFIG_HOME is unset", async () => {
+    const home = makeTmp("ob-home-");
+    const driver = createPollDriver();
+    const seen: string[] = [];
+    const fs = createFakeWatchdogFs();
+    Object.assign(fs, {
+      readDir: async (p: string): Promise<readonly string[]> => {
+        seen.push(p);
+        return [];
+      },
+    });
+
+    const { sup, release } = await startWithWatchdog({
+      logger: silentLog,
+      sleep: driver.sleep,
+      homeDir: home,
+      skipAuthBootstrap: true,
+      watchdogFs: fs,
+    });
+    await waitFor(() => seen.length > 0, "watchdog readDir");
+    expect(seen[0]).toBe(join(home, ".config", "obsidian-headless", "sync"));
+    release();
+    await sup.stop();
+  });
+
+  test("the credential bootstrap is handed the same resolved base as the watchdog", async () => {
+    // With an empty HOME the canonical expression resolves to the container
+    // default. Passing the raw inputs through would fail the credential path
+    // with AuthMissingError while the watchdog searched /home/ob/.config —
+    // exactly the disagreement this hoist exists to make impossible.
+    const driver = createPollDriver();
+    const seen: string[] = [];
+    const fs = createFakeWatchdogFs();
+    Object.assign(fs, {
+      readDir: async (p: string): Promise<readonly string[]> => {
+        seen.push(p);
+        return [];
+      },
+    });
+    const written: string[] = [];
+
+    const { sup, release } = await startWithWatchdog({
+      logger: silentLog,
+      sleep: driver.sleep,
+      homeDir: "",
+      watchdogFs: fs,
+      authFs: {
+        mkdir: async () => undefined,
+        readFile: async () => {
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        },
+        writeFile: async (path: string) => {
+          written.push(path);
+        },
+        chmod: async () => undefined,
+      },
+    });
+    expect(written).toEqual(["/home/ob/.config/obsidian-headless/auth_token"]);
+    await waitFor(() => seen.length > 0, "watchdog readDir");
+    expect(seen[0]).toBe("/home/ob/.config/obsidian-headless/sync");
+    release();
+    await sup.stop();
+  });
+
+  test("falls back to the container default when neither XDG_CONFIG_HOME nor HOME resolves", async () => {
+    const driver = createPollDriver();
+    const seen: string[] = [];
+    const fs = createFakeWatchdogFs();
+    Object.assign(fs, {
+      readDir: async (p: string): Promise<readonly string[]> => {
+        seen.push(p);
+        return [];
+      },
+    });
+
+    const { sup, release } = await startWithWatchdog({
+      logger: silentLog,
+      sleep: driver.sleep,
+      homeDir: "",
+      skipAuthBootstrap: true,
+      watchdogFs: fs,
+    });
+    await waitFor(() => seen.length > 0, "watchdog readDir");
+    expect(seen[0]).toBe("/home/ob/.config/obsidian-headless/sync");
+    release();
+    await sup.stop();
+  });
+
+  test("resolves and tails a real sync log through the default filesystem surface", async () => {
+    // No `watchdogFs` override: this is the production wiring end to end.
+    const xdg = makeTmp("ob-xdg-");
+    const driver = createPollDriver();
+    const cfgDataDir = makeTmp("ob-data-");
+    const vaultPath = join(cfgDataDir, "vaults", "v");
+    const syncEntry = join(xdg, "obsidian-headless", "sync", "abc");
+    mkdirSync(syncEntry, { recursive: true });
+    writeFileSync(join(syncEntry, "config.json"), JSON.stringify({ vaultPath }));
+    writeFileSync(join(syncEntry, "sync.log"), "backlog\n");
+
+    const tailed: string[] = [];
+    const logger = createLogger({
+      level: "trace",
+      write: (raw) => {
+        const obj = JSON.parse(raw) as { msg: string; stream?: string; line?: string };
+        if (obj.msg === "ob output" && obj.stream === "sync.log") tailed.push(String(obj.line));
+      },
+    });
+
+    const { sup, release } = await startWithWatchdog(
+      {
+        logger,
+        sleep: driver.sleep,
+        xdgConfigHome: xdg,
+        homeDir: makeTmp("ob-home-"),
+        skipAuthBootstrap: true,
+      },
+      { dataDir: cfgDataDir },
+    );
+
+    await waitFor(() => sup.get("v")?.watchdog.state === "tailing", "watchdog resolved");
+    const resolved = sup.get("v");
+    expect(resolved?.watchdog.logPath).toBe(join(syncEntry, "sync.log"));
+    expect(resolved?.watchdog.thresholdMs).toBe(300_000);
+    expect(resolved?.lastSyncActivityAt).not.toBeNull();
+
+    writeFileSync(join(syncEntry, "sync.log"), "backlog\nFully synced\n");
+    await driver.nextPoll();
+    expect(tailed).toEqual(["Fully synced"]);
+
+    release();
+    await sup.stop();
+  });
+
+  test("a fully-disabled watchdog reports disabled on every vault and never polls", async () => {
+    const xdg = makeTmp("ob-xdg-");
+    const fs = createFakeWatchdogFs();
+    const seen: string[] = [];
+    Object.assign(fs, {
+      readDir: async (p: string): Promise<readonly string[]> => {
+        seen.push(p);
+        return [];
+      },
+    });
+
+    const { sup, release } = await startWithWatchdog(
+      {
+        logger: silentLog,
+        sleep: noSleep,
+        xdgConfigHome: xdg,
+        homeDir: makeTmp("ob-home-"),
+        skipAuthBootstrap: true,
+        watchdogFs: fs,
+      },
+      { syncWatchdog: TEST_WATCHDOG_OFF },
+    );
+    await waitFor(() => sup.get("v")?.state === "running", "child running");
+    const snap = sup.get("v");
+    expect(snap?.watchdog.state).toBe("disabled");
+    expect(snap?.watchdog.logPath).toBeNull();
+    expect(snap?.lastSyncActivityAt).toBeNull();
+    expect(seen).toEqual([]);
+    release();
+    await sup.stop();
+  });
+
+  test("the per-poll tail cap can be overridden through supervisor deps", async () => {
+    const xdg = makeTmp("ob-xdg-");
+    const driver = createPollDriver();
+    const cfgDataDir = makeTmp("ob-data-");
+    const vaultPath = join(cfgDataDir, "vaults", "v");
+    const syncEntry = join(xdg, "obsidian-headless", "sync", "abc");
+    mkdirSync(syncEntry, { recursive: true });
+    writeFileSync(join(syncEntry, "config.json"), JSON.stringify({ vaultPath }));
+    writeFileSync(join(syncEntry, "sync.log"), "");
+
+    const warns: string[] = [];
+    const tailed: string[] = [];
+    const logger = createLogger({
+      level: "trace",
+      write: (raw) => {
+        const obj = JSON.parse(raw) as {
+          level: string;
+          msg: string;
+          stream?: string;
+          line?: string;
+        };
+        if (obj.msg === "ob output" && obj.stream === "sync.log") tailed.push(String(obj.line));
+        if (obj.level === "warn") warns.push(obj.msg);
+      },
+    });
+
+    const { sup, release } = await startWithWatchdog(
+      {
+        logger,
+        sleep: driver.sleep,
+        xdgConfigHome: xdg,
+        homeDir: makeTmp("ob-home-"),
+        skipAuthBootstrap: true,
+        watchdogMaxTailBytes: 16,
+      },
+      { dataDir: cfgDataDir },
+    );
+    await waitFor(() => sup.get("v")?.watchdog.state === "tailing", "watchdog resolved");
+    writeFileSync(join(syncEntry, "sync.log"), `${"a".repeat(64)}\nkept\n`);
+    await driver.nextPoll();
+    expect(tailed).toEqual(["kept"]);
+    expect(warns).toContain("sync log append exceeded the per-poll cap; skipped ahead");
+    release();
+    await sup.stop();
+  });
+});
+
+describe("startSupervisor — list() is the configured vault set", () => {
+  test("reports every configured vault, in configuration order, before any spawn", async () => {
+    // `/readyz` derives BOTH of its arrays from `supervisor.list()` rather
+    // than re-reading `cfg.vaults`, so the rest-api contract's "exactly one
+    // entry per configured vault, in configuration order" rests on this
+    // guarantee. Pin it where it lives.
+    const cfg = buildConfig({
+      vaults: [
+        { name: "Gamma", slug: "gamma" },
+        { name: "Alpha", slug: "alpha" },
+        { name: "Beta", slug: "beta" },
+      ],
+    });
+    const sp = createFakeSpawner();
+    const sup = await startSupervisor(cfg, {
+      logger: silentLog,
+      spawner: sp,
+      sleep: noSleep,
+      skipAuthBootstrap: true,
+      mkdir: async () => {
+        throw new Error("EACCES: keep every vault out of the spawn path");
+      },
+    });
+    expect(sup.list().map((v) => v.slug)).toEqual(["gamma", "alpha", "beta"]);
+    await waitFor(() => sup.get("beta")?.state === "failed", "all vaults settled");
+    // Order is stable after the vaults have changed state, too.
+    expect(sup.list().map((v) => v.slug)).toEqual(["gamma", "alpha", "beta"]);
+    await sup.stop();
+  });
+});
+
 describe("isAllRunning helper", () => {
   test("empty list is NOT considered ready", () => {
     expect(isAllRunning([])).toBe(false);
   });
   test("all running -> true", () => {
-    expect(
-      isAllRunning([
-        { slug: "a", name: "a", state: "running", pid: 1, restarts: 0, lastError: null },
-      ]),
-    ).toBe(true);
+    expect(isAllRunning([makeVaultStatus({ slug: "a" })])).toBe(true);
   });
   test("any non-running -> false", () => {
     expect(
       isAllRunning([
-        { slug: "a", name: "a", state: "running", pid: 1, restarts: 0, lastError: null },
-        { slug: "b", name: "b", state: "starting", pid: null, restarts: 0, lastError: null },
+        makeVaultStatus({ slug: "a" }),
+        makeVaultStatus({ slug: "b", state: "starting", pid: null }),
       ]),
     ).toBe(false);
   });

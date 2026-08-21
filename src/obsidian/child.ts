@@ -15,8 +15,20 @@
  * timestamps.
  */
 
+import type { SyncWatchdogConfig } from "../config/index.ts";
 import type { Logger } from "../log.ts";
 import type { SpawnHandle, Spawner } from "./spawn.ts";
+import {
+  DISABLED_SYNC_WATCHDOG,
+  EMPTY_WATCHDOG_MEMORY,
+  type WatchdogFs,
+  type WatchdogHandle,
+  type WatchdogMemory,
+  type WatchdogStatus,
+  startWatchdog,
+  watchdogIsDisabled,
+  watchdogSnapshot,
+} from "./watchdog.ts";
 
 export type VaultState = "starting" | "running" | "failed";
 
@@ -27,6 +39,16 @@ export interface VaultStatus {
   readonly pid: number | null;
   readonly restarts: number;
   readonly lastError: string | null;
+  /**
+   * Epoch-ms mtime of the resolved sync log as of the most recent successful
+   * poll — the upstream's own timestamp, not the instant we observed it, so
+   * during a wedge it stays pinned at the moment the child stopped writing.
+   *
+   * This is last observed *log activity*, not last successful sync: a child
+   * churning through reconnects keeps it fresh while syncing nothing.
+   */
+  readonly lastSyncActivityAt: number | null;
+  readonly watchdog: WatchdogStatus;
 }
 
 export interface ChildVault {
@@ -62,6 +84,19 @@ export const DEFAULT_CRASH_LOOP: CrashLoop = {
   healthyResetMs: 5 * 60_000,
 };
 
+/**
+ * Everything the sync-log watchdog needs, minus the clock and the logger,
+ * which the child already owns. Omitting this block entirely means no
+ * watchdog is wired at all, which the status surface reports as `disabled`.
+ */
+export interface ChildWatchdogDeps {
+  readonly config: SyncWatchdogConfig;
+  readonly fs: WatchdogFs;
+  /** `<xdgConfigBase>/obsidian-headless/sync`. */
+  readonly syncDir: string;
+  readonly maxTailBytes?: number;
+}
+
 export interface ChildDeps {
   readonly spawner: Spawner;
   readonly logger: Logger;
@@ -70,6 +105,7 @@ export interface ChildDeps {
   readonly backoff?: ChildBackoff;
   readonly crashLoop?: CrashLoop;
   readonly obBin?: string;
+  readonly watchdog?: ChildWatchdogDeps;
 }
 
 interface MutableStatus {
@@ -149,6 +185,18 @@ export class VaultChild {
    */
   private readonly stopSignal: Promise<void>;
   private resolveStopSignal!: () => void;
+  /**
+   * Watchdog wiring, or `null` when no watchdog runs — either because none
+   * was injected or because configuration disables it entirely.
+   */
+  private readonly watchdogDeps: ChildWatchdogDeps | null;
+  private readonly watchdogConfig: SyncWatchdogConfig;
+  private watchdogHandle: WatchdogHandle | null = null;
+  /**
+   * Survives each child, so a vault killed for stalling still reports the
+   * mtime that proves it stalled while its replacement is starting up.
+   */
+  private watchdogMemory: WatchdogMemory = EMPTY_WATCHDOG_MEMORY;
 
   constructor(vault: ChildVault, deps: ChildDeps) {
     this.vault = vault;
@@ -159,12 +207,19 @@ export class VaultChild {
       restarts: 0,
       lastError: null,
     };
+    this.watchdogConfig = deps.watchdog?.config ?? DISABLED_SYNC_WATCHDOG;
+    this.watchdogDeps = watchdogIsDisabled(this.watchdogConfig) ? null : (deps.watchdog ?? null);
     this.stopSignal = new Promise<void>((resolve) => {
       this.resolveStopSignal = resolve;
     });
   }
 
   snapshot(): VaultStatus {
+    const handle = this.watchdogHandle;
+    const wd =
+      handle === null
+        ? watchdogSnapshot(this.watchdogConfig, this.watchdogMemory, false)
+        : handle.snapshot();
     return {
       slug: this.vault.slug,
       name: this.vault.name,
@@ -172,7 +227,43 @@ export class VaultChild {
       pid: this.status.pid,
       restarts: this.status.restarts,
       lastError: this.status.lastError,
+      lastSyncActivityAt: wd.lastSyncActivityAt,
+      watchdog: wd.watchdog,
     };
+  }
+
+  /** Start the per-child watchdog. No-op when none is wired. */
+  private beginWatchdog(): void {
+    const wd = this.watchdogDeps;
+    if (wd === null) return;
+    this.watchdogHandle = startWatchdog(
+      { slug: this.vault.slug, path: this.vault.path },
+      {
+        now: this.deps.now,
+        sleep: this.deps.sleep,
+        fs: wd.fs,
+        logger: this.deps.logger,
+        syncDir: wd.syncDir,
+        config: wd.config,
+        memory: this.watchdogMemory,
+        ...(wd.maxTailBytes !== undefined ? { maxTailBytes: wd.maxTailBytes } : {}),
+      },
+    );
+  }
+
+  /**
+   * Stop the per-child watchdog, retaining its memory. Idempotent, because
+   * `requestStop()` and the run loop's `finally` both call it.
+   */
+  private endWatchdog(): void {
+    const handle = this.watchdogHandle;
+    if (handle === null) return;
+    // Stop BEFORE reading the memory: `stop()` is what makes an in-flight
+    // poll bail at its next resume point, so doing it first means the value
+    // we keep cannot be overwritten by a poll belonging to a dead child.
+    handle.stop();
+    this.watchdogMemory = handle.memory();
+    this.watchdogHandle = null;
   }
 
   /**
@@ -227,9 +318,18 @@ export class VaultChild {
         const stdoutP = forwardLines(handle.stdout, "stdout", this.vault.slug, this.deps.logger);
         const stderrP = forwardLines(handle.stderr, "stderr", this.vault.slug, this.deps.logger);
 
-        attemptCode = await handle.exited;
-        // Wait for log streams to finish flushing before deciding what to do.
-        await Promise.allSettled([stdoutP, stderrP]);
+        // The watchdog polls only while a child is running — never during
+        // restart backoff, `sync-setup`, or `sync-config`.
+        this.beginWatchdog();
+        try {
+          attemptCode = await handle.exited;
+          // Wait for log streams to finish flushing before deciding what to do.
+          await Promise.allSettled([stdoutP, stderrP]);
+        } finally {
+          // Every path out of the attempt passes through here, so no poll
+          // leaks into the backoff and no timer outlives the child.
+          this.endWatchdog();
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         this.deps.logger.error("ob sync attempt threw", { vault: this.vault.slug, error: msg });
@@ -319,6 +419,10 @@ export class VaultChild {
     this.stopRequested = true;
     // Wake any in-flight backoff sleep so the run loop notices `stopRequested`.
     this.resolveStopSignal();
+    // Stop the watchdog here as well as in the run loop's `finally`: shutdown
+    // must not wait out a poll interval, and (from PR 3 on) a stall verdict
+    // must not land between the SIGTERM and the loop noticing.
+    this.endWatchdog();
     if (this.currentHandle !== null) {
       this.currentHandle.kill(signal);
     }
