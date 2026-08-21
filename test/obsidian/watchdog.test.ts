@@ -585,6 +585,27 @@ describe("watchdog — tail", () => {
     wd.stop();
   });
 
+  test("an over-cap span that lands on a line boundary discards nothing", async () => {
+    const fs = createFakeWatchdogFs();
+    const driver = createPollDriver();
+    const log = capture();
+    fs.addDir(SYNC_DIR, ["aaa"]);
+    seedVaultDir(fs, "aaa", { log: "" });
+
+    // 9 bytes of prefix + a 10-byte tail, capped at 10: the retained span
+    // starts at byte 9, immediately after the prefix's newline. Nothing was
+    // cut mid-line, so both complete lines must survive.
+    const wd = start(fs, driver, log, { maxTailBytes: 10 });
+    await driver.settle();
+    fs.append(logPathOf("aaa"), "junkjunk\nkept\nmore\n", 2_000);
+    await driver.nextPoll();
+    expect(log.tailed()).toEqual(["kept", "more"]);
+    const warns = log.of("sync log append exceeded the per-poll cap; skipped ahead");
+    expect(warns).toHaveLength(1);
+    expect(warns[0]?.fields.skippedBytes).toBe(9);
+    wd.stop();
+  });
+
   test("the per-poll cap defaults to 262144 bytes when not injected", async () => {
     const fs = createFakeWatchdogFs();
     const driver = createPollDriver();

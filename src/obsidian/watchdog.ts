@@ -376,10 +376,15 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
     if (available > maxTailBytes) {
       const skippedBytes = available - maxTailBytes;
       start += skippedBytes;
+      // Only a leading PARTIAL line is discarded. The capped span can land
+      // exactly on a line boundary, and dropping unconditionally would
+      // swallow a complete line that was never skipped — the same
+      // distinction the resolution anchor draws.
+      const midLine = await landedMidLine(path, start);
+      if (stopped) return;
       pending = "";
       decoder = new TextDecoder();
-      // The span now starts mid-line by construction.
-      discardStraddlingLine = true;
+      discardStraddlingLine = midLine;
       deps.logger.warn("sync log append exceeded the per-poll cap; skipped ahead", {
         vault: vault.slug,
         logPath: path,
