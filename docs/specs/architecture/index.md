@@ -53,7 +53,7 @@ All runtime configuration MUST come from environment variables. The container MU
 
 | Variable | Required | Description |
 |---|---|---|
-| `OBSIDIAN_AUTH_TOKEN` | yes | Token written verbatim to `${XDG_CONFIG_HOME:-/home/ob/.config}/obsidian-headless/auth_token` at startup if the file is missing. |
+| `OBSIDIAN_AUTH_TOKEN` | yes | Token written verbatim to `${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}/obsidian-headless/auth_token` at startup if the file is missing. |
 | `VAULTS_JSON` | yes | JSON array of vault objects: `[{"name":"v","slug":"v","e2eePassword":"..."}]`. `slug` MUST default to `name` lower-cased and kebab-cased. `e2eePassword` is OPTIONAL. |
 | `DATA_DIR` | no | Root directory for vaults, LanceDB store, and model cache. Default `/data`. |
 | `HTTP_PORT` | no | HTTP listener port. Default `3000`. |
@@ -63,9 +63,10 @@ All runtime configuration MUST come from environment variables. The container MU
 | `OPENAI_API_KEY` | when provider=openai | API key. |
 | `OPENAI_BASE_URL` | no | Override OpenAI base URL (for compatible endpoints). |
 | `LOG_LEVEL` | no | `trace` `debug` `info` `warn` `error`. Default `info`. |
+| `OB_SYNC_*` | no | The sync-behavior family, owned by the [Obsidian Sync](../obsidian-sync/) spec: `ob sync-config` flags (see [Sync configuration bootstrap](../obsidian-sync/index.md#sync-configuration-bootstrap)) and the sync-log watchdog knobs `OB_SYNC_STALL_TIMEOUT_SECONDS` / `OB_SYNC_STALL_POLL_SECONDS` / `OB_SYNC_LOG_TAIL` (see [Sync stall watchdog](../obsidian-sync/index.md#sync-stall-watchdog)). Every member is optional and every member is validated at startup, before any `ob` child is spawned; an invalid value exits 78. |
 
 - Missing `VAULTS_JSON` MUST cause the process to exit non-zero before opening any port.
-- Missing `OBSIDIAN_AUTH_TOKEN` MUST cause the process to exit non-zero **only when** no `auth_token` file is present at `${XDG_CONFIG_HOME:-$HOME/.config}/obsidian-headless/auth_token`. A pre-existing token file (e.g. mounted volume) is an acceptable substitute, per [Obsidian Sync › Auth-token bootstrap](../obsidian-sync/index.md#credential-bootstrap).
+- Missing `OBSIDIAN_AUTH_TOKEN` MUST cause the process to exit non-zero **only when** no `auth_token` file is present at `${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}/obsidian-headless/auth_token`. A pre-existing token file (e.g. mounted volume) is an acceptable substitute, per [Obsidian Sync › Auth-token bootstrap](../obsidian-sync/index.md#credential-bootstrap).
 - Invalid `VAULTS_JSON` (not a non-empty array of `{name: string}` objects) MUST cause the process to exit non-zero with an actionable message naming the offending field.
 
 #### Scenario: Auth token bootstrap
@@ -86,7 +87,13 @@ All runtime configuration MUST come from environment variables. The container MU
 - `/data/vaults/<slug>/` — synced vault working tree owned by `ob sync`.
 - `/data/lancedb/` — LanceDB store directory. One table per vault, named by slug.
 - `/data/models/` — Transformers.js model cache (when provider is `transformers`).
-- `/home/ob/.config/obsidian-headless/auth_token` — credential file (XDG default).
+- `/home/ob/.config/obsidian-headless/auth_token` — credential file. This is the concrete in-container resolution of the XDG base defined below, with neither `XDG_CONFIG_HOME` nor `HOME` set; it is deliberately not written as the expression, per the exemption stated there.
+
+The XDG config base is `${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}`. `XDG_CONFIG_HOME` wins when set to a non-empty value; otherwise `HOME` is used with `/.config` appended; `/home/ob` is the last resort when neither is set.
+
+A normative statement that names the base **as a path expression** — one that must hold across environments — MUST use exactly that expression. All three layers are load-bearing there and none may be dropped for brevity. The two abbreviations to reject, quoted here deliberately as counter-examples and not as usage: `${XDG_CONFIG_HOME:-/home/ob/.config}` loses the `HOME` layer, and `${XDG_CONFIG_HOME:-$HOME/.config}` loses the container default. Anything sweeping this corpus for non-canonical forms will match those two strings on this line; they are the definition of what is wrong, not an instance of it.
+
+A **concrete resolved path is correct, and MUST NOT be rewritten into the expression**, wherever the surrounding context fixes `HOME` and `XDG_CONFIG_HOME` — the in-container directory listing above, a scenario whose GIVEN pins the container environment, a quoted production log path, and a verbatim error string operators grep for. Canonicalizing those would make them wrong: an error message must match the text the code actually emits, and a directory listing describes one filesystem rather than every possible one. Everything the supervisor keeps under that base — the credential file and the per-vault `obsidian-headless/sync/` tree the [stall watchdog](../obsidian-sync/index.md#sync-activity-log) reads — MUST resolve it identically. Two components disagreeing about the base is not a cosmetic difference: the watchdog would search a tree the credential bootstrap never wrote to, never resolve a log, and sit dormant on exactly the machines where `HOME` is set and differs from `/home/ob`.
 
 The container MUST run as a non-root user (uid `1000`, name `ob`) that owns `/data` and `/home/ob`.
 
@@ -163,8 +170,18 @@ REST and MCP MUST be two interfaces to the same functionality, not two implement
 - Structured JSON logs MUST be emitted to stdout. Each log line MUST include `level`, `msg`, `vault` (when applicable), and a monotonic `ts`.
 - The HTTP server MUST expose:
   - `GET /healthz` — liveness, returns 200 once the process is up.
-  - `GET /readyz` — readiness, returns 200 only when every configured vault has completed `sync-setup` and its initial index pass.
+  - `GET /readyz` — readiness **and** the aggregate process-health surface. Returns 503 whenever any critical component is not healthy, and its body reports the state of every critical long-lived component. The exact 200/503 conditions and the body shape are owned by [REST API › Health endpoints](../rest-api/index.md#health-endpoints).
   - `GET /metrics` — text/plain Prometheus exposition (basic counters: indexed docs, search queries, sync errors).
+- `/healthz` MUST remain a dependency-free liveness probe: its status code MUST NOT depend on vault sync state, indexer state, or any other subsystem, and it MUST NOT read any state that can block. Sync health MUST NOT be attached to it. The container is a single process hosting the API and every vault child, so a liveness failure restarts all of them; using one wedged vault to trigger that would take down the API and every healthy vault to recover one child. In-process supervision (restarting the individual `ob` child) is the correct blast radius, and `/readyz` is the correct place to *report* the condition.
+- `/readyz` MUST be the single aggregate status surface: every critical long-lived in-process component MUST be represented in its body. Today that is the per-vault `ob sync` children and the per-vault indexers. Introducing another long-lived component MUST extend the body rather than add a fourth health route — a status surface that does not enumerate everything long-lived is worse than none, because it reads as an all-clear.
+
+#### Scenario: A wedged vault does not restart the pod
+
+- **GIVEN** two configured vaults, one of whose `ob sync` children has stopped making progress
+- **WHEN** the orchestrator polls `GET /healthz`
+- **THEN** the response is 200 — the process is alive and serving
+- **AND** `GET /readyz` reports 503 with the affected vault's state, `lastError`, and `lastSyncActivityAt` in the body
+- **AND** the healthy vault's child and the HTTP listener are untouched
 
 ## Design
 
@@ -243,3 +260,4 @@ process.on("SIGINT", shutdown);
 | 2026-05-03 | Landed: CI workflow (`.github/workflows/ci.yml`) runs `bun run lint` / `bunx tsc --noEmit` / `bun run test:cov` on every PR and push to `main`, with a `continue-on-error` Codecov upload. The `CI / ci` check is the intended merge gate; branch-protection wiring is held until the path-skipped-PR shim described in [0009 — CI test suite](../../changes/0009-ci-test-suite.md#ciyml--merge-gate) lands, so until then the gate is enforced by reviewer discipline rather than a required-status rule. No new spec rules; this is the enforcement mechanism for the existing Testing & Lint section. | [0009 — CI test suite](../../changes/0009-ci-test-suite.md) |
 | 2026-05-03 | Landed: release automation (`.github/workflows/release-please.yml`) cuts `vX.Y.Z` tags + a `CHANGELOG.md` from squash-merged Conventional Commits, and image publishing (`.github/workflows/docker.yml`) builds on every `v*` tag plus PR / push-to-`main` events that touch non-doc paths (the workflow `paths-ignore`s `docs/**` / `**.md` / `.gitignore`), publishing to `ghcr.io/fx/ob` under six tags across two schemes: channel tags `:main` + `:sha-<short>` on main pushes; semver tags `:X.Y.Z` + `:X.Y` + `:X` + `:latest` on `v*` tags. The push path is gated on a smoke test of the locally-built image (`bun test test/docker.test.ts`); PRs build but don't push. Adds `ARG GIT_SHA=dev` + OCI labels to the Dockerfile and `release-please-config.json` / `.release-please-manifest.json` at repo root; `package.json` version is now release-please-managed (`0.1.0` floor). Provisioning a `RELEASE_PLEASE_TOKEN` PAT/App secret is recommended so that release-please-created tags trigger downstream `docker.yml` (the default `GITHUB_TOKEN` does not chain workflow events). | [0010 — Release and image publishing](../../changes/0010-release-and-image-publishing.md) |
 | 2026-08-09 | Policy change: the runtime stage's apt packages (`tini`, `curl`, `ca-certificates`) are now installed unpinned, and hadolint's DL3008 is silenced by an inline directive on that one instruction. The exact `=<version>` pins were breaking unrelated builds every time Debian dropped a superseded version on a point release; apt-level reproducibility is deliberately traded for build resilience. The toolchain ARGs (`NODE_VERSION`, `BUN_VERSION`, `OBSIDIAN_HEADLESS_VERSION`) and the base image stay pinned and remain the basis for image reproducibility. Supersedes the "`tini` pinned" detail recorded in [0006 — Production image](../../changes/0006-production-image.md), which stands as the historical record of the original decision. | — |
+| 2026-08-21 | Observability: `/healthz` is pinned as a dependency-free liveness probe that MUST NOT reflect sync or indexer state, and `/readyz` is designated the single aggregate status surface that MUST enumerate every critical long-lived component. Rationale recorded: the container is one process hosting the API and every vault child, so failing liveness on a wedged vault would restart the API and the healthy vaults to recover one child. Config table gains a row for the `OB_SYNC_*` family (owned by the Obsidian Sync spec), covering both the existing `sync-config` vars and the new watchdog knobs. | [Change 0015](../../changes/0015-sync-stall-watchdog.md) |

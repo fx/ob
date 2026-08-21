@@ -22,8 +22,44 @@ The REST API exposes vault-scoped CRUD over arbitrary files (Markdown, images, P
 
 ### Health endpoints
 
-- `GET /healthz` MUST return `200 {"ok":true}` once the process has bound the port.
-- `GET /readyz` MUST return `200` only when every configured vault has reached indexer state `ready`. Otherwise `503` with a body listing per-vault state.
+`GET /healthz` is the liveness probe and `GET /readyz` is both the readiness probe and the aggregate status surface for every critical long-lived component. The split, and the prohibition on wiring subsystem health into liveness, are owned by [Architecture › Observability](../architecture/index.md#observability).
+
+- `GET /healthz` MUST return `200 {"ok":true}` once the process has bound the port. Its status code and body MUST NOT vary with vault, supervisor, or indexer state, and it MUST NOT read state that can block.
+- `GET /readyz` MUST return the following body on both the 200 and the 503 path:
+
+  ```jsonc
+  {
+    "ok": boolean,             // true iff the response status is 200
+    "vaults": VaultStatus[],   // exactly one per configured vault, in configuration order
+    "indexers": IndexerStatus[] // exactly one per configured vault, synthesized as
+                                // state "starting" when the indexer has not registered it
+  }
+  ```
+
+- `VaultStatus` is the supervisor's public shape, owned by [Obsidian Sync › Public surface](../obsidian-sync/index.md#public-surface-to-the-rest-of-the-app) — including `lastSyncActivityAt` and the `watchdog` sub-object. `IndexerStatus` is owned by [Vault Indexer](../vault-indexer/). Neither is restated here.
+- `GET /readyz` MUST return `200` only when **all** of the following hold; otherwise it MUST return `503`:
+  - at least one vault is configured;
+  - every configured vault's supervisor state is `running`;
+  - every configured vault has an entry in `indexers` whose state is `ready`.
+- `vaults` and `indexers` MUST each carry exactly one entry per configured vault, both in configuration order. The two arrays are therefore positionally correlatable — index `i` of each describes the same vault — and clients MAY rely on that. Stating it is not optional: consumers will correlate positionally whether or not the contract blesses it, so leaving `indexers` unordered would make a property people depend on an accident of implementation. Each entry also carries its own `slug`, so a client MAY match on that instead. A configured vault the indexer service has not registered yet MUST appear as a synthesized entry in state `starting`, never be omitted — an omitted component is one that cannot hold the response at 503 when it is unhealthy, which is the failure mode this contract exists to prevent. This mirrors the synthesis `GET /v1/vaults` already performs for the same startup race.
+- `ok` MUST equal `status === 200`. It exists so an alerting rule can key on one boolean instead of re-deriving the aggregate from the arrays.
+- The body MUST be identical in shape on 200 and 503 — the 503 path MUST NOT truncate, omit, or reorder the arrays. An operator diagnosing a 503 needs the per-component detail in the same place they found it when things were healthy.
+- Every critical long-lived component MUST appear in the body. A component that is not represented MUST NOT be able to keep `/readyz` at 200 while it is unhealthy.
+- `watchdog.state` MUST NOT affect the status code. A vault whose stall watchdog is `resolving` (never armed) or `disabled` is not thereby unready: readiness means the child is running and the index is built, and an unarmed watchdog is a loss of protection rather than a loss of service. Failing readiness on it would let one upstream layout change take every vault out of service at once. The condition is carried in the body — that is what an operator alerts on. See [Obsidian Sync › Sync activity log](../obsidian-sync/index.md#sync-activity-log).
+
+#### Scenario: Stalled vault reported through readiness
+
+- **GIVEN** vault `v` whose `ob sync` child has been killed by the stall watchdog and is awaiting restart
+- **WHEN** the client calls `GET /readyz`
+- **THEN** the response is `503` with `ok: false`
+- **AND** the entry for `v` in `vaults` carries `state` `starting`, a `lastError` naming the stall, and a `lastSyncActivityAt` pinned to the last upstream sync-log write
+- **AND** `GET /healthz` still returns `200 {"ok":true}`
+
+#### Scenario: Everything healthy
+
+- **GIVEN** every configured vault is `running` and every indexer is `ready`
+- **WHEN** the client calls `GET /readyz`
+- **THEN** the response is `200` with `ok: true` and both arrays fully populated
 
 ### Vault listing & status
 
@@ -330,3 +366,4 @@ function safeJoin(root: string, rel: string): string {
 | 2026-05-03 | Search request body gains `mode`, `threshold`, `mmrLambda`, `maxPerPath` knobs. Default `mode` is `"hybrid"` — retrieval behavior changes from pre-0008 (was vector-only); the response *shape* is unchanged. | [Change 0008](../../changes/0008-search-relevance.md) |
 | 2026-05-25 | Added Folder CRUD section: `GET /v1/vaults/:slug/folders` (list) plus `PUT` and `DELETE` on `/v1/vaults/:slug/folders/*path` (create / delete). Required because `GET /v1/vaults/:slug/files` only emits files, hiding empty folders. New error code `folder_not_empty` (409) added to the closed set. | [Change 0012](../../changes/0012-folder-operations.md) |
 | 2026-07-01 | JSON read variant (`Accept: application/json`) now accepts `.pdf` and returns extracted text with `pdf: { pages, hasTextLayer }` metadata; other non-Markdown files still get `406`. New error code `extraction_failed` (422) added to the closed set. Plain GET byte semantics unchanged. | [Change 0013](../../changes/0013-pdf-text-extraction.md) |
+| 2026-08-21 | Health endpoints section rewritten: `/healthz` is pinned as a dependency-free liveness probe, and `/readyz` gains an explicit body contract (`{ ok, vaults, indexers }`, identical in shape on 200 and 503) plus the exact three-part 200 rule. The `vaults` entries inherit the supervisor's new `lastSyncActivityAt` and `watchdog` fields, which also surface unchanged through `GET /v1/vaults` and `GET /v1/vaults/:slug`. One status-code change: `indexers` must now carry an entry for every configured vault, synthesized as `starting` when the indexer has not registered it, so a vault missing from that array can no longer leave `/readyz` at 200 — it returns 503 until the indexer registers and reaches `ready`. No route additions and no change to `/healthz`. | [Change 0015](../../changes/0015-sync-stall-watchdog.md) |
