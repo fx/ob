@@ -111,6 +111,8 @@ In `VaultChild.runLoop()`, immediately after a successful spawn:
 
 ```ts
 // pseudo-code
+this.stallReason = null;                     // per attempt: a verdict must never
+                                             // outlive the attempt that produced it
 const wd = startWatchdog(this.vault, this.deps.watchdog, (reason) => {
   this.stallReason = reason;                 // consumed after `exited` settles
   this.markUnhealthy(reason);                // state -> starting, lastError set,
@@ -129,7 +131,7 @@ try {
 
 The `finally` is what guarantees the "no poll during backoff, no leaked timer after stop" requirement: every path out of the attempt — clean exit, crash, stall kill, `requestStop()` — passes through it. `requestStop()` additionally calls `wd.stop()` directly so a stall verdict cannot land between the SIGTERM and the loop noticing.
 
-After `exited` settles, `stallReason !== null` is what distinguishes a stall from an ordinary crash. It selects the `lastError` text, suppresses the healthy-uptime reset, and pushes onto the stall window in addition to `crashTimes`.
+After `exited` settles, `stallReason !== null` is what distinguishes a stall from an ordinary crash — never the exit code, since a child with a `SIGTERM` handler can exit 0 and would otherwise read as a clean exit. It selects the `lastError` text, suppresses the healthy-uptime reset, and pushes onto the stall window in addition to `crashTimes`. It is cleared at the top of each attempt (above) and again once consumed, so a later ordinary crash cannot inherit a stale verdict and be miscounted toward the stall ceiling.
 
 The poll loop uses the injected `sleep` raced against a per-lifetime stop signal, mirroring the existing `Promise.race([sleep, stopSignal])` in `runLoop`'s backoff. It is not a `setInterval`: an interval would keep the event loop alive past shutdown and would be invisible to the fake clock the crash-loop tests already use.
 
