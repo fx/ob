@@ -72,7 +72,7 @@ What implementing them requires of this change:
 
 ### Operator-facing documentation
 
-- `README.md`'s configuration table MUST gain the three new env vars, and its operations section MUST document how to recognize a stall from `/readyz` (`lastSyncActivityAt` far in the past, `watchdog.stallKills` climbing, `lastError` naming the stall).
+- `README.md`'s configuration table MUST gain the three new env vars, and its operations section MUST document how to recognize a stall from `/readyz` (`lastSyncActivityAt` far in the past, `watchdog.stallKills` climbing, `lastError` naming the stall), and MUST state that a *fresh* `lastSyncActivityAt` proves only that the child is writing — a vault stuck in a reconnect loop keeps it current while syncing nothing.
 - `.env.example` MUST gain a commented block for the three vars.
 - The README MUST state that the Kubernetes liveness probe MUST stay pointed at `/healthz` and that `/readyz` is the alerting surface, so an operator reading only the README does not "improve" the deployment by pointing liveness at `/readyz`.
 
@@ -140,7 +140,7 @@ The poll loop uses the injected `sleep` raced against a per-lifetime stop signal
   - **Alternatives considered:** **`now - mtime >= threshold`** — spuriously kills on any pre-existing idle log, including the very first poll after a pod restart. **No anchor, only refresh on change** — a child that hangs before writing anything is never evaluated at all, which is exactly the "hung on first connect" case in the evidence.
 
 - **Decision:** Report `lastSyncActivityAt` as the log's mtime, while deciding staleness from the internal observation instant.
-  - **Why:** These answer different questions and conflating them loses the useful one. The mtime is what an operator wants on a dashboard — "sync last did something at 07:25 on Aug 16" — and it survives a pod restart, so a pod that comes up into an already-stale log still shows the true last-sync time. The observation instant is an implementation detail with no meaning outside the process.
+  - **Why:** These answer different questions and conflating them loses the useful one. The mtime is what an operator wants on a dashboard — "the child last wrote something at 07:25 on Aug 16" — and it survives a pod restart, so a pod that comes up into an already-stale log still shows when writing actually stopped. It is last observed log activity, not last successful sync: a reconnect loop keeps it fresh while syncing nothing, and telling those apart would need log-content parsing, which is a non-goal below. The observation instant is an implementation detail with no meaning outside the process.
   - **Alternatives considered:** Reporting the observation instant — always "a few seconds ago" even mid-wedge, i.e. actively misleading. Reporting both — a second field whose only consumer would be a test.
 
 - **Decision:** A separate stall window with its own ceiling, in addition to counting stall kills toward `crashTimes`. The window and ceiling values are the spec's.
