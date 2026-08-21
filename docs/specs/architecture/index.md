@@ -53,7 +53,7 @@ All runtime configuration MUST come from environment variables. The container MU
 
 | Variable | Required | Description |
 |---|---|---|
-| `OBSIDIAN_AUTH_TOKEN` | yes | Token written verbatim to `${XDG_CONFIG_HOME:-/home/ob/.config}/obsidian-headless/auth_token` at startup if the file is missing. |
+| `OBSIDIAN_AUTH_TOKEN` | yes | Token written verbatim to `${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}/obsidian-headless/auth_token` at startup if the file is missing. |
 | `VAULTS_JSON` | yes | JSON array of vault objects: `[{"name":"v","slug":"v","e2eePassword":"..."}]`. `slug` MUST default to `name` lower-cased and kebab-cased. `e2eePassword` is OPTIONAL. |
 | `DATA_DIR` | no | Root directory for vaults, LanceDB store, and model cache. Default `/data`. |
 | `HTTP_PORT` | no | HTTP listener port. Default `3000`. |
@@ -66,7 +66,7 @@ All runtime configuration MUST come from environment variables. The container MU
 | `OB_SYNC_*` | no | The sync-behavior family, owned by the [Obsidian Sync](../obsidian-sync/) spec: `ob sync-config` flags (see [Sync configuration bootstrap](../obsidian-sync/index.md#sync-configuration-bootstrap)) and the sync-log watchdog knobs `OB_SYNC_STALL_TIMEOUT_SECONDS` / `OB_SYNC_STALL_POLL_SECONDS` / `OB_SYNC_LOG_TAIL` (see [Sync stall watchdog](../obsidian-sync/index.md#sync-stall-watchdog)). Every member is optional and every member is validated at startup, before any `ob` child is spawned; an invalid value exits 78. |
 
 - Missing `VAULTS_JSON` MUST cause the process to exit non-zero before opening any port.
-- Missing `OBSIDIAN_AUTH_TOKEN` MUST cause the process to exit non-zero **only when** no `auth_token` file is present at `${XDG_CONFIG_HOME:-$HOME/.config}/obsidian-headless/auth_token`. A pre-existing token file (e.g. mounted volume) is an acceptable substitute, per [Obsidian Sync › Auth-token bootstrap](../obsidian-sync/index.md#credential-bootstrap).
+- Missing `OBSIDIAN_AUTH_TOKEN` MUST cause the process to exit non-zero **only when** no `auth_token` file is present at `${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}/obsidian-headless/auth_token`. A pre-existing token file (e.g. mounted volume) is an acceptable substitute, per [Obsidian Sync › Auth-token bootstrap](../obsidian-sync/index.md#credential-bootstrap).
 - Invalid `VAULTS_JSON` (not a non-empty array of `{name: string}` objects) MUST cause the process to exit non-zero with an actionable message naming the offending field.
 
 #### Scenario: Auth token bootstrap
@@ -88,6 +88,8 @@ All runtime configuration MUST come from environment variables. The container MU
 - `/data/lancedb/` — LanceDB store directory. One table per vault, named by slug.
 - `/data/models/` — Transformers.js model cache (when provider is `transformers`).
 - `/home/ob/.config/obsidian-headless/auth_token` — credential file (XDG default).
+
+The XDG config base is `${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}`, and every document MUST use exactly that expression when it names the base. `XDG_CONFIG_HOME` wins when set to a non-empty value; otherwise `HOME` is used with `/.config` appended; `/home/ob` is the last resort when neither is set. All three layers are load-bearing and none may be dropped for brevity: writing `${XDG_CONFIG_HOME:-/home/ob/.config}` loses the `HOME` layer, and writing `${XDG_CONFIG_HOME:-$HOME/.config}` loses the container default. Everything the supervisor keeps under that base — the credential file and the per-vault `obsidian-headless/sync/` tree the [stall watchdog](../obsidian-sync/index.md#sync-activity-log) reads — MUST resolve it identically. Two components disagreeing about the base is not a cosmetic difference: the watchdog would search a tree the credential bootstrap never wrote to, never resolve a log, and sit dormant on exactly the machines where `HOME` is set and differs from `/home/ob`.
 
 The container MUST run as a non-root user (uid `1000`, name `ob`) that owns `/data` and `/home/ob`.
 

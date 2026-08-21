@@ -61,7 +61,7 @@ What implementing them requires of this change:
 - The watchdog is a new module, `src/obsidian/watchdog.ts`; `src/obsidian/child.ts` owns only the integration (start on spawn, stop on exit and on `requestStop`, consume the stall verdict).
 - `VaultStatus` gains two fields. Every producer and consumer MUST be updated in the same PR that adds them: `VaultChild.snapshot()`, `src/vault/status.ts` (`VaultSummary.sync` passes the object through untouched), the `/readyz` body, `GET /v1/vaults`, `GET /v1/vaults/:slug`, and the MCP `list_vaults` / `vault_status` tools, which serialize the same object.
 - The three new env vars MUST be validated in `src/config/index.ts` in the existing style — a pure function over `Record<string, string | undefined>` throwing `ConfigError` (exit 78) — and MUST reach the supervisor as a resolved `Config` field, never by reading `process.env` inside `src/obsidian/`.
-- The XDG config base (`${XDG_CONFIG_HOME:-$HOME/.config}`) is currently resolved inside `startSupervisor`'s `skipAuthBootstrap !== true` branch. It MUST be hoisted so the watchdog resolves the same base regardless of that flag; otherwise every test that skips auth bootstrap silently gets a different sync directory than production.
+- The XDG config base (`${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}`) is currently resolved inside `startSupervisor`'s `skipAuthBootstrap !== true` branch. It MUST be hoisted so the watchdog resolves the same base regardless of that flag; otherwise every test that skips auth bootstrap silently gets a different sync directory than production.
 - `/readyz` gains an `ok` field, and one **deliberate tightening**: today `src/http/index.ts` treats an absent indexer dependency as vacuously ready (`idx === undefined ? true`) and passes `idx.list()` straight through, so a configured vault the indexer has not registered yet is simply missing from `indexers` and cannot hold the response at 503. The spec now requires one entry per configured vault, synthesized as `starting` when unregistered — the same synthesis `src/vault/status.ts` already does for `GET /v1/vaults`. `test/http.test.ts`'s "returns 200 when every vault is running" case wires a supervisor with no indexer and MUST be updated in the same PR; it currently passes only because of the hole being closed. No status code rules change beyond that, no new routes, and no change to `/healthz`.
 
 #### Scenario: Status fields reach every surface
@@ -89,7 +89,7 @@ export interface WatchdogDeps {
   readonly sleep: (ms: number) => Promise<void>;
   readonly fs: WatchdogFs;          // readDir, readJson, stat, readRange
   readonly logger: Logger;
-  readonly syncDir: string;          // ${XDG_CONFIG_HOME:-$HOME/.config}/obsidian-headless/sync
+  readonly syncDir: string;          // ${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}/obsidian-headless/sync
   readonly config: SyncWatchdogConfig;
 }
 
@@ -214,6 +214,7 @@ The poll loop uses the injected `sleep` raced against a per-lifetime stop signal
   - [ ] Tests in `test/obsidian/child.test.ts` (or a sibling) covering every spec scenario: wedged child killed and restarted, SIGTERM ignored then SIGKILL, progressing sync never killed, third stall in an hour fails the vault, stall kill does not reset crash counters, no verdict after `requestStop()`, and watchdog fully disabled
   - [ ] Test that a stalled vault is reported through `/readyz` with 503 while `/healthz` still returns 200
   - [ ] `README.md`: the three env vars in the configuration table, a short "recognizing a stalled vault" operations note, and the explicit "keep liveness on `/healthz`" statement
+  - [ ] `README.md`: correct the two XDG base expressions (lines 27 and 39) to the canonical `${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}`. Both currently read `${XDG_CONFIG_HOME:-/home/ob/.config}`, dropping the `HOME` layer — the same defect the spec sweep fixed, left to this PR because the README is already this PR's deliverable and touching it in the docs PR would widen that commit
   - [ ] `.env.example`: commented block for the three vars
   - [ ] Flip this change document to `**Status:** complete` and sync `docs/index.yml` and `docs/index.md`
 
