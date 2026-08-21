@@ -819,6 +819,45 @@ describe("startSupervisor — sync-log watchdog wiring", () => {
     await sup.stop();
   });
 
+  test("the credential bootstrap is handed the same resolved base as the watchdog", async () => {
+    // With an empty HOME the canonical expression resolves to the container
+    // default. Passing the raw inputs through would fail the credential path
+    // with AuthMissingError while the watchdog searched /home/ob/.config —
+    // exactly the disagreement this hoist exists to make impossible.
+    const driver = createPollDriver();
+    const seen: string[] = [];
+    const fs = createFakeWatchdogFs();
+    Object.assign(fs, {
+      readDir: async (p: string): Promise<readonly string[]> => {
+        seen.push(p);
+        return [];
+      },
+    });
+    const written: string[] = [];
+
+    const { sup, release } = await startWithWatchdog({
+      logger: silentLog,
+      sleep: driver.sleep,
+      homeDir: "",
+      watchdogFs: fs,
+      authFs: {
+        mkdir: async () => undefined,
+        readFile: async () => {
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        },
+        writeFile: async (path: string) => {
+          written.push(path);
+        },
+        chmod: async () => undefined,
+      },
+    });
+    expect(written).toEqual(["/home/ob/.config/obsidian-headless/auth_token"]);
+    await waitFor(() => seen.length > 0, "watchdog readDir");
+    expect(seen[0]).toBe("/home/ob/.config/obsidian-headless/sync");
+    release();
+    await sup.stop();
+  });
+
   test("falls back to the container default when neither XDG_CONFIG_HOME nor HOME resolves", async () => {
     const driver = createPollDriver();
     const seen: string[] = [];

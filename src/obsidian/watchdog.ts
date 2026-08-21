@@ -244,6 +244,7 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
       const bytes = await deps.fs.readRange(path, size - 1, size);
       return bytes[0] !== 0x0a;
     } catch (e) {
+      if (stopped) return true;
       // Cannot tell — assume mid-line. Dropping one line beats emitting a
       // fragment of one, which is the outcome the spec rules out outright.
       deps.logger.warn("sync log boundary probe failed; discarding first line", {
@@ -297,6 +298,7 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
       candidates.push({ dir, mtimeMs: st.mtimeMs });
     }
 
+    if (stopped) return null;
     if (candidates.length === 0) return null;
     if (candidates.length > 1) {
       deps.logger.warn("multiple sync directories match this vault", {
@@ -390,6 +392,7 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
     try {
       bytes = await deps.fs.readRange(path, start, st.size);
     } catch (e) {
+      if (stopped) return;
       deps.logger.warn("sync log read failed", {
         vault: vault.slug,
         logPath: path,
@@ -437,6 +440,7 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
     try {
       st = await deps.fs.stat(path);
     } catch (e) {
+      if (stopped) return;
       // A vanished or replaced log means we can no longer tell whether the
       // child is healthy. Return to `resolving` and re-anchor next time —
       // never treat it as activity, never treat it as silence.

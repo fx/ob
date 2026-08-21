@@ -858,6 +858,36 @@ describe("watchdog — lifecycle", () => {
     expect(log.tailed()).toEqual([]);
   });
 
+  test("stop() during a failing stat neither warns nor unresolves", async () => {
+    // The rejection paths need the same guard as the success paths: a child
+    // that has exited must produce no watchdog output at all.
+    const fs = createFakeWatchdogFs();
+    const driver = createPollDriver();
+    const log = capture();
+    fs.addDir(SYNC_DIR, ["aaa"]);
+    seedVaultDir(fs, "aaa", { log: "" });
+
+    const wd = start(fs, driver, log);
+    await driver.settle();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    Object.assign(fs, {
+      stat: async (): Promise<never> => {
+        await gate;
+        throw errno("ENOENT", logPathOf("aaa"));
+      },
+    });
+    driver.release();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    wd.stop();
+    release();
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    expect(log.of("resolved sync log became unreadable; returning to resolving")).toHaveLength(0);
+    expect(wd.snapshot().watchdog.state).toBe("tailing");
+  });
+
   test("a rejecting sleep stands the watchdog down instead of escaping as an unhandled rejection", async () => {
     const fs = createFakeWatchdogFs();
     const log = capture();

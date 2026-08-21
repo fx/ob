@@ -108,15 +108,22 @@ export async function startSupervisor(cfg: Config, deps: SupervisorDeps): Promis
   // inside that branch would give every test that skips auth bootstrap a
   // different sync directory than production.
   const homeDir = deps.homeDir ?? process.env.HOME ?? "/home/ob";
-  const xdgInput = {
-    ...(deps.xdgConfigHome !== undefined ? { xdgConfigHome: deps.xdgConfigHome } : {}),
-    homeDir,
-  };
-  const configBase = resolveXdgConfigBase(xdgInput) ?? DEFAULT_CONFIG_BASE;
+  const configBase =
+    resolveXdgConfigBase({
+      ...(deps.xdgConfigHome !== undefined ? { xdgConfigHome: deps.xdgConfigHome } : {}),
+      homeDir,
+      // A whitespace-only HOME resolves to nothing, and the canonical
+      // expression's last resort is the container default rather than an
+      // error — see Architecture › Directory Layout.
+    }) ?? DEFAULT_CONFIG_BASE;
   const syncDir = join(configBase, "obsidian-headless", "sync");
 
   if (deps.skipAuthBootstrap !== true) {
-    const authInput = { authToken: cfg.obsidianAuthToken, ...xdgInput };
+    // The bootstrap is handed the ALREADY-RESOLVED base, not the raw inputs.
+    // Feeding both consumers one value is the whole point of the hoist: with
+    // the raw inputs, an empty `HOME` would fail the credential path while
+    // the watchdog quietly searched the container default.
+    const authInput = { authToken: cfg.obsidianAuthToken, xdgConfigHome: configBase };
     const fsArg = deps.authFs;
     const result =
       fsArg !== undefined

@@ -28,7 +28,7 @@ export interface FakeWatchdogFs extends WatchdogFs {
   addDir(path: string, names: readonly string[]): void;
   /** Write a file, replacing any existing content but keeping its inode. */
   write(path: string, text: string, mtimeMs?: number): void;
-  /** Append to a file, advancing its mtime. */
+  /** Append to a file. Advances its mtime — to `mtimeMs` when given, else by 1. */
   append(path: string, text: string, mtimeMs?: number): void;
   /** Replace a file with a brand-new inode (rotation). */
   replaceFile(path: string, text: string, opts?: { mtimeMs?: number; inode?: string }): void;
@@ -85,7 +85,10 @@ export function createFakeWatchdogFs(): FakeWatchdogFs {
     append(path, text, mtimeMs): void {
       const f = mustGet(path);
       f.text += text;
-      if (mtimeMs !== undefined) f.mtimeMs = mtimeMs;
+      // A real append always moves mtime. Defaulting to "unchanged" would
+      // make an `append()` without an explicit timestamp read as silence,
+      // which is precisely the condition the watchdog is built to detect.
+      f.mtimeMs = mtimeMs ?? f.mtimeMs + 1;
     },
     replaceFile(path, text, opts = {}): void {
       files.set(path, {
