@@ -113,6 +113,10 @@ In `VaultChild.runLoop()`, immediately after a successful spawn:
 // pseudo-code
 const wd = startWatchdog(this.vault, this.deps.watchdog, (reason) => {
   this.stallReason = reason;                 // consumed after `exited` settles
+  this.markUnhealthy(reason);                // state -> starting, lastError set,
+                                             // BEFORE the signal: a child that
+                                             // ignores SIGTERM must not hold
+                                             // /readyz at 200 for the grace window
   handle.kill("SIGTERM");
   void this.escalate(handle);                // SIGKILL after the grace period
 });
@@ -139,7 +143,7 @@ The poll loop uses the injected `sleep` raced against a per-lifetime stop signal
   - **Why:** These answer different questions and conflating them loses the useful one. The mtime is what an operator wants on a dashboard — "sync last did something at 07:25 on Aug 16" — and it survives a pod restart, so a pod that comes up into an already-stale log still shows the true last-sync time. The observation instant is an implementation detail with no meaning outside the process.
   - **Alternatives considered:** Reporting the observation instant — always "a few seconds ago" even mid-wedge, i.e. actively misleading. Reporting both — a second field whose only consumer would be a test.
 
-- **Decision:** A separate stall window (3 kills in 60 minutes) in addition to counting stall kills toward `crashTimes`.
+- **Decision:** A separate stall window with its own ceiling, in addition to counting stall kills toward `crashTimes`. The window and ceiling values are the spec's.
   - **Why:** Counting toward `crashTimes` alone cannot work, and it fails silently. A stall kill can occur at most once per threshold, so with the 300-second default the crash-loop ceiling's ten crashes would have to land inside a 5-minute window — impossible. Worse, `DEFAULT_CRASH_LOOP.healthyResetMs` is also 5 minutes, so a child that stays wedged-but-alive for 300 seconds clears the healthy-uptime bar and *resets* the counter on its way out. Without a second window, wedge → kill → wedge → kill repeats forever and nothing ever escalates, which is precisely the "unnoticed" failure this change exists to eliminate. Keeping the `crashTimes` push as well means a vault that mixes real crashes with stalls still trips the original ceiling.
   - **Alternatives considered:** **Retune `DEFAULT_CRASH_LOOP`** — changes the escalation behavior of ordinary crashes, which is not broken. **Exempt stall kills from the healthy-uptime reset and nothing else** — necessary but not sufficient; the window is still too short for ten stall kills to ever land in it.
 
@@ -194,7 +198,7 @@ The poll loop uses the injected `sleep` raced against a per-lifetime stop signal
 - [ ] **PR 2 — Observability: sync-log resolution, tail, and status surface** (no killing)
   - [ ] `src/config/index.ts`: add `loadSyncWatchdogConfig(env)` returning `{ stallTimeoutMs, pollIntervalMs, logTail }`, plumbed onto `Config` as `syncWatchdog`; validate per the spec (integer form, poll ≥ 1, poll ≤ timeout when timeout > 0, `OB_SYNC_LOG_TAIL` exactly `true`/`false`), throwing `ConfigError` (exit 78) naming the offending var and value
   - [ ] Tests under `test/config/` for every accept and reject case, including the poll-exceeds-timeout pair and the timeout-`0`-so-poll-unconstrained case
-  - [ ] `src/obsidian/watchdog.ts`: `WatchdogFs` surface, vault-id resolution by `config.json` `vaultPath` match (normalized absolute compare, no prefix match, newest-mtime tiebreak with a `warn`), fail-soft on every filesystem error, incremental tail with start-at-current-size, inode/size rotation reset, per-poll byte cap with a skip `warn`, partial-line buffering, and the `snapshot()` / `stop()` handle
+  - [ ] `src/obsidian/watchdog.ts`: `WatchdogFs` surface, vault-id resolution by `config.json` `vaultPath` match (normalized absolute compare, no prefix match, newest-mtime tiebreak with a `warn`), fail-soft on every filesystem error per the spec's dispositions, incremental tail with start-at-current-size, inode/size rotation reset, per-poll byte cap with a skip `warn`, partial-line buffering, and the `snapshot()` / `stop()` handle
   - [ ] `src/obsidian/child.ts`: start the watchdog after a successful spawn, `wd.stop()` in a `finally` around `await handle.exited`, and again from `requestStop()`; extend `snapshot()` with `lastSyncActivityAt` and `watchdog`
   - [ ] `src/obsidian/index.ts`: hoist the XDG base resolution out of the `skipAuthBootstrap` branch and pass `syncDir` plus `cfg.syncWatchdog` into every `VaultChild`
   - [ ] Propagate the two new `VaultStatus` fields through `src/vault/status.ts` and both adapters; update `test/parity/` fixtures so REST and MCP still agree
@@ -204,7 +208,7 @@ The poll loop uses the injected `sleep` raced against a per-lifetime stop signal
 
 - [ ] **PR 3 — Stall detection, kill escalation, and accounting**
   - [ ] `src/obsidian/watchdog.ts`: anchor-on-resolution, activity-on-mtime-change, staleness evaluation against the injected clock, one-verdict-per-child guard, and the `onStall` callback carrying the `lastError` text (threshold plus last observed mtime)
-  - [ ] `src/obsidian/child.ts`: SIGTERM on verdict, SIGKILL after the grace period, `stallReason` consumed after `exited` settles to select `lastError`, suppress the healthy-uptime reset, push to both `crashTimes` and the new stall window, flip to `failed` on either ceiling, and increment `watchdog.stallKills`
+  - [ ] `src/obsidian/child.ts`: flip the vault out of `running` and set `lastError` on the verdict itself (before the signal), SIGTERM, SIGKILL after the grace period, `stallReason` consumed after `exited` settles to select `lastError`, suppress the healthy-uptime reset, push to both `crashTimes` and the new stall window, flip to `failed` on either ceiling, and increment `watchdog.stallKills`
   - [ ] Tests in `test/obsidian/child.test.ts` (or a sibling) covering every spec scenario: wedged child killed and restarted, SIGTERM ignored then SIGKILL, progressing sync never killed, third stall in an hour fails the vault, stall kill does not reset crash counters, no verdict after `requestStop()`, and watchdog fully disabled
   - [ ] Test that a stalled vault is reported through `/readyz` with 503 while `/healthz` still returns 200
   - [ ] `README.md`: the three env vars in the configuration table, a short "recognizing a stalled vault" operations note, and the explicit "keep liveness on `/healthz`" statement

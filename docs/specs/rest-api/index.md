@@ -31,7 +31,7 @@ The REST API exposes vault-scoped CRUD over arbitrary files (Markdown, images, P
   {
     "ok": boolean,             // true iff the response status is 200
     "vaults": VaultStatus[],   // one per configured vault, in configuration order
-    "indexers": IndexerStatus[] // one per configured vault
+    "indexers": IndexerStatus[] // one per vault known to the indexer service
   }
   ```
 
