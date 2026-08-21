@@ -156,12 +156,15 @@ The upstream `ob sync --continuous` child writes its progress to its own per-vau
 - `<vaultId>` is assigned by the upstream CLI and is not known to the supervisor up front. It MUST be resolved by reading each immediate subdirectory of `${XDG_CONFIG_HOME:-$HOME/.config}/obsidian-headless/sync/` and selecting the one whose `config.json` carries a `vaultPath` that resolves to the same absolute path as the vault's working directory `<DATA_DIR>/vaults/<slug>`. The comparison MUST be between normalized absolute paths; a prefix match MUST NOT be accepted (`/data/vaults/v` MUST NOT match a `vaultPath` of `/data/vaults/vault2`).
 - Resolution MUST be attempted only after the vault's `ob sync --continuous` child has been spawned — the `sync/` directory does not exist until the CLI has performed its first sync setup — and MUST be retried on every subsequent poll until it succeeds or the child exits.
 - Resolution MUST fail soft. If the `sync/` directory is absent, contains no matching entry, or has entries whose `config.json` cannot be read or parsed, the supervisor MUST NOT mark the vault `failed`, MUST NOT kill or restart the child, and MUST NOT propagate the error out of the poll. The condition MUST be observable as `watchdog.state === "resolving"` with `watchdog.logPath === null` on the vault's [public status](#public-surface-to-the-rest-of-the-app).
+- A vault whose watchdog never resolves is **unprotected, not unhealthy**. Its `watchdog.state` MUST NOT influence the `/readyz` status code — an unarmed watchdog is a loss of the safety net, never a loss of service, and failing readiness on it would turn an upstream layout change into a self-inflicted outage across every vault at once. The condition is reported in the `/readyz` body and is what an operator alerts on; see [REST API › Health endpoints](../rest-api/index.md#health-endpoints).
+- Once the child has been running longer than the stall threshold with the log still unresolved, the supervisor MUST log at `warn` naming the vault and the directory it searched, and MUST NOT repeat that warning more than once per child lifetime. Silence here would be indistinguishable from a working watchdog, which is the exact condition that let the original outage run for four and a half days.
 - If more than one entry matches the vault path, the supervisor MUST select the entry whose `config.json` has the most recent mtime, breaking an exact mtime tie by taking the lexicographically greatest directory name, and MUST log one `warn` naming every candidate. A stale directory left behind by a re-link is the expected cause, and staying dormant in that case would silently forfeit stall detection for that vault. The tiebreak is required rather than left to directory-read order: two `config.json` files written in the same filesystem timestamp tick would otherwise resolve differently between polls, so a vault could silently swap which log it watches.
 - Resolution MUST be treated as successful only once `sync.log` inside the selected directory can itself be stat'd. A selected directory whose `sync.log` does not yet exist MUST leave the watchdog in `resolving`, because there is nothing yet whose silence could mean anything.
 - A resolved path MUST be cached for the remainder of that child's lifetime and MUST be re-resolved when a replacement child is spawned.
 - If a stat of an already-resolved log fails — the file was deleted, or the directory was replaced — the supervisor MUST NOT treat the failure as activity and MUST NOT treat it as a stall. It MUST return the watchdog to `resolving`, discard the read offset and any buffered partial line, and re-anchor staleness on the next successful stat. A vanished log means the watchdog can no longer tell whether the child is healthy, and killing on that ignorance would be a guess.
 - When log tailing is enabled, every poll MUST forward each newly appended complete line to the parent logger at `info` with the same field shape as the stdio forwarding: `{ vault: <slug>, source: "ob", stream: "sync.log", line: <text> }` under the message `ob output`. Empty lines MUST NOT be emitted.
 - The tail MUST start from the file's size at the moment of resolution. Content written before that point MUST NOT be emitted — a production log holds tens of thousands of lines, and re-emitting the backlog on every restart would bury the live signal.
+- The first read after resolution MUST discard everything up to and including the first newline it encounters, and MUST emit nothing until that newline has arrived. Resolution can land mid-line: if the file ends with an unterminated `Connect` and the next append is `ing...\n`, both emitting `ing...` and reconstructing `Connecting...` are wrong — the first splits a line, the second replays bytes the no-backlog rule excludes. Dropping the one straddling line costs nothing and is the only option that satisfies both rules.
 - The tail MUST detect truncation or replacement — an observed size smaller than the current read offset, or a change in the file's inode identity — and MUST respond by resetting the read offset to the start of the file and discarding any buffered partial line.
 - The tail MUST cap the number of bytes it reads per poll (default 262144). When an append exceeds the cap, the supervisor MUST skip forward so that only the most recent capped span is read, MUST discard the leading partial line of that span, and MUST emit one `warn` naming the number of bytes skipped.
 - An incomplete trailing line MUST be buffered and emitted only once its terminating newline arrives, so that a half-written line is never split across two log entries.
@@ -181,6 +184,22 @@ The upstream `ob sync --continuous` child writes its progress to its own per-vau
 - **THEN** the vault state remains `running`
 - **AND** the vault's status reports `watchdog.state === "resolving"`, `watchdog.logPath === null`, and `lastSyncActivityAt === null`
 - **AND** no child is killed no matter how many polls elapse
+
+#### Scenario: Watchdog never arms
+
+- **GIVEN** vault `v` whose child is running and whose sync log is permanently unresolvable
+- **WHEN** the child has been running for longer than the stall threshold
+- **THEN** exactly one `warn` is logged for that child naming the vault and the searched directory
+- **AND** the vault reports `state: "running"`, `watchdog.state === "resolving"`, `watchdog.logPath === null`, `lastSyncActivityAt === null`
+- **AND** `/readyz` still returns 200 provided every vault is `running` and every indexer is `ready`
+- **AND** no child is ever killed for that vault
+
+#### Scenario: Resolution lands mid-line
+
+- **GIVEN** the resolved `sync.log` ends with the unterminated fragment `Connect` at the moment of resolution
+- **WHEN** the upstream appends `ing...\n` and then `Fully synced\n`
+- **THEN** the only line emitted is `Fully synced`
+- **AND** neither `ing...` nor `Connecting...` is emitted
 
 #### Scenario: Backlog is not replayed
 
@@ -203,14 +222,16 @@ An `ob sync --continuous` child can stop making progress while remaining alive a
 - While a vault's child is running, the supervisor MUST poll the resolved sync log's mtime every `pollIntervalMs` (default 30000).
 - **Activity** is an observed mtime that differs from the previously recorded mtime. A difference in either direction counts, so that a rotated-in replacement file is never mistaken for silence.
 - On the first successful stat after resolution, the supervisor MUST anchor staleness to the current wall clock rather than to the file's mtime, and MUST treat the anchor as the last instant at which activity was observed. The file's own mtime MAY be arbitrarily old — that is precisely the state a wedged child leaves behind — so measuring staleness against it would kill a freshly resolved healthy child immediately.
+- Time elapsed between the child being spawned and the log being resolved MUST NOT count toward staleness. The clock starts at the anchor, not at spawn, so a vault whose sync directory takes minutes to appear gets a full threshold of grace once it does. Concretely, the watchdog cannot kill a child earlier than one full threshold after the anchor, whatever happened before it.
+- The interval between the anchor and the first observed mtime change is therefore the only window in which a never-yet-active child can be killed, and it MUST be treated exactly like any other silence: a child that hangs before its first successful connect writes nothing, so its anchor never refreshes and it is killed one threshold later. A first sync that is merely slow keeps writing progress lines, so its mtime keeps advancing and it is never killed however long the sync itself takes. Slowness is not the signal; total silence is.
 - **Stall** is `now - lastActivityObservedAt >= stallTimeoutMs` (default 300000, ten times the upstream's 30-second progress cadence). Because the anchor is taken when the log resolves and refreshed only by activity, a child that hangs before its first successful connect is detected one threshold after resolution, while a slow-but-progressing first sync is never killed as long as it keeps writing to the log.
 - On detecting a stall the supervisor MUST log at `error` with `{ vault, logPath, lastSyncActivityAt, stalledForMs, thresholdMs }`, then MUST send `SIGTERM` to the child, and MUST send `SIGKILL` if the child has not exited within the stall-kill grace period (default 10000 ms).
 - The stall verdict itself MUST take the vault out of `running` immediately — before the `SIGTERM` is sent, not when the child finally exits — and MUST set `lastError` at the same moment. A child that ignores `SIGTERM` stays alive for the whole grace period, and a vault the supervisor has already declared unhealthy MUST NOT be able to hold `/readyz` at 200 for that window. The vault moves to `starting`, matching the state a vault takes on any other loss of its child; the transition to `failed` happens only if a ceiling is reached.
 - The supervisor MUST issue at most one stall kill per child lifetime. Once a stall kill is in flight the watchdog MUST NOT issue a second one for the same child.
-- After the kill, the existing restart machinery MUST take over unchanged: `restarts` increments, the capped exponential backoff applies, and a replacement child is spawned.
+- After the kill, the existing restart machinery MUST take over unchanged: `restarts` increments, the capped exponential backoff applies, and a replacement child is spawned — unless that kill takes the vault to either ceiling below, in which case the vault becomes `failed` and no replacement is spawned.
 - `lastError` MUST name the stall explicitly and MUST carry both the threshold and the last observed sync-log mtime, so that a stalled vault is distinguishable from a crashed one without reading logs — for example `sync stalled: no sync.log activity for 300000ms (last activity 2026-08-16T07:25:09.289Z)`.
 - A child terminated by the watchdog MUST NOT count as healthy uptime, however long it stayed alive. It MUST NOT reset the crash-window history or the consecutive-failure counter that drives the restart backoff.
-- Every stall kill MUST be recorded both in the crash window that drives the [crash-loop ceiling](#sync-supervision) and in a separate stall window (default: 3 stall kills within 3600000 ms). Reaching **either** ceiling MUST transition the vault to `failed` with `lastError` naming the reason, after which restarts stop and `/readyz` reports 503 with the vault listed. The separate window is required because a stall kill can only occur once per threshold: with the default 300-second threshold, ten kills cannot fall inside the crash-loop ceiling's 5-minute window, so the crash-loop ceiling alone can never fire on stalls.
+- Every stall kill MUST be recorded both in the crash window that drives the [crash-loop ceiling](#sync-supervision) and in a separate rolling stall window (default: 3 stall kills within 3600000 ms). The stall window MUST be rolling and MUST NOT be cleared by anything other than kills ageing out of it — in particular, an ordinary crash-and-recover between two stalls, and any amount of healthy uptime, MUST NOT reset it. Reaching **either** ceiling MUST transition the vault to `failed` with `lastError` naming the reason, after which restarts stop and `/readyz` reports 503 with the vault listed. The separate window is required because a stall kill can only occur once per threshold: with the default 300-second threshold, ten kills cannot fall inside the crash-loop ceiling's 5-minute window, so the crash-loop ceiling alone can never fire on stalls.
 - The watchdog MUST NOT poll while the vault has no running child. It MUST stop when the child exits — including when the child is killed by the watchdog itself — so that no poll runs during the restart backoff, during `sync-setup`, or during `sync-config`.
 - After `requestStop()` the watchdog MUST NOT issue a kill and MUST NOT perform any further poll, and the process MUST be able to exit without waiting for a pending poll interval to elapse.
 - The watchdog and the [sync activity log](#sync-activity-log) tail share one poll. Configuration MUST be read from the following environment variables:
@@ -244,6 +265,21 @@ An `ob sync --continuous` child can stop making progress while remaining alive a
 - **THEN** the child receives `SIGKILL`
 - **AND** throughout that 10-second window the vault reports `state: "starting"` with `lastError` naming the stall, so `/readyz` is already 503
 - **AND** the restart proceeds exactly as it would after any other non-zero exit
+
+#### Scenario: Slow first sync on a fresh vault is not killed
+
+- **GIVEN** a fresh vault whose sync directory appears only 10 minutes after the child is spawned
+- **AND** whose initial sync then runs for another hour, writing a progress line every 30 seconds
+- **WHEN** the whole sequence completes
+- **THEN** no kill is issued at any point
+- **AND** the 10 minutes before resolution contributed nothing to staleness
+
+#### Scenario: Hung on first connect is still killed
+
+- **GIVEN** a vault whose child resolves its sync log and then writes nothing ever again
+- **WHEN** one stall threshold elapses from the anchor
+- **THEN** the child is killed
+- **AND** this holds even though the log's mtime never advanced once while the supervisor was watching
 
 #### Scenario: Progressing sync is never killed
 

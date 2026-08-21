@@ -30,8 +30,9 @@ The REST API exposes vault-scoped CRUD over arbitrary files (Markdown, images, P
   ```jsonc
   {
     "ok": boolean,             // true iff the response status is 200
-    "vaults": VaultStatus[],   // one per configured vault, in configuration order
-    "indexers": IndexerStatus[] // one per vault known to the indexer service
+    "vaults": VaultStatus[],   // exactly one per configured vault, in configuration order
+    "indexers": IndexerStatus[] // exactly one per configured vault, synthesized as
+                                // state "starting" when the indexer has not registered it
   }
   ```
 
@@ -44,6 +45,7 @@ The REST API exposes vault-scoped CRUD over arbitrary files (Markdown, images, P
 - `ok` MUST equal `status === 200`. It exists so an alerting rule can key on one boolean instead of re-deriving the aggregate from the arrays.
 - The body MUST be identical in shape on 200 and 503 — the 503 path MUST NOT truncate, omit, or reorder the arrays. An operator diagnosing a 503 needs the per-component detail in the same place they found it when things were healthy.
 - Every critical long-lived component MUST appear in the body. A component that is not represented MUST NOT be able to keep `/readyz` at 200 while it is unhealthy.
+- `watchdog.state` MUST NOT affect the status code. A vault whose stall watchdog is `resolving` (never armed) or `disabled` is not thereby unready: readiness means the child is running and the index is built, and an unarmed watchdog is a loss of protection rather than a loss of service. Failing readiness on it would let one upstream layout change take every vault out of service at once. The condition is carried in the body — that is what an operator alerts on. See [Obsidian Sync › Sync activity log](../obsidian-sync/index.md#sync-activity-log).
 
 #### Scenario: Stalled vault reported through readiness
 

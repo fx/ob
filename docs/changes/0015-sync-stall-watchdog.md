@@ -10,14 +10,14 @@ Detect an `ob sync --continuous` child that has stopped making progress but is s
 
 ## Motivation
 
-Sync dies at random and never comes back. Observed in production on `obsidian-headless` 0.0.8: both vaults wedged from **2026-08-16T07:25 until 2026-08-20T19:29 — 4.8 days** of silent, total sync loss. The child process stayed alive the whole time, never exited, and never produced an exit code.
+Sync dies at random and never comes back. Observed in production on `obsidian-headless` 0.0.8: both vaults wedged from **2026-08-16T07:25 until 2026-08-20T19:29 — four and a half days** of silent, total sync loss (reported at the time as 4.8 days; the timestamps give 4d 12h). The child process stayed alive the whole time, never exited, and never produced an exit code.
 
 The last three lines of `~/.config/obsidian-headless/sync/<vaultId>/sync.log` for each vault:
 
 ```text
 [2026-08-16T07:24:51.770Z] Disconnected from server
 [2026-08-16T07:24:51.770Z] Waiting to connect to server
-[2026-08-16T07:25:09.289Z] Connecting...        ← end of file, 4.8 days
+[2026-08-16T07:25:09.289Z] Connecting...        ← end of file, four and a half days
 ```
 
 Five earlier disconnects on Aug 13–14 all self-recovered, each followed within seconds by `Connection successful. Detecting changes...`. A healthy steady state writes a `Fully synced` line every 30 seconds. So the failure is not "the network went away" — it is a reconnect path that can hang forever.
@@ -136,7 +136,7 @@ The poll loop uses the injected `sleep` raced against a per-lifetime stop signal
 ### Decisions
 
 - **Decision:** Anchor staleness to the wall clock at resolution, not to the sync log's own mtime.
-  - **Why:** The two are different clocks and the gap between them is the bug. In the production wedge, the mtime was 4.8 days old; a watchdog comparing `now - mtime` would kill a perfectly healthy child the instant it resolved a log that happened to be idle, and would kill a freshly restarted pod's child before it ever connected. Anchoring at resolution and refreshing only on observed change means every child gets exactly one full threshold of grace, whether it is the first child or the tenth.
+  - **Why:** The two are different clocks and the gap between them is the bug. In the production wedge, the mtime was four and a half days old; a watchdog comparing `now - mtime` would kill a perfectly healthy child the instant it resolved a log that happened to be idle, and would kill a freshly restarted pod's child before it ever connected. Anchoring at resolution and refreshing only on observed change means every child gets exactly one full threshold of grace, whether it is the first child or the tenth.
   - **Alternatives considered:** **`now - mtime >= threshold`** — spuriously kills on any pre-existing idle log, including the very first poll after a pod restart. **No anchor, only refresh on change** — a child that hangs before writing anything is never evaluated at all, which is exactly the "hung on first connect" case in the evidence.
 
 - **Decision:** Report `lastSyncActivityAt` as the log's mtime, while deciding staleness from the internal observation instant.
@@ -149,8 +149,8 @@ The poll loop uses the injected `sleep` raced against a per-lifetime stop signal
 
 - **Decision:** A persistently stalling vault ends in `failed`, and no restart escapes that.
   - **Why:** `failed` is what makes `/readyz` stay 503 with a `lastError` naming the stall, which is the whole alerting path. Restarting forever would keep flapping `/readyz` while the vault has demonstrably not recovered across three full thresholds, and flapping readiness is a worse signal than a steady failure.
-  - **Tradeoff, stated plainly:** `failed` is terminal until the process restarts, so a vault that would have recovered on the fourth attempt does not get one. That is deliberate: three consecutive stalls inside an hour is not a transient. The operator remedy is a pod restart, and the alert tells them to do it.
-  - **Alternatives considered:** **Restart forever** — no escalation, and the 4.8-day outage becomes a 4.8-day flap nobody is paged for. **A `stalled` VaultState** — better labeled, but `VaultState` is a closed set consumed by REST and MCP; widening it is a breaking change for every consumer, tracked instead as an open question on the spec.
+  - **Tradeoff, stated plainly:** `failed` is terminal until the process restarts, so a vault that would have recovered on the next attempt does not get one. That is deliberate: enough stall kills inside a rolling hour is not a transient. Note the window is rolling rather than consecutive — an ordinary crash-and-recover between two stalls does not clear the earlier stall kills, because a vault that alternates between crashing and wedging is not healthier than one that only wedges. The operator remedy is a pod restart, and the alert tells them to do it.
+  - **Alternatives considered:** **Restart forever** — no escalation, and the multi-day outage becomes a multi-day flap nobody is paged for. **A `stalled` VaultState** — better labeled, but `VaultState` is a closed set consumed by REST and MCP; widening it is a breaking change for every consumer, tracked instead as an open question on the spec.
 
 - **Decision:** Disabling the watchdog (`OB_SYNC_STALL_TIMEOUT_SECONDS=0`) does not disable log tailing.
   - **Why:** The two answer different needs. An operator who distrusts the kill still wants sync progress in `kubectl logs` and still wants `lastSyncActivityAt` — that combination is the safest way to run the feature in observation mode before arming it. Only the pair of `0` and `OB_SYNC_LOG_TAIL=false` shuts the poll off entirely.
