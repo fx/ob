@@ -251,6 +251,7 @@ An `ob sync --continuous` child can stop making progress while remaining alive a
 
 - Validation MUST happen at startup, before any `ob` child is spawned, and any violation MUST exit 78 naming the offending variable and its value:
   - `OB_SYNC_STALL_TIMEOUT_SECONDS` and `OB_SYNC_STALL_POLL_SECONDS` MUST each match `^\d+$`.
+  - Each MUST be at most 86400 (24 hours). An unbounded value converts to a millisecond duration that overflows the safe-integer range, and the resulting `Infinity` or precision-lost comparison makes `now - lastActivityObservedAt >= stallTimeoutMs` never true — the watchdog would silently disarm while reporting itself `armed`, which is the exact silent-failure mode this change exists to remove. A day is far beyond any useful bound against a 30-second heartbeat, so rejecting outright is better than clamping.
   - `OB_SYNC_STALL_POLL_SECONDS` MUST be at least 1.
   - When `OB_SYNC_STALL_TIMEOUT_SECONDS` is greater than 0, `OB_SYNC_STALL_POLL_SECONDS` MUST be less than or equal to it — a poll interval longer than the threshold would delay detection past the configured bound.
   - `OB_SYNC_LOG_TAIL` MUST be exactly `true` or `false`.
@@ -333,6 +334,14 @@ An `ob sync --continuous` child can stop making progress while remaining alive a
 - **WHEN** a vault's child runs with a permanently silent sync log
 - **THEN** no kill is ever issued
 - **AND** the vault reports `watchdog.state === "disabled"`, `watchdog.logPath === null`, and `lastSyncActivityAt === null`
+
+#### Scenario: Out-of-range threshold rejected at startup
+
+- **GIVEN** `OB_SYNC_STALL_TIMEOUT_SECONDS=999999999999`
+- **WHEN** the process starts
+- **THEN** the process exits 78 with a message naming the variable, its value, and the 86400 bound
+- **AND** no `ob` child has been spawned
+- **AND** the process does NOT start with a watchdog that reports itself `armed` while never firing
 
 #### Scenario: Invalid poll interval rejected at startup
 
