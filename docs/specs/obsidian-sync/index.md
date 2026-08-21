@@ -164,7 +164,7 @@ The upstream `ob sync --continuous` child writes its progress to its own per-vau
 - If a stat of an already-resolved log fails — the file was deleted, or the directory was replaced — the supervisor MUST NOT treat the failure as activity and MUST NOT treat it as a stall. It MUST return the watchdog to `resolving`, discard the read offset and any buffered partial line, and re-anchor staleness on the next successful stat. A vanished log means the watchdog can no longer tell whether the child is healthy, and killing on that ignorance would be a guess.
 - When log tailing is enabled, every poll MUST forward each newly appended complete line to the parent logger at `info` with the same field shape as the stdio forwarding: `{ vault: <slug>, source: "ob", stream: "sync.log", line: <text> }` under the message `ob output`. Empty lines MUST NOT be emitted.
 - The tail MUST start from the file's size at the moment of resolution. Content written before that point MUST NOT be emitted — a production log holds tens of thousands of lines, and re-emitting the backlog on every restart would bury the live signal.
-- The first read after resolution MUST discard everything up to and including the first newline it encounters, and MUST emit nothing until that newline has arrived. Resolution can land mid-line: if the file ends with an unterminated `Connect` and the next append is `ing...\n`, both emitting `ing...` and reconstructing `Connecting...` are wrong — the first splits a line, the second replays bytes the no-backlog rule excludes. Dropping the one straddling line costs nothing and is the only option that satisfies both rules.
+- At resolution the supervisor MUST record whether the anchor offset sits on a line boundary — that is, whether the byte immediately preceding it is a newline, with an empty file counting as a boundary. If it does **not**, resolution landed mid-line, and the first read MUST discard everything up to and including the first newline it encounters: if the file ends with an unterminated `Connect` and the next append is `ing...\n`, both emitting `ing...` and reconstructing `Connecting...` are wrong — the first splits a line, the second replays bytes the no-backlog rule excludes, and dropping the one straddling line is the only option satisfying both. If the anchor **does** sit on a line boundary, nothing MUST be discarded and the first newly appended complete line MUST be emitted; discarding unconditionally would silently swallow the first line of every normally-rotated log.
 - The tail MUST detect truncation or replacement — an observed size smaller than the current read offset, or a change in the file's inode identity — and MUST respond by resetting the read offset to the start of the file and discarding any buffered partial line.
 - The tail MUST cap the number of bytes it reads per poll (default 262144). When an append exceeds the cap, the supervisor MUST skip forward so that only the most recent capped span is read, MUST discard the leading partial line of that span, and MUST emit one `warn` naming the number of bytes skipped.
 - An incomplete trailing line MUST be buffered and emitted only once its terminating newline arrives, so that a half-written line is never split across two log entries.
@@ -201,6 +201,13 @@ The upstream `ob sync --continuous` child writes its progress to its own per-vau
 - **THEN** the only line emitted is `Fully synced`
 - **AND** neither `ing...` nor `Connecting...` is emitted
 
+#### Scenario: Resolution lands on a line boundary
+
+- **GIVEN** the resolved `sync.log` ends with a complete line and its terminating newline at the moment of resolution
+- **WHEN** the upstream appends `Fully synced\n`
+- **THEN** `Fully synced` is emitted
+- **AND** nothing is discarded
+
 #### Scenario: Backlog is not replayed
 
 - **GIVEN** the resolved `sync.log` already holds 20000 lines when the watchdog resolves it
@@ -220,7 +227,7 @@ The upstream `ob sync --continuous` child writes its progress to its own per-vau
 An `ob sync --continuous` child can stop making progress while remaining alive and never exiting; the restart machinery above keys entirely off `exited` and is blind to it. Sync-log silence is the supervisor's proxy for "this child is wedged". A healthy child writes a progress line roughly every 30 seconds, so the absence of any write over several minutes is unambiguous.
 
 - While a vault's child is running, the supervisor MUST poll the resolved sync log's mtime every `pollIntervalMs` (default 30000).
-- **Activity** is an observed mtime that differs from the previously recorded mtime. A difference in either direction counts, so that a rotated-in replacement file is never mistaken for silence.
+- **Activity** is an observed mtime that differs from the previously recorded mtime, **or** an observed inode identity that differs from the previously recorded one. A difference in either direction counts. Inode identity is part of the definition rather than a tail-only concern: a log rotated out and replaced by a file whose mtime is preserved — or merely equal at the filesystem's timestamp granularity — would otherwise read as silence and get a healthy child killed one threshold later, which is exactly the outcome the "never mistaken for silence" guarantee excludes. The tail already reads inode identity from the same stat, so this costs nothing.
 - On the first successful stat after resolution, the supervisor MUST anchor staleness to the current wall clock rather than to the file's mtime, and MUST treat the anchor as the last instant at which activity was observed. The file's own mtime MAY be arbitrarily old — that is precisely the state a wedged child leaves behind — so measuring staleness against it would kill a freshly resolved healthy child immediately.
 - Time elapsed between the child being spawned and the log being resolved MUST NOT count toward staleness. The clock starts at the anchor, not at spawn, so a vault whose sync directory takes minutes to appear gets a full threshold of grace once it does. Concretely, the watchdog cannot kill a child earlier than one full threshold after the anchor, whatever happened before it.
 - The interval between the anchor and the first observed mtime change is therefore the only window in which a never-yet-active child can be killed, and it MUST be treated exactly like any other silence: a child that hangs before its first successful connect writes nothing, so its anchor never refreshes and it is killed one threshold later. A first sync that is merely slow keeps writing progress lines, so its mtime keeps advancing and it is never killed however long the sync itself takes. Slowness is not the signal; total silence is.
@@ -280,6 +287,13 @@ An `ob sync --continuous` child can stop making progress while remaining alive a
 - **WHEN** one stall threshold elapses from the anchor
 - **THEN** the child is killed
 - **AND** this holds even though the log's mtime never advanced once while the supervisor was watching
+
+#### Scenario: Rotation with a preserved mtime is not silence
+
+- **GIVEN** a running child whose resolved `sync.log` is rotated out and replaced by a different file carrying the same mtime
+- **WHEN** the watchdog's next poll observes the new inode
+- **THEN** the replacement counts as activity and the staleness clock is refreshed
+- **AND** no kill is issued one threshold later
 
 #### Scenario: Progressing sync is never killed
 
@@ -367,10 +381,11 @@ interface Supervisor {
   | Value | Meaning |
   |---|---|
   | `disabled` | Stall detection and log tailing are both switched off; nothing is resolved and nothing is polled. |
-  | `resolving` | Polling, but the sync log has not been resolved yet — the watchdog is dormant and this vault is not protected. |
+  | `resolving` | Configured, but the sync log is not resolved — the watchdog is dormant and this vault is not protected. This does not imply a poll is in flight: it is also the value before the vault's first child is spawned, during `sync-setup` and `sync-config`, and during restart backoff. |
   | `tailing` | The log is resolved and being tailed, but stall detection is off (`OB_SYNC_STALL_TIMEOUT_SECONDS=0`); no child will be killed for silence. |
   | `armed` | The log is resolved and stall detection is active. |
 
+- Before a vault's first child is spawned, `watchdog.state` MUST be `disabled` when configuration disables the watchdog entirely and `resolving` otherwise, with `logPath` and `lastSyncActivityAt` both `null` and `stallKills` zero. A vault therefore has a fully-formed `watchdog` object from the moment the supervisor returns, matching the existing guarantee that `list()` reflects every configured vault immediately.
 - `lastSyncActivityAt` and `watchdog` MUST retain their most recent values while the vault has no running child — during restart backoff, and after the vault has reached `failed`. An operator reading the status of a vault that has just been killed for stalling MUST still see the mtime that proves it stalled. Whether a child is running is what the vault's own `state` field reports.
 - `watchdog.thresholdMs` and `watchdog.pollIntervalMs` MUST report the resolved effective configuration, so an operator can confirm from the status surface alone which threshold is actually in force.
 - `watchdog.stallKills` MUST be the cumulative count of stall kills for that vault over the process lifetime, not the count inside the rolling stall window.

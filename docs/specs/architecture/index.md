@@ -168,6 +168,7 @@ REST and MCP MUST be two interfaces to the same functionality, not two implement
   - `GET /metrics` — text/plain Prometheus exposition (basic counters: indexed docs, search queries, sync errors).
 - `/healthz` MUST remain a dependency-free liveness probe: its status code MUST NOT depend on vault sync state, indexer state, or any other subsystem, and it MUST NOT read any state that can block. Sync health MUST NOT be attached to it. The container is a single process hosting the API and every vault child, so a liveness failure restarts all of them; using one wedged vault to trigger that would take down the API and every healthy vault to recover one child. In-process supervision (restarting the individual `ob` child) is the correct blast radius, and `/readyz` is the correct place to *report* the condition.
 - `/readyz` MUST be the single aggregate status surface: every critical long-lived in-process component MUST be represented in its body. Today that is the per-vault `ob sync` children and the per-vault indexers. Introducing another long-lived component MUST extend the body rather than add a fourth health route — a status surface that does not enumerate everything long-lived is worse than none, because it reads as an all-clear.
+
 #### Scenario: A wedged vault does not restart the pod
 
 - **GIVEN** two configured vaults, one of whose `ob sync` children has stopped making progress
