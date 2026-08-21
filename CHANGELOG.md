@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.0](https://github.com/fx/ob/compare/v1.3.0...v1.4.0) (2026-08-21)
+
+
+### Features
+
+* **sync:** kill and restart a sync child that has stopped making progress ([#25](https://github.com/fx/ob/issues/25)) ([7d96b46](https://github.com/fx/ob/commit/7d96b46f161b858f428e3d20a05783cbc5201cab))
+* **sync:** resolve and tail the upstream sync log, report it on /readyz ([#23](https://github.com/fx/ob/issues/23)) ([5834641](https://github.com/fx/ob/commit/58346415dbeaace1c56fdaed8eb47fccc6cf9a17))
+
 ## [1.3.0](https://github.com/fx/ob/compare/v1.2.0...v1.3.0) (2026-08-10)
 
 
