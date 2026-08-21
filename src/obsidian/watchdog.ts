@@ -269,9 +269,11 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
       // Absent `sync/` directory is the normal pre-first-sync state.
       return null;
     }
+    if (stopped) return null;
 
     const candidates: Candidate[] = [];
     for (const dir of entries) {
+      if (stopped) return null;
       const configPath = join(deps.syncDir, dir, "config.json");
       let st: WatchdogStat;
       try {
@@ -319,6 +321,10 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
       // anything, so stay in `resolving`.
       return null;
     }
+    const midLine = await landedMidLine(candidatePath, logStat.size);
+    // The child exited while we were reading: commit nothing. A resolution
+    // that lands after the child is gone would tail a log nobody owns.
+    if (stopped) return null;
 
     resetCursor();
     // Anchor the tail at the current size: production holds tens of thousands
@@ -327,7 +333,7 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
     inode = logStat.inode;
     lastSyncActivityAt = logStat.mtimeMs;
     logPath = candidatePath;
-    discardStraddlingLine = await landedMidLine(candidatePath, logStat.size);
+    discardStraddlingLine = midLine;
     deps.logger.info("sync log resolved", {
       vault: vault.slug,
       logPath: candidatePath,
@@ -391,6 +397,10 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
       });
       return;
     }
+    // The child exited while the read was in flight: forward nothing. A line
+    // emitted now belongs to a child that no longer exists, and could
+    // interleave with its replacement's tail.
+    if (stopped) return;
     // Advance by what we actually read, so a short read does not skip bytes.
     offset = start + bytes.length;
 
@@ -416,6 +426,7 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
     if (path === null) {
       path = await resolveLog();
       if (path === null) {
+        if (stopped) return;
         warnIfUnresolvedTooLong();
         return;
       }
@@ -439,6 +450,7 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
       resetCursor();
       return;
     }
+    if (stopped) return;
 
     if (st.inode !== inode || st.size < offset) {
       // Truncated or replaced: read the new file from its start.
@@ -464,7 +476,24 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
         deps.logger.warn("sync log poll failed", { vault: vault.slug, error: errText(e) });
       }
       if (stopped) break;
-      await Promise.race([deps.sleep(config.pollIntervalMs), stopSignal]);
+      try {
+        await Promise.race([deps.sleep(config.pollIntervalMs), stopSignal]);
+      } catch (e) {
+        // A rejecting `sleep` leaves the loop with no way to pace itself.
+        // Retrying immediately would spin, and letting it escape `void
+        // loop()` would surface as an unhandled rejection and take the
+        // process down — a worse outcome than the wedge this feature exists
+        // to detect. Stand the watchdog down instead; the vault reverts to
+        // reporting `resolving` and stays unprotected but running.
+        deps.logger.error("sync log poll loop stopped: sleep failed", {
+          vault: vault.slug,
+          error: errText(e),
+        });
+        // Report the truth: nothing is watching this log any more.
+        stopped = true;
+        activePath = null;
+        return;
+      }
     }
   }
 

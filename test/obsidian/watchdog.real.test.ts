@@ -94,7 +94,9 @@ describe("watchdog against a real filesystem", () => {
     const tree = makeTree();
     try {
       mkdirSync(join(tree.syncDir, "empty"), { recursive: true });
-      writeFileSync(join(tree.syncDir, "broken", "..", "loose.txt"), "ignored");
+      // A plain file among the sync entries: `readdir` returns it, and the
+      // scan must skip it (ENOTDIR on its `config.json`) rather than abort.
+      writeFileSync(join(tree.syncDir, "loose.txt"), "ignored");
       seed(tree, "other", join(tree.root, "data", "vaults", "other"), "");
       const wanted = seed(tree, "bbb", tree.vaultPath, "");
 

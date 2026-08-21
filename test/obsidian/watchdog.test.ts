@@ -797,6 +797,85 @@ describe("watchdog — lifecycle", () => {
     wd.stop();
   });
 
+  test("stop() during an in-flight resolution commits nothing and emits nothing", async () => {
+    const fs = createFakeWatchdogFs();
+    const driver = createPollDriver();
+    const log = capture();
+    fs.addDir(SYNC_DIR, ["aaa"]);
+    seedVaultDir(fs, "aaa", { log: "" });
+    // Hold the directory scan open so `stop()` lands mid-poll.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const realReadDir = fs.readDir.bind(fs);
+    Object.assign(fs, {
+      readDir: async (p: string): Promise<readonly string[]> => {
+        await gate;
+        return realReadDir(p);
+      },
+    });
+
+    const wd = start(fs, driver, log);
+    wd.stop();
+    release();
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    const snap = wd.snapshot();
+    expect(snap.watchdog.state).toBe("resolving");
+    expect(snap.watchdog.logPath).toBeNull();
+    expect(log.of("sync log resolved")).toHaveLength(0);
+    expect(log.of("sync log still unresolved; this vault is unprotected")).toHaveLength(0);
+  });
+
+  test("stop() during an in-flight tail read forwards nothing", async () => {
+    const fs = createFakeWatchdogFs();
+    const driver = createPollDriver();
+    const log = capture();
+    fs.addDir(SYNC_DIR, ["aaa"]);
+    seedVaultDir(fs, "aaa", { log: "" });
+
+    const wd = start(fs, driver, log);
+    await driver.settle();
+    fs.append(logPathOf("aaa"), "late line\n", 2_000);
+
+    // Hold the ranged read open, run one poll into it, then stop mid-flight.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const realReadRange = fs.readRange.bind(fs);
+    Object.assign(fs, {
+      readRange: async (p: string, s: number, e: number): Promise<Uint8Array> => {
+        await gate;
+        return realReadRange(p, s, e);
+      },
+    });
+    driver.release();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    wd.stop();
+    release();
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    expect(log.tailed()).toEqual([]);
+  });
+
+  test("a rejecting sleep stands the watchdog down instead of escaping as an unhandled rejection", async () => {
+    const fs = createFakeWatchdogFs();
+    const log = capture();
+    fs.addDir(SYNC_DIR, ["aaa"]);
+    seedVaultDir(fs, "aaa", { log: "" });
+
+    const wd = start(fs, createPollDriver(), log, {
+      sleep: async (): Promise<void> => {
+        throw new Error("timer subsystem is gone");
+      },
+    });
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    expect(log.of("sync log poll loop stopped: sleep failed")).toHaveLength(1);
+    // The surface must not keep claiming a log is being watched.
+    expect(wd.snapshot().watchdog.state).toBe("resolving");
+    wd.stop();
+  });
+
   test("a poll that throws is logged and the loop keeps going", async () => {
     const fs = createFakeWatchdogFs();
     const driver = createPollDriver();

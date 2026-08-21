@@ -258,8 +258,11 @@ export class VaultChild {
   private endWatchdog(): void {
     const handle = this.watchdogHandle;
     if (handle === null) return;
-    this.watchdogMemory = handle.memory();
+    // Stop BEFORE reading the memory: `stop()` is what makes an in-flight
+    // poll bail at its next resume point, so doing it first means the value
+    // we keep cannot be overwritten by a poll belonging to a dead child.
     handle.stop();
+    this.watchdogMemory = handle.memory();
     this.watchdogHandle = null;
   }
 

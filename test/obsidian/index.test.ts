@@ -967,6 +967,37 @@ describe("startSupervisor — sync-log watchdog wiring", () => {
   });
 });
 
+describe("startSupervisor — list() is the configured vault set", () => {
+  test("reports every configured vault, in configuration order, before any spawn", async () => {
+    // `/readyz` derives BOTH of its arrays from `supervisor.list()` rather
+    // than re-reading `cfg.vaults`, so the rest-api contract's "exactly one
+    // entry per configured vault, in configuration order" rests on this
+    // guarantee. Pin it where it lives.
+    const cfg = buildConfig({
+      vaults: [
+        { name: "Gamma", slug: "gamma" },
+        { name: "Alpha", slug: "alpha" },
+        { name: "Beta", slug: "beta" },
+      ],
+    });
+    const sp = createFakeSpawner();
+    const sup = await startSupervisor(cfg, {
+      logger: silentLog,
+      spawner: sp,
+      sleep: noSleep,
+      skipAuthBootstrap: true,
+      mkdir: async () => {
+        throw new Error("EACCES: keep every vault out of the spawn path");
+      },
+    });
+    expect(sup.list().map((v) => v.slug)).toEqual(["gamma", "alpha", "beta"]);
+    await waitFor(() => sup.get("beta")?.state === "failed", "all vaults settled");
+    // Order is stable after the vaults have changed state, too.
+    expect(sup.list().map((v) => v.slug)).toEqual(["gamma", "alpha", "beta"]);
+    await sup.stop();
+  });
+});
+
 describe("isAllRunning helper", () => {
   test("empty list is NOT considered ready", () => {
     expect(isAllRunning([])).toBe(false);

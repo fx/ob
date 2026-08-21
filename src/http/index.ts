@@ -91,10 +91,16 @@ export function buildHttpApp(deps: HttpAppDeps = {}): Hono {
     if (idx !== undefined) {
       for (const s of idx.list()) registered.set(s.slug, s);
     }
-    // Exactly one indexer entry per configured vault, in configuration order,
-    // so the two arrays are positionally correlatable. A vault the indexer
-    // has not registered yet is synthesized as `starting` rather than omitted
-    // — an omitted component cannot hold the response at 503 when it is
+    // `vaults` IS the configured set: the supervisor's public contract is
+    // that `list()` reflects every configured vault, in configuration order,
+    // from the moment it is constructed. Re-deriving the set from `cfg` here
+    // would create a second source of truth for the same list, which is the
+    // split-surface failure this endpoint exists to avoid.
+    //
+    // Exactly one indexer entry per configured vault, in the same order, so
+    // the two arrays are positionally correlatable. A vault the indexer has
+    // not registered yet is synthesized as `starting` rather than omitted —
+    // an omitted component cannot hold the response at 503 when it is
     // unhealthy, which is the failure mode this contract exists to prevent.
     const indexers = vaults.map((v) => registered.get(v.slug) ?? startingIndexerStatus(v.slug));
     const ok = isAllRunning(vaults) && indexers.every((s) => s.state === "ready");
