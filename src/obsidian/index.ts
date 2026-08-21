@@ -5,7 +5,10 @@
  *
  * ```ts
  * type VaultState = "starting" | "running" | "failed";
- * interface VaultStatus { slug; name; state; pid; restarts; lastError; }
+ * interface VaultStatus {
+ *   slug; name; state; pid; restarts; lastError;
+ *   lastSyncActivityAt; watchdog;
+ * }
  * interface Supervisor { list(); get(slug); stop(): Promise<void>; }
  * ```
  *
@@ -23,13 +26,19 @@ import { join } from "node:path";
 import type { Config } from "../config/index.ts";
 import type { Logger } from "../log.ts";
 import type { Backoff } from "./backoff.ts";
-import { ensureAuthToken } from "./bootstrap.ts";
+import { ensureAuthToken, resolveXdgConfigBase } from "./bootstrap.ts";
 import { type ChildBackoff, type CrashLoop, VaultChild, type VaultStatus } from "./child.ts";
 import { SetupPermanentError, ensureVaultSetup } from "./setup.ts";
 import { type Spawner, realSpawner } from "./spawn.ts";
 import { SyncConfigPermanentError, applyVaultSyncConfig } from "./syncconfig.ts";
+import { type WatchdogFs, defaultWatchdogFs } from "./watchdog.ts";
 
 export type { VaultState, VaultStatus } from "./child.ts";
+export type {
+  WatchdogFs,
+  WatchdogState,
+  WatchdogStatus,
+} from "./watchdog.ts";
 export type { SpawnHandle, SpawnOpts, Spawner } from "./spawn.ts";
 export { AuthMissingError } from "./bootstrap.ts";
 export { SetupPermanentError, SetupTransientError } from "./setup.ts";
@@ -59,9 +68,15 @@ export interface SupervisorDeps {
   readonly skipAuthBootstrap?: boolean;
   /** Override for `ensureAuthToken`'s `fs` arg — tests use this. */
   readonly authFs?: Parameters<typeof ensureAuthToken>[1];
+  /** Override the watchdog's filesystem surface — tests use this. */
+  readonly watchdogFs?: WatchdogFs;
+  /** Override the watchdog's per-poll read cap — tests use this. */
+  readonly watchdogMaxTailBytes?: number;
 }
 
 const DEFAULT_STOP_GRACE_MS = 5_000;
+/** Last-resort XDG base when neither `XDG_CONFIG_HOME` nor `HOME` is set. */
+const DEFAULT_CONFIG_BASE = "/home/ob/.config";
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -88,13 +103,20 @@ export async function startSupervisor(cfg: Config, deps: SupervisorDeps): Promis
   const stopGraceMs = deps.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const log = deps.logger;
 
+  // The XDG base is resolved ONCE, outside the auth-bootstrap branch, so the
+  // watchdog and the credential bootstrap always agree on it. Resolving it
+  // inside that branch would give every test that skips auth bootstrap a
+  // different sync directory than production.
+  const homeDir = deps.homeDir ?? process.env.HOME ?? "/home/ob";
+  const xdgInput = {
+    ...(deps.xdgConfigHome !== undefined ? { xdgConfigHome: deps.xdgConfigHome } : {}),
+    homeDir,
+  };
+  const configBase = resolveXdgConfigBase(xdgInput) ?? DEFAULT_CONFIG_BASE;
+  const syncDir = join(configBase, "obsidian-headless", "sync");
+
   if (deps.skipAuthBootstrap !== true) {
-    const homeDir = deps.homeDir ?? process.env.HOME ?? "/home/ob";
-    const authInput = {
-      authToken: cfg.obsidianAuthToken,
-      ...(deps.xdgConfigHome !== undefined ? { xdgConfigHome: deps.xdgConfigHome } : {}),
-      homeDir,
-    };
+    const authInput = { authToken: cfg.obsidianAuthToken, ...xdgInput };
     const fsArg = deps.authFs;
     const result =
       fsArg !== undefined
@@ -124,6 +146,14 @@ export async function startSupervisor(cfg: Config, deps: SupervisorDeps): Promis
       ...(deps.childBackoff !== undefined ? { backoff: deps.childBackoff } : {}),
       ...(deps.crashLoop !== undefined ? { crashLoop: deps.crashLoop } : {}),
       ...(deps.obBin !== undefined ? { obBin: deps.obBin } : {}),
+      watchdog: {
+        config: cfg.syncWatchdog,
+        fs: deps.watchdogFs ?? defaultWatchdogFs,
+        syncDir,
+        ...(deps.watchdogMaxTailBytes !== undefined
+          ? { maxTailBytes: deps.watchdogMaxTailBytes }
+          : {}),
+      },
     });
     children.set(v.slug, child);
   }

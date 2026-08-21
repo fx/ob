@@ -36,6 +36,7 @@ import type { Supervisor, VaultStatus } from "../../src/obsidian/index.ts";
 import { listFiles, readFile, writeFile } from "../../src/vault/files.ts";
 import type { VaultDescriptor } from "../../src/vault/files.ts";
 import { type StatusDeps, listVaults, vaultStatus } from "../../src/vault/status.ts";
+import { makeVaultStatus } from "../helpers/vaultStatus.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -67,7 +68,7 @@ function idxStatus(slug: string): IndexerStatus {
 }
 
 function syncStatus(slug: string): VaultStatus {
-  return { slug, name: slug, state: "running", pid: 1, restarts: 0, lastError: null };
+  return makeVaultStatus({ slug });
 }
 
 function hit(path: string, over: Partial<SearchHit> = {}): SearchHit {

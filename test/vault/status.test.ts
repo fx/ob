@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Indexer, IndexerStatus } from "../../src/indexer/index.ts";
 import type { Supervisor, VaultStatus } from "../../src/obsidian/index.ts";
 import { listVaults, vaultStatus } from "../../src/vault/status.ts";
+import { makeVaultStatus } from "../helpers/vaultStatus.ts";
 
 function fakeSupervisor(statuses: VaultStatus[]): Supervisor {
   return {
@@ -18,14 +19,7 @@ function fakeIndexer(statuses: IndexerStatus[]): Pick<Indexer, "list" | "status"
   };
 }
 
-const SYNC_OK: VaultStatus = {
-  slug: "v",
-  name: "v",
-  state: "running",
-  pid: 1,
-  restarts: 0,
-  lastError: null,
-};
+const SYNC_OK: VaultStatus = makeVaultStatus({ slug: "v" });
 
 const IDX_READY: IndexerStatus = {
   slug: "v",

@@ -18,6 +18,7 @@ import {
   writePipelineVersion,
 } from "../../src/indexer/store.ts";
 import { type Logger, createLogger } from "../../src/log.ts";
+import { TEST_WATCHDOG_OFF } from "../helpers/vaultStatus.ts";
 
 function silent(): Logger {
   return createLogger({ level: "error", write: () => undefined });
@@ -38,6 +39,7 @@ function makeConfig(over: Partial<Config> = {}): Config {
     embeddingModel: "x",
     logLevel: "error",
     syncConfigEnv: {},
+    syncWatchdog: TEST_WATCHDOG_OFF,
     ...over,
   };
 }

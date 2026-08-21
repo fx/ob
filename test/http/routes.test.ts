@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadPdfFixture } from "../helpers/loadPdfFixture.ts";
+import { TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
 import { makeHttpFixture, waitFor } from "./helpers.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -661,20 +662,8 @@ describe("server-error logging branch", () => {
     };
     const app = buildHttpApp({
       supervisor: {
-        list: () => [
-          { slug: "v", name: "v", state: "running", pid: 1, restarts: 0, lastError: null },
-        ],
-        get: (s: string) =>
-          s === "v"
-            ? {
-                slug: "v",
-                name: "v",
-                state: "running" as const,
-                pid: 1,
-                restarts: 0,
-                lastError: null,
-              }
-            : null,
+        list: () => [makeVaultStatus({ slug: "v" })],
+        get: (s: string) => (s === "v" ? makeVaultStatus({ slug: "v" }) : null),
         stop: async () => undefined,
       },
       indexer: fakeIndexer,
@@ -688,6 +677,7 @@ describe("server-error logging branch", () => {
         embeddingModel: "x",
         logLevel: "error",
         syncConfigEnv: {},
+        syncWatchdog: TEST_WATCHDOG_OFF,
       },
       logger,
     });

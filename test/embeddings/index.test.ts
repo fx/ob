@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Config } from "../../src/config/index.ts";
 import { EmbedderError, buildEmbedder } from "../../src/embeddings/index.ts";
+import { TEST_WATCHDOG_OFF } from "../helpers/vaultStatus.ts";
 
 function baseConfig(over: Partial<Config> = {}): Config {
   const cfg: Config = {
@@ -13,6 +14,7 @@ function baseConfig(over: Partial<Config> = {}): Config {
     embeddingModel: "Xenova/all-MiniLM-L6-v2",
     logLevel: "error",
     syncConfigEnv: {},
+    syncWatchdog: TEST_WATCHDOG_OFF,
     ...over,
   };
   return cfg;

@@ -1,11 +1,43 @@
 import { describe, expect, test } from "bun:test";
 import { buildHttpApp } from "../src/http/index.ts";
+import type { Indexer, IndexerStatus } from "../src/indexer/index.ts";
 import type { Supervisor, VaultStatus } from "../src/obsidian/index.ts";
+import { TEST_WATCHDOG_OFF, makeVaultStatus } from "./helpers/vaultStatus.ts";
+
+interface ReadyzBody {
+  readonly ok: boolean;
+  readonly vaults: VaultStatus[];
+  readonly indexers: IndexerStatus[];
+}
 
 function fakeSupervisor(statuses: VaultStatus[] = []): Supervisor {
   return {
     list: () => statuses.slice(),
     get: (slug) => statuses.find((s) => s.slug === slug) ?? null,
+    stop: async () => undefined,
+  };
+}
+
+function readyIndexer(slug: string): IndexerStatus {
+  return {
+    slug,
+    state: "ready",
+    documents: 1,
+    chunks: 1,
+    lastIndexedAt: 100,
+    pending: 0,
+    errors: 0,
+  };
+}
+
+/** Minimal `Indexer` whose only meaningful method for `/readyz` is `list()`. */
+function fakeIndexer(statuses: IndexerStatus[]): Indexer {
+  return {
+    list: () => statuses.slice(),
+    status: (slug) => statuses.find((s) => s.slug === slug) ?? null,
+    search: async () => [],
+    reindex: async () => undefined,
+    drop: async () => undefined,
     stop: async () => undefined,
   };
 }
@@ -36,20 +68,8 @@ describe("buildHttpApp", () => {
     // mount /v1 routes with a fake indexer that throws.
     const app = buildHttpApp({
       supervisor: {
-        list: () => [
-          { slug: "v", name: "v", state: "running", pid: 1, restarts: 0, lastError: null },
-        ],
-        get: (s) =>
-          s === "v"
-            ? {
-                slug: "v",
-                name: "v",
-                state: "running" as const,
-                pid: 1,
-                restarts: 0,
-                lastError: null,
-              }
-            : null,
+        list: () => [makeVaultStatus({ slug: "v" })],
+        get: (s) => (s === "v" ? makeVaultStatus({ slug: "v" }) : null),
         stop: async () => undefined,
       },
       indexer: {
@@ -72,6 +92,7 @@ describe("buildHttpApp", () => {
         embeddingModel: "x",
         logLevel: "error",
         syncConfigEnv: {},
+        syncWatchdog: TEST_WATCHDOG_OFF,
       },
     });
     const res = await app.request("/v1/vaults/v/search", {
@@ -86,30 +107,126 @@ describe("buildHttpApp", () => {
     const app = buildHttpApp();
     const res = await app.request("/readyz");
     expect(res.status).toBe(503);
-    const body = (await res.json()) as { vaults: VaultStatus[] };
+    const body = (await res.json()) as ReadyzBody;
+    expect(body.ok).toBe(false);
     expect(body.vaults).toEqual([]);
+    expect(body.indexers).toEqual([]);
   });
 
-  test("GET /readyz returns 200 when every vault is running", async () => {
+  test("GET /readyz returns 200 with ok:true when every vault is running and indexed", async () => {
     const app = buildHttpApp({
-      supervisor: fakeSupervisor([
-        { slug: "v", name: "v", state: "running", pid: 1, restarts: 0, lastError: null },
-      ]),
+      supervisor: fakeSupervisor([makeVaultStatus({ slug: "v" })]),
+      indexer: fakeIndexer([readyIndexer("v")]),
     });
     const res = await app.request("/readyz");
     expect(res.status).toBe(200);
+    const body = (await res.json()) as ReadyzBody;
+    expect(body.ok).toBe(true);
+    expect(body.vaults.map((v) => v.slug)).toEqual(["v"]);
+    expect(body.indexers.map((i) => i.slug)).toEqual(["v"]);
+  });
+
+  test("GET /readyz holds at 503 when a configured vault's indexer has not registered", async () => {
+    // The hole this closes: an unregistered indexer used to be simply absent
+    // from `indexers`, so it could not hold the response at 503.
+    const app = buildHttpApp({
+      supervisor: fakeSupervisor([makeVaultStatus({ slug: "v" })]),
+      indexer: fakeIndexer([]),
+    });
+    const res = await app.request("/readyz");
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as ReadyzBody;
+    expect(body.ok).toBe(false);
+    expect(body.indexers).toHaveLength(1);
+    expect(body.indexers[0]?.slug).toBe("v");
+    expect(body.indexers[0]?.state).toBe("starting");
+  });
+
+  test("GET /readyz synthesizes an indexer entry when no indexer is wired at all", async () => {
+    const app = buildHttpApp({ supervisor: fakeSupervisor([makeVaultStatus({ slug: "v" })]) });
+    const res = await app.request("/readyz");
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as ReadyzBody;
+    expect(body.indexers).toHaveLength(1);
+    expect(body.indexers[0]?.state).toBe("starting");
   });
 
   test("GET /readyz returns 503 with vaults payload when any vault is not running", async () => {
     const app = buildHttpApp({
       supervisor: fakeSupervisor([
-        { slug: "a", name: "a", state: "running", pid: 1, restarts: 0, lastError: null },
-        { slug: "b", name: "b", state: "failed", pid: null, restarts: 10, lastError: "loop" },
+        makeVaultStatus({ slug: "a" }),
+        makeVaultStatus({ slug: "b", state: "failed", pid: null, restarts: 10, lastError: "loop" }),
       ]),
+      indexer: fakeIndexer([readyIndexer("a"), readyIndexer("b")]),
     });
     const res = await app.request("/readyz");
     expect(res.status).toBe(503);
-    const body = (await res.json()) as { vaults: VaultStatus[] };
+    const body = (await res.json()) as ReadyzBody;
+    expect(body.ok).toBe(false);
     expect(body.vaults.find((v) => v.slug === "b")?.state).toBe("failed");
+  });
+
+  test("GET /readyz returns 503 when a registered indexer is not ready", async () => {
+    const app = buildHttpApp({
+      supervisor: fakeSupervisor([makeVaultStatus({ slug: "v" })]),
+      indexer: fakeIndexer([{ ...readyIndexer("v"), state: "scanning" }]),
+    });
+    const res = await app.request("/readyz");
+    expect(res.status).toBe(503);
+  });
+
+  test("GET /readyz arrays are configuration-ordered and positionally correlatable", async () => {
+    // The indexer deliberately reports its vaults in the opposite order and
+    // omits one; both arrays must still come back in configuration order.
+    const app = buildHttpApp({
+      supervisor: fakeSupervisor([
+        makeVaultStatus({ slug: "alpha" }),
+        makeVaultStatus({ slug: "beta" }),
+        makeVaultStatus({ slug: "gamma" }),
+      ]),
+      indexer: fakeIndexer([readyIndexer("gamma"), readyIndexer("alpha")]),
+    });
+    const res = await app.request("/readyz");
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as ReadyzBody;
+    expect(body.vaults.map((v) => v.slug)).toEqual(["alpha", "beta", "gamma"]);
+    expect(body.indexers.map((i) => i.slug)).toEqual(["alpha", "beta", "gamma"]);
+    for (let i = 0; i < body.vaults.length; i++) {
+      expect(body.indexers[i]?.slug).toBe(body.vaults[i]?.slug ?? "");
+    }
+    expect(body.indexers[1]?.state).toBe("starting");
+  });
+
+  test("GET /readyz carries the watchdog sub-object through untouched", async () => {
+    const vault = makeVaultStatus({
+      slug: "v",
+      lastSyncActivityAt: 1_700_000_000_000,
+      watchdog: {
+        state: "tailing",
+        logPath: "/cfg/obsidian-headless/sync/abc/sync.log",
+        thresholdMs: 0,
+        pollIntervalMs: 30_000,
+        stallKills: 0,
+      },
+    });
+    const app = buildHttpApp({
+      supervisor: fakeSupervisor([vault]),
+      indexer: fakeIndexer([readyIndexer("v")]),
+    });
+    const res = await app.request("/readyz");
+    const body = (await res.json()) as ReadyzBody;
+    expect(body.vaults[0]?.lastSyncActivityAt).toBe(1_700_000_000_000);
+    expect(body.vaults[0]?.watchdog).toEqual(vault.watchdog);
+  });
+
+  test("GET /healthz stays 200 while /readyz reports 503", async () => {
+    const app = buildHttpApp({
+      supervisor: fakeSupervisor([makeVaultStatus({ slug: "v", state: "failed", pid: null })]),
+      indexer: fakeIndexer([readyIndexer("v")]),
+    });
+    expect((await app.request("/readyz")).status).toBe(503);
+    const health = await app.request("/healthz");
+    expect(health.status).toBe(200);
+    expect(await health.json()).toEqual({ ok: true });
   });
 });

@@ -3,9 +3,12 @@
  *
  * Health endpoints:
  *   - `GET /healthz` — liveness; 200 once the listener is up.
- *   - `GET /readyz`  — readiness; 200 only when every supervised vault is
- *                      `running` AND every vault's indexer is in state
- *                      `ready`. Otherwise 503.
+ *   - `GET /readyz`  — readiness AND the aggregate status surface; 200 only
+ *                      when at least one vault is configured, every
+ *                      supervised vault is `running`, and every configured
+ *                      vault's indexer is in state `ready`. Otherwise 503.
+ *                      The body (`{ok, vaults, indexers}`) is identical in
+ *                      shape on both paths.
  *
  * Versioned API:
  *   - `GET /v1/vaults` and `GET /v1/vaults/:slug` — vault listing & status
@@ -26,6 +29,7 @@ import { type Logger, createLogger } from "../log.ts";
 import { buildMcpRoutes } from "../mcp/index.ts";
 import { type Supervisor, isAllRunning } from "../obsidian/index.ts";
 import type { VaultDescriptor, VaultServiceDeps } from "../vault/files.ts";
+import { startingIndexerStatus } from "../vault/status.ts";
 import { mapErrorToHttp } from "./errors.ts";
 import { logMiddleware } from "./middleware/log.ts";
 import { getRequestId, requestIdMiddleware } from "./middleware/requestId.ts";
@@ -48,11 +52,6 @@ export interface HttpAppDeps {
   readonly config?: Config;
   /** Override default logger (tests). */
   readonly logger?: Logger;
-}
-
-function allIndexersReady(statuses: readonly IndexerStatus[]): boolean {
-  if (statuses.length === 0) return false;
-  return statuses.every((s) => s.state === "ready");
 }
 
 function buildVaultLookup(cfg: Config): (slug: string) => VaultDescriptor | null {
@@ -88,13 +87,18 @@ export function buildHttpApp(deps: HttpAppDeps = {}): Hono {
     const sup = deps.supervisor;
     const vaults = sup === undefined ? [] : sup.list();
     const idx = deps.indexer;
-    const indexers = idx === undefined ? [] : idx.list();
-    const supOk = isAllRunning(vaults);
-    const idxOk = idx === undefined ? true : allIndexersReady(indexers);
-    if (supOk && idxOk) {
-      return c.json({ vaults, indexers });
+    const registered = new Map<string, IndexerStatus>();
+    if (idx !== undefined) {
+      for (const s of idx.list()) registered.set(s.slug, s);
     }
-    return c.json({ vaults, indexers }, 503);
+    // Exactly one indexer entry per configured vault, in configuration order,
+    // so the two arrays are positionally correlatable. A vault the indexer
+    // has not registered yet is synthesized as `starting` rather than omitted
+    // — an omitted component cannot hold the response at 503 when it is
+    // unhealthy, which is the failure mode this contract exists to prevent.
+    const indexers = vaults.map((v) => registered.get(v.slug) ?? startingIndexerStatus(v.slug));
+    const ok = isAllRunning(vaults) && indexers.every((s) => s.state === "ready");
+    return c.json({ ok, vaults, indexers }, ok ? 200 : 503);
   });
 
   if (deps.supervisor !== undefined && deps.indexer !== undefined && deps.config !== undefined) {

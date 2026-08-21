@@ -25,6 +25,7 @@ import { type ToolRegistry, buildMcpServer } from "../../src/mcp/server.ts";
 import type { ToolDefinition } from "../../src/mcp/tool.ts";
 import type { Supervisor, VaultStatus } from "../../src/obsidian/index.ts";
 import type { VaultDescriptor, VaultServiceDeps } from "../../src/vault/files.ts";
+import { TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
 
 function silent(): Logger {
   return {
@@ -87,6 +88,7 @@ export async function makeMcpFixture(opts: McpFixtureOptions = {}): Promise<McpF
     embeddingModel: "x",
     logLevel: "error",
     syncConfigEnv: {},
+    syncWatchdog: TEST_WATCHDOG_OFF,
   };
 
   const indexer = await startIndexer(cfg, {
@@ -94,15 +96,22 @@ export async function makeMcpFixture(opts: McpFixtureOptions = {}): Promise<McpF
     embedder: buildHashEmbedder(8),
   });
 
+  // Non-default watchdog values on purpose: the parity tests deep-compare
+  // REST and MCP payloads, and defaults would let a dropped field pass.
   const supervisor = fakeSupervisor(
-    slugs.map((s) => ({
-      slug: s,
-      name: s,
-      state: "running",
-      pid: 1,
-      restarts: 0,
-      lastError: null,
-    })),
+    slugs.map((s) =>
+      makeVaultStatus({
+        slug: s,
+        lastSyncActivityAt: 1_700_000_000_000,
+        watchdog: {
+          state: "tailing",
+          logPath: `/cfg/obsidian-headless/sync/${s}/sync.log`,
+          thresholdMs: 300_000,
+          pollIntervalMs: 30_000,
+          stallKills: 0,
+        },
+      }),
+    ),
   );
 
   const app = buildHttpApp({ supervisor, indexer, config: cfg, logger: silent() });
