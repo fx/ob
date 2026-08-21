@@ -1,10 +1,10 @@
 /**
  * `VaultChild` ↔ watchdog integration.
  *
- * The child owns the watchdog's lifecycle and nothing else: start it after a
- * successful spawn, stop it on every path out of the attempt, and fold its
- * snapshot into `VaultStatus`. Nothing here kills a child — stall detection
- * is not in this PR.
+ * The child owns the watchdog's lifecycle: start it after a successful spawn,
+ * stop it on every path out of the attempt, and fold its snapshot into
+ * `VaultStatus`. Nothing here kills a child — the stall verdict, its kill
+ * escalation, and its accounting live in `child.stall.test.ts`.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -121,7 +121,7 @@ describe("VaultChild — watchdog wired", () => {
 
     const running = child.snapshot();
     expect(running.state).toBe("running");
-    expect(running.watchdog.state).toBe("tailing");
+    expect(running.watchdog.state).toBe("armed");
     expect(running.watchdog.logPath).toBe(logPath);
     expect(running.watchdog.thresholdMs).toBe(300_000);
     expect(running.lastSyncActivityAt).toBe(1_234);
@@ -215,7 +215,7 @@ describe("VaultChild — watchdog wired", () => {
 
     // First child resolves its log, then crashes.
     await driver.settle();
-    expect(child.snapshot().watchdog.state).toBe("tailing");
+    expect(child.snapshot().watchdog.state).toBe("armed");
     // The sync directory disappears before the replacement spawns, so the
     // new child genuinely cannot resolve a log.
     fs.remove(`${SYNC_DIR}/aaa/config.json`);

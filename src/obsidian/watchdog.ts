@@ -23,10 +23,18 @@
  * plus one `warn` once the child has outlived the threshold unresolved) is
  * the safe disposition.
  *
- * NOTE: stall detection itself is deliberately NOT in this PR. Nothing here
- * kills a child, so a resolved log reports `tailing` rather than `armed` —
- * claiming `armed` while no verdict can ever fire is the exact silent failure
- * this feature exists to remove.
+ * Stall detection rides the same poll. Staleness is anchored to the wall
+ * clock at RESOLUTION rather than to the log's own mtime: the two are
+ * different clocks and the gap between them is the bug — a wedged child
+ * leaves an arbitrarily old mtime behind, so `now - mtime` would kill a
+ * healthy child the instant it resolved an idle log. Anchoring at resolution
+ * and refreshing only on observed activity gives every child exactly one full
+ * threshold of grace, and still catches a child that hangs before writing
+ * anything, because its anchor never refreshes.
+ *
+ * The verdict is the module's only outward effect: `onStall` is invoked at
+ * most once per child lifetime and the watchdog never touches the spawn
+ * handle, so `child.ts` keeps sole ownership of process lifecycle.
  */
 
 import { stat as fsStat, readFile, readdir } from "node:fs/promises";
@@ -163,8 +171,16 @@ export function watchdogSnapshot(
   resolved: boolean,
 ): WatchdogSnapshot {
   const disabled = watchdogIsDisabled(config);
-  // `armed` is unreachable until stall detection lands; see the module note.
-  const state: WatchdogState = disabled ? "disabled" : resolved ? "tailing" : "resolving";
+  // `armed` and `tailing` are both "resolved"; the threshold is what tells
+  // them apart, because with `stallTimeoutMs === 0` no child can ever be
+  // killed for silence and claiming protection would be a lie.
+  const state: WatchdogState = disabled
+    ? "disabled"
+    : !resolved
+      ? "resolving"
+      : config.stallTimeoutMs > 0
+        ? "armed"
+        : "tailing";
   return {
     lastSyncActivityAt: disabled ? null : memory.lastSyncActivityAt,
     watchdog: {
@@ -194,15 +210,25 @@ interface Candidate {
  * Start one poll loop for one child lifetime. The returned handle is the
  * only way to observe or stop it; the watchdog never touches the spawn
  * handle, so `child.ts` keeps sole ownership of process lifecycle.
+ *
+ * `onStall` is invoked at most once per child lifetime, synchronously from
+ * the poll that detects the silence. Its argument is the `lastError` text the
+ * vault will carry, naming the threshold and the last observed sync-log
+ * mtime so a stalled vault is distinguishable from a crashed one without
+ * reading logs.
  */
-export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): WatchdogHandle {
+export function startWatchdog(
+  vault: WatchdogVault,
+  deps: WatchdogDeps,
+  onStall: (reason: string) => void,
+): WatchdogHandle {
   const config = deps.config;
   const maxTailBytes = deps.maxTailBytes ?? DEFAULT_MAX_TAIL_BYTES;
   const initial = deps.memory ?? EMPTY_WATCHDOG_MEMORY;
 
   let logPath = initial.logPath;
   let lastSyncActivityAt = initial.lastSyncActivityAt;
-  const stallKills = initial.stallKills;
+  let stallKills = initial.stallKills;
 
   /** Non-null exactly while a log is resolved for THIS child. */
   let activePath: string | null = null;
@@ -212,6 +238,17 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
   let discardStraddlingLine = false;
   let decoder = new TextDecoder();
   let warnedUnresolved = false;
+  /**
+   * Wall-clock instant of the last observed activity. Anchored at resolution
+   * — never at spawn, and never at the log's own mtime — and refreshed only
+   * when a poll observes a changed mtime or a changed inode. Meaningful only
+   * while `activePath !== null`, which is the only state that reads it.
+   */
+  let lastActivityObservedAt = 0;
+  /** Previously recorded mtime, for the activity comparison. */
+  let observedMtimeMs = 0;
+  /** One verdict per child lifetime: once a kill is in flight, never again. */
+  let stallVerdictIssued = false;
 
   const startedAt = deps.now();
   let stopped = false;
@@ -335,6 +372,11 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
     inode = logStat.inode;
     lastSyncActivityAt = logStat.mtimeMs;
     logPath = candidatePath;
+    // Anchor staleness HERE, at the wall clock, not at `logStat.mtimeMs`.
+    // Time between spawn and resolution contributes nothing: every child gets
+    // one full threshold of grace from this instant.
+    lastActivityObservedAt = deps.now();
+    observedMtimeMs = logStat.mtimeMs;
     discardStraddlingLine = midLine;
     deps.logger.info("sync log resolved", {
       vault: vault.slug,
@@ -357,6 +399,33 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
       syncDir: deps.syncDir,
       elapsedMs,
     });
+  }
+
+  /**
+   * Decide whether the silence since the anchor has crossed the threshold,
+   * and if so record the verdict and hand it to `child.ts`.
+   *
+   * `mtimeMs` is passed in rather than read from `lastSyncActivityAt` so the
+   * reason text cannot go through a "may be null" branch that is unreachable
+   * here: this runs only after a successful stat of a resolved log.
+   */
+  function evaluateStall(mtimeMs: number): void {
+    if (stopped || stallVerdictIssued || config.stallTimeoutMs === 0) return;
+    const stalledForMs = deps.now() - lastActivityObservedAt;
+    if (stalledForMs < config.stallTimeoutMs) return;
+    stallVerdictIssued = true;
+    stallKills += 1;
+    deps.logger.error("sync log stalled; killing child", {
+      vault: vault.slug,
+      logPath,
+      lastSyncActivityAt: mtimeMs,
+      stalledForMs,
+      thresholdMs: config.stallTimeoutMs,
+    });
+    onStall(
+      `sync stalled: no sync.log activity for ${config.stallTimeoutMs}ms ` +
+        `(last activity ${new Date(mtimeMs).toISOString()})`,
+    );
   }
 
   function emit(line: string): void {
@@ -461,6 +530,17 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
     }
     if (stopped) return;
 
+    // Activity is a changed mtime OR a changed inode identity, in either
+    // direction. Inode is part of the definition and not merely a tail
+    // concern: a log rotated out and replaced by a file whose mtime is
+    // preserved — or equal at the filesystem's timestamp granularity —
+    // would otherwise read as silence and get a healthy child killed one
+    // threshold later.
+    if (st.mtimeMs !== observedMtimeMs || st.inode !== inode) {
+      lastActivityObservedAt = deps.now();
+      observedMtimeMs = st.mtimeMs;
+    }
+
     if (st.inode !== inode || st.size < offset) {
       // Truncated or replaced: read the new file from its start.
       resetCursor();
@@ -473,6 +553,9 @@ export function startWatchdog(vault: WatchdogVault, deps: WatchdogDeps): Watchdo
     } else {
       offset = st.size;
     }
+    // Evaluated after the tail so the lines written just before the silence
+    // began are forwarded before the kill that ends the child.
+    evaluateStall(st.mtimeMs);
   }
 
   async function loop(): Promise<void> {

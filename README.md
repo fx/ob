@@ -24,8 +24,8 @@ docker run --rm \
 - `-v ob-data:/data` — persists synced vaults, the LanceDB store, and the
   embedding-model cache.
 - `OBSIDIAN_AUTH_TOKEN` — bootstrapped to
-  `${XDG_CONFIG_HOME:-/home/ob/.config}/obsidian-headless/auth_token` on
-  first start. Mounting a token file at the same path also works.
+  `${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}/obsidian-headless/auth_token`
+  on first start. Mounting a token file at the same path also works.
 - `VAULTS_JSON` — the vaults to sync; see the env-var table below.
 
 ## Configuration
@@ -36,7 +36,7 @@ this table mirrors it for convenience.
 
 | Variable | Required | Description |
 |---|---|---|
-| `OBSIDIAN_AUTH_TOKEN` | yes (unless token file mounted) | Token written verbatim to `${XDG_CONFIG_HOME:-/home/ob/.config}/obsidian-headless/auth_token` at startup if the file is missing. If both env and file are present, the env value wins (file overwritten, mode `0600`). |
+| `OBSIDIAN_AUTH_TOKEN` | yes (unless token file mounted) | Token written verbatim to `${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}/obsidian-headless/auth_token` at startup if the file is missing. If both env and file are present, the env value wins (file overwritten, mode `0600`). |
 | `VAULTS_JSON` | yes | JSON array of vault objects: `[{"name":"v","slug":"v","e2eePassword":"..."}]`. `slug` defaults to `name` lower-cased + kebab-cased. `e2eePassword` is optional. Missing or non-array `VAULTS_JSON` causes a non-zero exit before any port opens. |
 | `DATA_DIR` | no | Root directory for vaults, LanceDB store, and model cache. Default `/data`. |
 | `HTTP_PORT` | no | HTTP listener port. Default `3000`. |
@@ -52,6 +52,9 @@ this table mirrors it for convenience.
 | `OB_SYNC_CONFLICT_STRATEGY` | no | One of `merge`, `conflict`. Forwarded to `ob sync-config --conflict-strategy`. Empty string clears. |
 | `OB_SYNC_DEVICE_NAME` | no | Forwarded verbatim to `ob sync-config --device-name`. Empty string clears. |
 | `OB_SYNC_CONFIGS` | no | Comma-separated subset of `app,appearance,appearance-data,hotkey,core-plugin,core-plugin-data,community-plugin,community-plugin-data`. Forwarded to `ob sync-config --configs`. Empty string clears. |
+| `OB_SYNC_STALL_TIMEOUT_SECONDS` | no | Seconds of sync-log silence after which a running `ob sync` child is treated as crashed and killed (SIGTERM, then SIGKILL after 10 s). Default `300`. `0` disarms the kill while leaving resolution, tailing, and `lastSyncActivityAt` in place. Must match `^\d+$` and be at most `86400`; anything else exits 78 at startup. |
+| `OB_SYNC_STALL_POLL_SECONDS` | no | Seconds between polls of the resolved sync log. Default `30`. Must be at least `1`, at most `86400`, and — when the timeout is greater than `0` — no greater than the timeout. |
+| `OB_SYNC_LOG_TAIL` | no | `true` (default) or `false`. When `true`, newly appended sync-log lines are forwarded to the parent's structured logs as `ob output` with `stream: "sync.log"`. |
 
 The `OB_SYNC_*` family runs `ob sync-config` once per vault between
 `ob sync-setup` and `ob sync --continuous`. Unset vars omit the
@@ -74,16 +77,67 @@ to skip the local model entirely.
 
 ### Health & readiness
 
-- `GET /healthz` — liveness; returns 200 once the process is up. Wired into
-  the image's `HEALTHCHECK`.
-- `GET /readyz` — readiness; returns 200 only after every configured vault
-  has completed `sync-setup` and its initial index pass.
-- `GET /metrics` — text/plain Prometheus exposition.
+- `GET /healthz` — liveness; returns 200 `{"ok":true}` once the process is up.
+  Wired into the image's `HEALTHCHECK`. Its status code never varies with
+  vault, supervisor, or indexer state.
+- `GET /readyz` — readiness **and** the aggregate status surface. Returns
+  `{ok, vaults, indexers}` on both paths, and 200 only when at least one vault
+  is configured, every configured vault is `running`, and every configured
+  vault's indexer is `ready`. Otherwise 503, with the same body.
+- `GET /metrics` — text/plain Prometheus exposition. **Planned, not
+  implemented yet**; alerting keys on `/readyz` in the meantime.
 
 The image's `HEALTHCHECK` deliberately probes `/healthz` rather than
 `/readyz` so a long initial scan doesn't flap the container as unhealthy.
 Orchestrators that want readiness-gated traffic should configure their own
 probe against `/readyz`.
+
+> **The Kubernetes liveness probe MUST stay pointed at `/healthz`.** Do not
+> "improve" the deployment by repointing it at `/readyz`. The container is a
+> single process hosting the HTTP API *and* every vault child, so failing
+> liveness because one vault is unhealthy restarts the API and every healthy
+> vault to recover one child — and a vault that is failing for an external
+> reason turns into an unbounded pod restart loop. `/readyz` is the readiness
+> probe and the alerting surface; `/healthz` is the restart decision.
+
+#### Recognizing a stalled vault
+
+An `ob sync --continuous` child can stop making progress while staying alive
+and never exiting. The supervisor watches each vault's upstream `sync.log` and
+treats prolonged silence as a crash: SIGTERM, then SIGKILL 10 seconds later,
+then the ordinary restart backoff. Three such kills within an hour — or the
+usual ten crashes in five minutes — put the vault in `failed`, where restarts
+stop and `/readyz` reports 503 with the vault listed.
+
+What to look at in the `/readyz` body, per vault:
+
+- **`lastSyncActivityAt`** — epoch-ms mtime of the vault's `sync.log` as of the
+  last poll. A value far in the past is the primary signal; during a wedge it
+  stays pinned at the moment the child stopped writing.
+- **`watchdog.stallKills`** — cumulative stall kills for that vault over the
+  process lifetime. Climbing means the vault keeps wedging and getting
+  replaced; three inside an hour fails it.
+- **`lastError`** — reads `sync stalled: no sync.log activity for <N>ms (last
+  activity <timestamp>)` after a stall kill, and `sync stall-loop: 3 stall
+  kills within 3600000ms` once the ceiling is reached. That is what tells a
+  stalled vault apart from a crashed one without reading logs.
+- **`watchdog.state`** — `armed` (log resolved, stall detection active),
+  `tailing` (resolved, kill disarmed via `OB_SYNC_STALL_TIMEOUT_SECONDS=0`),
+  `resolving` (no log resolved for the current child — the vault is
+  *unprotected*, though not unhealthy), or `disabled`. A `resolving` watchdog
+  never affects the `/readyz` status code; it is a loss of the safety net, not
+  a loss of service, and it is worth its own alert.
+
+> A **fresh** `lastSyncActivityAt` proves only that the child is still
+> *writing*, not that it is syncing. A vault stuck in a
+> `Disconnected` → `Waiting to connect to server` → `Connecting...` reconnect
+> loop keeps its log mtime current while syncing nothing, and the watchdog
+> will not kill it. The watchdog detects total silence, not lack of progress.
+
+The recommended rollout on a new deployment is
+`OB_SYNC_STALL_TIMEOUT_SECONDS=0` for one cycle: resolution, tailing, and
+`lastSyncActivityAt` all keep working, so you can see the real workload's
+write cadence before arming the kill.
 
 ### Scoped MCP sessions
 
