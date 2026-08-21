@@ -14,7 +14,15 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SyncWatchdogConfig } from "../../src/config/index.ts";
@@ -273,6 +281,13 @@ describe("watchdog against a real filesystem", () => {
       await fx.driver.settle();
       fx.driver.advance(299_000);
       appendFileSync(logPath, "Fully synced\n");
+      // Move the mtime explicitly. Activity is keyed on mtime and inode, never
+      // on size, and a filesystem with coarse timestamp granularity could
+      // otherwise land the append in the same tick as the file's creation —
+      // which would make this test pass or fail on the host's granularity
+      // rather than on the code under test.
+      const st = statSync(logPath);
+      utimesSync(logPath, st.atime, new Date(st.mtimeMs + 1_000));
       await fx.driver.nextPoll();
       expect(fx.lines).toEqual(["Fully synced"]);
 

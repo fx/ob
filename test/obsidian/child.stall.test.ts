@@ -312,6 +312,36 @@ describe("VaultChild — SIGTERM ignored", () => {
   });
 });
 
+describe("VaultChild — the replacement child after a stall kill", () => {
+  test("reports `resolving` while still carrying the killed child's evidence", async () => {
+    const h = harness();
+    await h.stallOnce();
+    await until(() => h.child.snapshot().restarts === 1, "restart counted");
+
+    // The sync directory goes away before the replacement spawns, so the new
+    // child genuinely cannot re-resolve a log.
+    h.fs.remove(`${SYNC_DIR}/aaa/config.json`);
+    await until(() => h.driver.count(BACKOFF_MS) > 0, "backoff parked");
+    h.driver.release(BACKOFF_MS);
+    await until(() => h.child.snapshot().state === "running", "replacement running");
+    await h.poll();
+
+    const snap = h.child.snapshot();
+    // Protection is NOT in force for this child, and the non-null logPath
+    // must not be read as if it were.
+    expect(snap.watchdog.state).toBe("resolving");
+    expect(snap.watchdog.logPath).toBe(LOG_PATH);
+    expect(snap.lastSyncActivityAt).toBe(1_000);
+    // The stall evidence survives the child that produced it.
+    expect(snap.watchdog.stallKills).toBe(1);
+    expect(snap.lastError).toContain("sync stalled");
+
+    h.child.requestStop();
+    h.crashCurrent(0);
+    await h.loop;
+  });
+});
+
 describe("VaultChild — a progressing sync is never killed", () => {
   test("an hour of 30-second writes leaves the vault running with zero stall kills", async () => {
     const h = harness();
@@ -357,6 +387,41 @@ describe("VaultChild — stall ceiling", () => {
     // No fourth child: `failed` is terminal until the process restarts.
     expect(h.signals).toEqual(["SIGTERM", "SIGTERM", "SIGTERM"]);
     expect(h.logged.some((l) => l.msg === "ob sync stall-loop ceiling reached")).toBe(true);
+  });
+
+  test("failing one vault leaves another vault's child supervised normally", async () => {
+    // One child per vault is the whole isolation story, so this is really a
+    // guard against any stall state accidentally living at module scope
+    // rather than per instance — a shared `stallTimes` array would fail the
+    // second vault along with the first.
+    const failing = harness({ stallLoop: { windowMs: 60 * 60_000, maxStalls: 3 } });
+    const healthy = harness();
+    await healthy.awaitArmed();
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await failing.stallOnce();
+      await until(() => failing.child.snapshot().restarts === attempt, `restart ${attempt}`);
+      if (attempt === 3) break;
+      const delay = BACKOFF_MS * 2 ** (attempt - 1);
+      await until(() => failing.driver.count(delay) > 0, `backoff ${delay} parked`);
+      failing.driver.release(delay);
+      // The healthy vault keeps writing throughout.
+      healthy.fs.append(LOG_PATH, "Fully synced\n", 1_000 + attempt * POLL_MS);
+      healthy.driver.advance(POLL_MS);
+      await healthy.poll();
+    }
+    await failing.loop;
+
+    expect(failing.child.snapshot().state).toBe("failed");
+    const other = healthy.child.snapshot();
+    expect(other.state).toBe("running");
+    expect(other.watchdog.stallKills).toBe(0);
+    expect(other.lastError).toBeNull();
+    expect(healthy.signals).toEqual([]);
+
+    healthy.child.requestStop();
+    healthy.crashCurrent(0);
+    await healthy.loop;
   });
 
   test("a stall kill never counts as healthy uptime, so the backoff keeps growing", async () => {
