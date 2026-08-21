@@ -45,7 +45,7 @@ This change MUST satisfy the project's standing testing rules (see [Architecture
 - Child processes MUST be driven through the existing `Spawner` fake (`test/helpers/fakeSpawner.ts`). A "hung" child is a scripted handle whose `exitWhen` promise is never resolved except by the test's own `onKill` hook; that is the fixture the whole feature turns on.
 - Filesystem reads (directory scan, `config.json` parse, `stat`, ranged read) MUST go through an injected surface so unit tests can drive error shapes (`ENOENT`, `EACCES`, malformed JSON, mid-poll truncation) without a real filesystem. At least one test per feature area MUST additionally run against a real `Bun.tmpdirSync()` tree so the injected surface cannot drift from real `fs` semantics.
 - The `ob` binary MUST NOT be called against real Obsidian servers. The standing "one `ob` integration test per top-level change" rule is satisfied by the existing `OB_BIN`-gated `ob --help` smoke test; this change MUST NOT add new `ob` integration tests that touch real Obsidian endpoints.
-- `/readyz` body changes MUST be asserted through the real Hono app (`app.fetch`), as `test/http/` does today, on both the 200 and the 503 path.
+- `/readyz` body changes MUST be asserted through the real Hono app (`app.fetch`), as `test/http.test.ts` and `test/http/` do today, on both the 200 and the 503 path.
 - LanceDB-touching code is unaffected; no new LanceDB tests required.
 - Biome MUST pass with the project config; `bunx tsc --noEmit` MUST pass.
 - `// @ts-expect-error`, `// biome-ignore`, and `// eslint-disable*` MUST carry a one-line same-comment justification.
