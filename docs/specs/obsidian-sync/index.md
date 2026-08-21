@@ -394,12 +394,13 @@ interface Supervisor {
   | Value | Meaning |
   |---|---|
   | `disabled` | Stall detection and log tailing are both switched off; nothing is resolved and nothing is polled. |
-  | `resolving` | Configured, but the sync log is not resolved — the watchdog is dormant and this vault is not protected. This does not imply a poll is in flight: it is also the value before the vault's first child is spawned, during `sync-setup` and `sync-config`, and during restart backoff. |
+  | `resolving` | Configured, but the sync log is not resolved — the watchdog is dormant and this vault is not protected. This does not imply a poll is in flight: it is also the value before the vault's first child is spawned and during `sync-setup` and `sync-config`, when nothing is resolved yet. |
   | `tailing` | The log is resolved and being tailed, but stall detection is off (`OB_SYNC_STALL_TIMEOUT_SECONDS=0`); no child will be killed for silence. |
   | `armed` | The log is resolved and stall detection is active. |
 
 - Before a vault's first child is spawned, `watchdog.state` MUST be `disabled` when configuration disables the watchdog entirely and `resolving` otherwise, with `logPath` and `lastSyncActivityAt` both `null` and `stallKills` zero. A vault therefore has a fully-formed `watchdog` object from the moment the supervisor returns, matching the existing guarantee that `list()` reflects every configured vault immediately.
 - `lastSyncActivityAt` and `watchdog` MUST retain their most recent values while the vault has no running child — during restart backoff, and after the vault has reached `failed`. An operator reading the status of a vault that has just been killed for stalling MUST still see the mtime that proves it stalled. Whether a child is running is what the vault's own `state` field reports.
+- Retention governs only what the surface reports while no child exists; it does not extend a resolution across children. When a replacement child is spawned, `watchdog.state` MUST return to `resolving` — the new child's log genuinely is not resolved yet and the vault is not protected until it is — while `logPath` and `lastSyncActivityAt` MUST keep their previous values until re-resolution replaces them. Blanking those two at spawn would destroy the stall evidence in exactly the window an operator is looking at it, and reporting `armed` before the new child's log resolves would claim a protection that is not in force.
 - `watchdog.thresholdMs` and `watchdog.pollIntervalMs` MUST report the resolved effective configuration, so an operator can confirm from the status surface alone which threshold is actually in force.
 - `watchdog.stallKills` MUST be the cumulative count of stall kills for that vault over the process lifetime, not the count inside the rolling stall window.
 
