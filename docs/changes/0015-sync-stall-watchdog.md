@@ -190,12 +190,12 @@ The poll loop uses the injected `sleep` raced against a per-lifetime stop signal
 
 ## Tasks
 
-- [ ] **Docs: this change document + spec updates** (this PR)
-  - [ ] Add `docs/changes/0015-sync-stall-watchdog.md`
-  - [ ] Add the Sync-activity-log and Sync-stall-watchdog sections to `docs/specs/obsidian-sync/index.md`, extend its public `VaultStatus`, module layout, and error taxonomy, and append a Changelog row
-  - [ ] Pin the liveness/readiness split in `docs/specs/architecture/index.md` Observability, add the `OB_SYNC_*` config-table row, and append a Changelog row
-  - [ ] Rewrite `docs/specs/rest-api/index.md` Health endpoints with the exact `/readyz` body and 200/503 rules, and append a Changelog row
-  - [ ] Add this change to `docs/index.yml` (`status: draft`) and a row to the `docs/index.md` Changes table
+- [x] **Docs: this change document + spec updates** (this PR)
+  - [x] Add `docs/changes/0015-sync-stall-watchdog.md`
+  - [x] Add the Sync-activity-log and Sync-stall-watchdog sections to `docs/specs/obsidian-sync/index.md`, extend its public `VaultStatus`, module layout, and error taxonomy, and append a Changelog row
+  - [x] Pin the liveness/readiness split in `docs/specs/architecture/index.md` Observability, add the `OB_SYNC_*` config-table row, and append a Changelog row
+  - [x] Rewrite `docs/specs/rest-api/index.md` Health endpoints with the exact `/readyz` body and 200/503 rules, and append a Changelog row
+  - [x] Add this change to `docs/index.yml` (`status: draft`) and a row to the `docs/index.md` Changes table
 
 - [ ] **PR 2 — Observability: sync-log resolution, tail, and status surface** (no killing)
   - [ ] `src/config/index.ts`: add `loadSyncWatchdogConfig(env)` returning `{ stallTimeoutMs, pollIntervalMs, logTail }`, plumbed onto `Config` as `syncWatchdog`; validate per the spec (integer form, poll ≥ 1, poll ≤ timeout when timeout > 0, `OB_SYNC_LOG_TAIL` exactly `true`/`false`), throwing `ConfigError` (exit 78) naming the offending var and value
