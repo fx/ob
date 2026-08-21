@@ -122,3 +122,10 @@ changes:
     spec: mcp-server
     status: complete
     depends_on: ["0005", "0008", "0012"]
+  - id: "0015"
+    name: sync-stall-watchdog
+    path: changes/0015-sync-stall-watchdog.md
+    description: Per-vault sync.log stall watchdog that kills a hung-but-alive ob sync child so the restart loop takes over, incremental sync.log tailing into the parent logger, and lastSyncActivityAt + watchdog state on the aggregate /readyz surface.
+    spec: obsidian-sync
+    status: draft
+    depends_on: ["0002", "0011"]
