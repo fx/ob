@@ -156,7 +156,7 @@ The upstream `ob sync --continuous` child writes its progress to its own per-vau
 - `<vaultId>` is assigned by the upstream CLI and is not known to the supervisor up front. It MUST be resolved by reading each immediate subdirectory of `${XDG_CONFIG_HOME:-$HOME/.config}/obsidian-headless/sync/` and selecting the one whose `config.json` carries a `vaultPath` that resolves to the same absolute path as the vault's working directory `<DATA_DIR>/vaults/<slug>`. The comparison MUST be between normalized absolute paths; a prefix match MUST NOT be accepted (`/data/vaults/v` MUST NOT match a `vaultPath` of `/data/vaults/vault2`).
 - Resolution MUST be attempted only after the vault's `ob sync --continuous` child has been spawned — the `sync/` directory does not exist until the CLI has performed its first sync setup — and MUST be retried on every subsequent poll until it succeeds or the child exits.
 - An entry whose `config.json` is missing, unreadable, or unparseable MUST be skipped individually and MUST NOT abort the scan. The supervisor MUST examine every remaining immediate subdirectory and MUST select a valid matching candidate if one exists. One stale or junk directory sitting beside the real one would otherwise leave the watchdog permanently dormant for a vault whose log was resolvable all along.
-- Resolution MUST fail soft. If the `sync/` directory is absent, or no readable entry matches after the whole scan, the supervisor MUST NOT mark the vault `failed`, MUST NOT kill or restart the child, and MUST NOT propagate the error out of the poll. The condition MUST be observable as `watchdog.state === "resolving"` with `watchdog.logPath === null` on the vault's [public status](#public-surface-to-the-rest-of-the-app).
+- Resolution MUST fail soft. If the `sync/` directory is absent, or no readable entry matches after the whole scan, the supervisor MUST NOT mark the vault `failed`, MUST NOT kill or restart the child, and MUST NOT propagate the error out of the poll. The condition MUST be observable as `watchdog.state === "resolving"` on the vault's [public status](#public-surface-to-the-rest-of-the-app). What `logPath` reads in that state is governed there and not restated here: `null` for a vault that has never resolved a log, the last resolved path for one that has.
 - A vault whose watchdog never resolves is **unprotected, not unhealthy**. Its `watchdog.state` MUST NOT influence the `/readyz` status code — an unarmed watchdog is a loss of the safety net, never a loss of service, and failing readiness on it would turn an upstream layout change into a self-inflicted outage across every vault at once. The condition is reported in the `/readyz` body and is what an operator alerts on; see [REST API › Health endpoints](../rest-api/index.md#health-endpoints).
 - Once the child has been running longer than the stall threshold with the log still unresolved, the supervisor MUST log at `warn` naming the vault and the directory it searched, and MUST NOT repeat that warning more than once per child lifetime. Silence here would be indistinguishable from a working watchdog, which is the exact condition that let the original outage run for four and a half days.
 - If more than one entry matches the vault path, the supervisor MUST select the entry whose `config.json` has the most recent mtime, breaking an exact mtime tie by taking the lexicographically greatest directory name, and MUST log one `warn` naming every candidate. A stale directory left behind by a re-link is the expected cause, and staying dormant in that case would silently forfeit stall detection for that vault. The tiebreak is required rather than left to directory-read order: two `config.json` files written in the same filesystem timestamp tick would otherwise resolve differently between polls, so a vault could silently swap which log it watches.
@@ -180,7 +180,7 @@ The upstream `ob sync --continuous` child writes its progress to its own per-vau
 
 #### Scenario: Sync directory does not exist yet
 
-- **GIVEN** vault `v` has a running child and `${XDG_CONFIG_HOME}/obsidian-headless/sync/` does not exist
+- **GIVEN** vault `v` has a running child, has never resolved a log, and `${XDG_CONFIG_HOME}/obsidian-headless/sync/` does not exist
 - **WHEN** the watchdog polls
 - **THEN** the vault state remains `running`
 - **AND** the vault's status reports `watchdog.state === "resolving"`, `watchdog.logPath === null`, and `lastSyncActivityAt === null`
@@ -188,7 +188,7 @@ The upstream `ob sync --continuous` child writes its progress to its own per-vau
 
 #### Scenario: Watchdog never arms
 
-- **GIVEN** vault `v` whose child is running and whose sync log is permanently unresolvable
+- **GIVEN** vault `v` whose child is running, which has never resolved a log, and whose sync log is permanently unresolvable
 - **WHEN** the child has been running for longer than the stall threshold
 - **THEN** exactly one `warn` is logged for that child naming the vault and the searched directory
 - **AND** the vault reports `state: "running"`, `watchdog.state === "resolving"`, `watchdog.logPath === null`, `lastSyncActivityAt === null`
@@ -268,6 +268,14 @@ An `ob sync --continuous` child can stop making progress while remaining alive a
 - **THEN** the child receives `SIGTERM`
 - **AND** the vault's `restarts` increments and a replacement child is spawned after the usual backoff
 - **AND** `lastError` names the stall and carries the last observed sync-log mtime
+
+#### Scenario: Replacement child before its log resolves
+
+- **GIVEN** vault `v` was killed for stalling and a replacement child has just been spawned
+- **WHEN** the replacement's log has not been re-resolved yet
+- **THEN** `watchdog.state` is `resolving` — protection is not in force for this child
+- **AND** `watchdog.logPath` and `lastSyncActivityAt` still carry the previous child's values, so the evidence of the stall is still readable
+- **AND** the non-`null` `logPath` is NOT read as protection being in force
 
 #### Scenario: Unresponsive to SIGTERM
 
@@ -388,7 +396,7 @@ interface Supervisor {
 - The supervisor MUST NOT expose raw child handles to other modules.
 - `lastSyncActivityAt` MUST be the epoch-millisecond mtime of the resolved sync log as of the most recent successful poll — the upstream's own timestamp, not the instant the supervisor observed it. During a wedge it stays pinned at the moment the child stopped writing, which is what makes it the field an operator alerts on.
 - `lastSyncActivityAt` is **last observed log activity, not last successful sync**, and MUST NOT be documented or presented as the latter. The mtime advances on any line the upstream writes, including the `Disconnected` / `Waiting to connect to server` / `Connecting...` sequence a reconnect loop emits. A recent value therefore proves only that the child is still writing — a vault churning through reconnects indefinitely has a fresh `lastSyncActivityAt` and is not syncing. Distinguishing the two would require parsing log contents, which [Change 0015](../../changes/0015-sync-stall-watchdog.md) rules out; the watchdog deliberately detects total silence, not unsuccessful progress.
-- `lastSyncActivityAt` MUST be present on every `VaultStatus` and MUST be `null`, never absent, while the value is unknown (log not yet resolved, or watchdog disabled). This matches the existing `pid` / `lastError` convention, so consumers never have to distinguish "absent" from "unknown".
+- `lastSyncActivityAt` MUST be present on every `VaultStatus` and MUST be `null`, never absent, while the value is unknown. It follows the same never-versus-not-yet split as `logPath` below: `null` only while the vault has **never** resolved a log or the watchdog is `disabled`, and thereafter the most recently observed mtime — including while `state` is `resolving` for a later child. It matches the existing `pid` / `lastError` convention, so consumers never have to distinguish "absent" from "unknown".
 - `watchdog` MUST be present on every `VaultStatus`. `watchdog.state` describes the watchdog's configuration and resolution progress, not whether a poll is currently in flight, and MUST have exactly these meanings:
 
   | Value | Meaning |
@@ -398,7 +406,17 @@ interface Supervisor {
   | `tailing` | The log is resolved and being tailed, but stall detection is off (`OB_SYNC_STALL_TIMEOUT_SECONDS=0`); no child will be killed for silence. |
   | `armed` | The log is resolved and stall detection is active. |
 
-- Before a vault's first child is spawned, `watchdog.state` MUST be `disabled` when configuration disables the watchdog entirely and `resolving` otherwise, with `logPath` and `lastSyncActivityAt` both `null` and `stallKills` zero. A vault therefore has a fully-formed `watchdog` object from the moment the supervisor returns, matching the existing guarantee that `list()` reflects every configured vault immediately.
+- `state` and `logPath` answer two different questions and MUST NOT be derived from each other. `state` answers "is protection in force for the child running now". `logPath` answers "has this vault ever resolved a log, and which one". `resolving` covers both "never resolved at all" and "not resolved for this child yet", and only `logPath` distinguishes them:
+
+  | `state` | `logPath` |
+  |---|---|
+  | `disabled` | always `null` — nothing is ever resolved |
+  | `resolving` | `null` before the vault's first successful resolution; the last successfully resolved path thereafter |
+  | `tailing` | always non-`null` — the state is reachable only once resolved |
+  | `armed` | always non-`null` — the state is reachable only once resolved |
+
+- `logPath` MUST be `null` until the vault's first successful resolution, and MUST thereafter report the most recently resolved path — including while `state` is `resolving` for a later child. A non-`null` `logPath` alongside `resolving` therefore means "resolved for a previous child, not yet for this one" and MUST NOT be read as protection being in force; `state` alone answers that. Every other rule in this spec that names a `state` together with a `logPath` value is an instance of this rule and MUST NOT be read as imposing a separate constraint.
+- Before a vault's first child is spawned, `watchdog.state` MUST be `disabled` when configuration disables the watchdog entirely and `resolving` otherwise, with `stallKills` zero. This is the never-resolved case of the rule above, so `logPath` and `lastSyncActivityAt` are both `null` here. A vault therefore has a fully-formed `watchdog` object from the moment the supervisor returns, matching the existing guarantee that `list()` reflects every configured vault immediately.
 - `lastSyncActivityAt` and `watchdog` MUST retain their most recent values while the vault has no running child — during restart backoff, and after the vault has reached `failed`. An operator reading the status of a vault that has just been killed for stalling MUST still see the mtime that proves it stalled. Whether a child is running is what the vault's own `state` field reports.
 - Retention governs only what the surface reports while no child exists; it does not extend a resolution across children. When a replacement child is spawned, `watchdog.state` MUST return to `resolving` — the new child's log genuinely is not resolved yet and the vault is not protected until it is — while `logPath` and `lastSyncActivityAt` MUST keep their previous values until re-resolution replaces them. Blanking those two at spawn would destroy the stall evidence in exactly the window an operator is looking at it, and reporting `armed` before the new child's log resolves would claim a protection that is not in force.
 - `watchdog.thresholdMs` and `watchdog.pollIntervalMs` MUST report the resolved effective configuration, so an operator can confirm from the status surface alone which threshold is actually in force.
