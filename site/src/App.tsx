@@ -50,7 +50,10 @@ const FEATURES = [
 const SCOPES = [
   { url: "/mcp", sees: "Every vault" },
   { url: "/mcp/<slug>", sees: "One vault" },
-  { url: "/mcp/<slug>/<folder>", sees: "That folder, presented as the root" },
+  {
+    url: "/mcp/<slug>/<folder>/<subfolder>",
+    sees: "That folder, at any depth, presented as the root",
+  },
 ];
 
 const TOOL_GROUPS = [

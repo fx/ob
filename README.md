@@ -19,7 +19,7 @@ provision on the server:
 |-----|--------------|
 | `/mcp` | Every configured vault. |
 | `/mcp/<slug>` | One vault. |
-| `/mcp/<slug>/<folder>` | That folder, presented as the vault root. |
+| `/mcp/<slug>/<folder>/<subfolder>` | That folder, at any depth, presented as the vault root. |
 
 Scoping confines a cooperating client and is not an access control; see
 [Scoped MCP sessions](#scoped-mcp-sessions) for the details and caveats.
