@@ -7,6 +7,8 @@ LanceDB store, and exposes both a REST API and a Streamable HTTP/SSE MCP
 server so an LLM agent can CRUD documents and search them by natural
 language. One container, one process, one image — no orchestration required.
 
+Landing page: <https://ob.fx.gd>
+
 ## Run
 
 The canonical invocation:
