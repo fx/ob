@@ -6,7 +6,8 @@
     ".": {
       "release-type": "node",
       "changelog-path": "CHANGELOG.md",
-      "component": ""
+      "component": "",
+      "exclude-paths": ["site"]
     }
   }
 }

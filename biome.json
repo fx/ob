@@ -18,7 +18,8 @@
       "package-lock.json",
       "yarn.lock",
       "pnpm-lock.yaml",
-      ".tailscale/**"
+      ".tailscale/**",
+      "site/**"
     ]
   },
   "formatter": {
