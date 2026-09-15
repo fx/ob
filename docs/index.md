@@ -9,6 +9,7 @@
 | [vault-indexer](specs/vault-indexer/) | Chokidar watcher, Markdown chunker, embedding providers, and per-vault LanceDB store. | active |
 | [rest-api](specs/rest-api/) | Vault-scoped HTTP CRUD over arbitrary files plus natural-language search over Markdown. | active |
 | [mcp-server](specs/mcp-server/) | MCP HTTP/SSE server exposing the same surface as REST as MCP tools and resources. | active |
+| [landing-site](specs/landing-site/) | Minimal static one-page landing site at ob.fx.gd, published to GitHub Pages. | active |
 
 ## Changes
 
@@ -29,3 +30,4 @@
 | 0013 | [pdf-text-extraction](changes/0013-pdf-text-extraction.md) | [mcp-server](specs/mcp-server/) | complete | 0004, 0005 |
 | 0014 | [mcp-folder-scoping](changes/0014-mcp-folder-scoping.md) | [mcp-server](specs/mcp-server/) | complete | 0005, 0008, 0012 |
 | 0015 | [sync-stall-watchdog](changes/0015-sync-stall-watchdog.md) | [obsidian-sync](specs/obsidian-sync/) | complete | 0002, 0011 |
+| 0016 | [landing-site](changes/0016-landing-site.md) | [landing-site](specs/landing-site/) | draft | — |

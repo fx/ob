@@ -22,6 +22,10 @@ specs:
     path: specs/mcp-server/
     description: MCP HTTP/SSE server exposing the same surface as REST as MCP tools and resources.
     status: active
+  - name: landing-site
+    path: specs/landing-site/
+    description: Minimal static one-page landing site at ob.fx.gd, published to GitHub Pages.
+    status: active
 
 changes:
   - id: "0001"
@@ -129,3 +133,10 @@ changes:
     spec: obsidian-sync
     status: complete
     depends_on: ["0002", "0011"]
+  - id: "0016"
+    name: landing-site
+    path: changes/0016-landing-site.md
+    description: Static site/ package and Pages workflow publishing a one-page ob landing site at ob.fx.gd, with site/** excluded from CI and Docker workflows.
+    spec: landing-site
+    status: draft
+    depends_on: []
