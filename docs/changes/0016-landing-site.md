@@ -70,7 +70,7 @@ One PR copies `fx/tx`'s site and rewrites only what is `tx`-specific:
 - A `pull_request` trigger on the same `site/**` and `.github/workflows/pages.yml` paths, with the `deploy` job gated by `if: github.event_name != 'pull_request'`. PRs build; only `main` deploys.
 - Everything else as in `fx/tx`: `workflow_dispatch`, a `pages` concurrency group without cancellation, least-privilege job permissions, `upload-pages-artifact` of `site/dist`, `deploy-pages` into the `github-pages` environment, and no `configure-pages` step (a custom domain means no base path).
 
-`README.md` gains one line under the intro linking to `https://ob.fx.gd`.
+`README.md` gains one line under the intro linking to `https://ob.fx.gd`, and (by the amendment in Decisions) a short "What an agent gets" section with the scoped-session pitch and the tool list.
 
 ### Decisions
 
@@ -81,7 +81,9 @@ One PR copies `fx/tx`'s site and rewrites only what is `tx`-specific:
   - Headline: "Obsidian vaults, for agents." Description: "`ob` keeps your Obsidian vaults synced, indexes them for natural-language search, and serves them over REST and MCP, from a single container."
   - Run command, one line in the copy block (it scrolls horizontally): `docker run -p 3000:3000 -v ob-data:/data -e OBSIDIAN_AUTH_TOKEN=… -e VAULTS_JSON='[{"name":"vault"}]' ghcr.io/fx/ob:latest`. Buttons: "Read the docs" → README, "Configuration" → README `#configuration`.
   - Capability cells: **Sync** (official Obsidian Sync client, bidirectional, restarts itself when sync stalls) · **Search** (hybrid vector + full-text search over Markdown) · **REST and MCP** (the same file and search operations on both, with per-agent folder scoping on MCP) · **One container** (one process, one image, one volume).
-  - "Connect an agent": a code block holding `{ "mcpServers": { "ob": { "type": "http", "url": "http://<host>:3000/mcp" } } }`, followed by: "No built-in authentication. Keep it on a private network or behind a proxy that authenticates."
+  - Path-scoped sessions, directly after the capability grid. Headline: "One vault, a folder per agent." Pitch: each agent gets its own folder in a shared vault, presented as the vault root, with nothing to provision on the server. URL shapes: `/mcp` → every vault; `/mcp/<vault>` → one vault; `/mcp/<vault>/<folder>` → that folder, presented as the root. "Connect an agent": a code block holding `{ "mcpServers": { "ob": { "type": "http", "url": "http://<host>:3000/mcp/<vault>/agents/<name>" } } }`, followed by: "Scoping confines a cooperating client. It is not access control." and "No built-in authentication. Keep it on a private network or behind a proxy that authenticates."
+  - MCP tools, names only, grouped: **Files** `list_files` `read_file` `write_file` `append_file` `patch_file` `delete_file` · **Folders** `list_folders` `create_folder` `delete_folder` · **Vaults and search** `list_vaults` `vault_status` `search`. The README carries the same pitch and list in a short "What an agent gets" section above `## Run`.
+  - The path-scoped sessions section and the tool list are a user-approved amendment to the spec's content list, made in this same PR.
   - Header: `MIT` badge next to the wordmark. Footer: MIT licensed · GitHub · Releases · Issues. The root `LICENSE` (MIT) is already in place.
 - **Decision:** exclude `site/` from release-please, and title the implementing PR `docs(site)` rather than `feat(site)` (which `fx/tx` used).
   - **Why:** in `fx/ob`, `feat` drives a minor bump, a `vX.Y.Z` tag, and a full image publish, and none of that ships the site. A title convention alone would not hold for future PRs; the path exclusion does.
@@ -94,7 +96,7 @@ One PR copies `fx/tx`'s site and rewrites only what is `tx`-specific:
 - Documentation pages, an API reference, a changelog view, or anything past one page.
 - Hosting docs from `docs/` on Pages.
 - Analytics, a newsletter, or any form.
-- Changing the README's content beyond the one link.
+- Changing the README's content beyond the one link and the "What an agent gets" section.
 - Extracting shared site code into a package shared with `fx/tx`.
 
 ## Tasks
@@ -109,6 +111,7 @@ One PR copies `fx/tx`'s site and rewrites only what is `tx`-specific:
   - [x] Add the `https://ob.fx.gd` link to `README.md`
   - [x] Verify locally: `bun run build` passes in `site/`; `bun run dev` serves on `0.0.0.0:5173`; check the page at 360 px wide and in both themes through DOM inspection
   - [x] Confirm the PR's `Pages` build job passes and its deploy job is skipped
+  - [x] Feature path-scoped sessions and the grouped MCP tool list on the site and in `README.md` (user-approved amendment)
 - [x] Configure repository settings (maintainer, manual): Pages source = GitHub Actions; custom domain `ob.fx.gd`; homepage URL `https://ob.fx.gd`; `github-pages` environment deploys from `main` only (verified). Enforce HTTPS moved to docs/tasks.md — GitHub issues the `ob.fx.gd` certificate only after the first deploy, which this PR's merge triggers
 - [x] Live-site verification moved to docs/tasks.md — it is a post-merge validation that cannot run before the deploy this PR triggers
 

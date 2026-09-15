@@ -51,6 +51,8 @@ The site is one page. It MUST contain:
 - the canonical `docker run` invocation against the published `ghcr.io/fx/ob` image, which can be copied in one action;
 - a short list of core capabilities: Obsidian Sync, natural-language search, REST and MCP access, and a single container;
 - how to point an MCP client at a running server;
+- path-scoped MCP sessions — a URL that confines a session to one vault folder and presents it as the root — featured prominently, with the note that scoping is not an authentication boundary;
+- a brief list of the MCP tools;
 - a plain statement that the server has no built-in authentication and belongs on a private network or behind an authenticating proxy;
 - the license (MIT);
 - links to the GitHub repository (README), releases, and issues.
@@ -99,7 +101,7 @@ The page MUST NOT restate the configuration reference, env-var table, or operato
 
 ### Content Shape
 
-Header: `$ ob` wordmark, GitHub link, theme toggle. Hero: headline, one-sentence description, the copyable run command, and links to the README. A four-cell capability grid. One "Connect an agent" section showing the MCP URL shape, next to the no-auth statement. Footer links. [Change 0016](../../changes/0016-landing-site.md#decisions) records the exact copy.
+Header: `$ ob` wordmark, GitHub link, theme toggle. Hero: headline, one-sentence description, the copyable run command, and links to the README. A four-cell capability grid. A prominent path-scoped sessions section directly after the grid: the three MCP URL shapes, the per-agent-folder pitch, and a "Connect an agent" client config using a scoped URL, next to the not-an-access-control note and the no-auth statement. A brief MCP tool list, grouped. Footer links. [Change 0016](../../changes/0016-landing-site.md#decisions) records the exact copy.
 
 ## Constraints
 
@@ -123,3 +125,4 @@ Header: `$ ob` wordmark, GitHub link, theme toggle. Hero: headline, one-sentence
 |------|--------|----------|
 | 2026-09-15 | Initial spec created (planned, not yet implemented) | [0016-landing-site](../../changes/0016-landing-site.md) |
 | 2026-09-15 | Implemented: `site/` package and `Pages` workflow; `site/**` excluded from CI, Docker, and release-please | [0016-landing-site](../../changes/0016-landing-site.md) |
+| 2026-09-15 | Content amended to feature path-scoped MCP sessions and a brief MCP tool list (user request) | [0016-landing-site](../../changes/0016-landing-site.md) |
