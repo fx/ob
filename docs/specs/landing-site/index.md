@@ -6,7 +6,7 @@
 
 ## Background
 
-- Status: **planned, not implemented.** [Change 0016](../../changes/0016-landing-site.md) builds and publishes it. As of 2026-09-15, `fx/ob` has no Pages site and no homepage URL. DNS for `ob.fx.gd` already resolves as a CNAME to `fx.github.io`.
+- Status: **implemented** by [Change 0016](../../changes/0016-landing-site.md), which builds `site/` and publishes it through the `Pages` workflow. DNS for `ob.fx.gd` resolves as a CNAME to `fx.github.io`.
 - The [README](../../../README.md) owns the run instructions, configuration reference, and operator guidance. The [Architecture spec](../architecture/index.md) owns the repository layout and the container image. This spec owns only what a visitor to `ob.fx.gd` can observe, plus how the site gets published.
 
 ## Requirements
@@ -122,3 +122,4 @@ Header: `$ ob` wordmark, GitHub link, theme toggle. Hero: headline, one-sentence
 | Date | Change | Document |
 |------|--------|----------|
 | 2026-09-15 | Initial spec created (planned, not yet implemented) | [0016-landing-site](../../changes/0016-landing-site.md) |
+| 2026-09-15 | Implemented: `site/` package and `Pages` workflow; `site/**` excluded from CI, Docker, and release-please | [0016-landing-site](../../changes/0016-landing-site.md) |

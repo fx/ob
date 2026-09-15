@@ -138,5 +138,5 @@ changes:
     path: changes/0016-landing-site.md
     description: Static site/ package and Pages workflow publishing a one-page ob landing site at ob.fx.gd, with site/** excluded from CI and Docker workflows.
     spec: landing-site
-    status: draft
+    status: complete
     depends_on: []

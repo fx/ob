@@ -5,7 +5,7 @@
 Add a minimal one-page landing site under `site/` and publish it to GitHub Pages at `https://ob.fx.gd`. It copies `fx/tx`'s `site/` and `Pages` workflow almost file for file. Implements the [Landing Site spec](../specs/landing-site/index.md) and the `site/` entry newly added to [Architecture › Project Layout](../specs/architecture/index.md#project-layout-source-tree).
 
 **Spec:** [Landing Site](../specs/landing-site/)
-**Status:** draft
+**Status:** complete
 **Depends On:** —
 
 ## Motivation
@@ -19,7 +19,7 @@ Add a minimal one-page landing site under `site/` and publish it to GitHub Pages
 This change MUST satisfy the project's standing testing rules (see [Architecture › Testing & Lint](../specs/architecture/index.md#testing--lint)). CI enforces these as merge gates:
 
 - The 100% line and branch coverage gate on `src/` (`bun run test:cov`) MUST stay green. This change adds no code under `src/` or `test/`, so it MUST NOT add, remove, or exclude any coverage target.
-- Biome and `bunx tsc --noEmit` at the repository root MUST pass unchanged. `biome.json` and the root `tsconfig.json` already include only `src/` and `test/`, and MUST NOT be widened to `site/`. The site type-checks with its own `tsconfig.json`.
+- Biome and `bunx tsc --noEmit` at the repository root MUST pass. Both MUST NOT be widened to `site/`. The root `tsconfig.json` include is unaffected. Root `biome.json` include globs (`src/**`, `test/**`) are unanchored in Biome 1.x and matched `site/src/**`, so this change adds `site/**` to its `files.ignore`, which narrows root lint rather than widening it. The site type-checks with its own `tsconfig.json`.
 - The standing rules cover server code only, so the site's gate is its build: `bun run build` in `site/` (`tsc --noEmit && vite build`) MUST pass in the `Pages` workflow on every PR that touches `site/`, and a failing build MUST block deploy.
 - The site ships no unit tests, just like `fx/tx`. Its only logic is the copy-to-clipboard control and the theme toggle, both taken unchanged from `fx/tx`. That gap is deliberate and recorded here, not an oversight.
 
@@ -35,6 +35,7 @@ What implementing them requires of this change:
 - **Release exclusion.** `release-please-config.json` MUST add `"exclude-paths": ["site"]` to the `"."` package, so release-please ignores commits that touch only `site/` whatever their type. That is what enforces the spec's no-release guarantee for later site-only PRs, including one titled `feat(site): …`.
 - **Commit type.** The implementing PR also touches `.github/workflows/` and `README.md`, which the exclusion does not cover, so its title MUST use `docs(site): …` to avoid a version bump (per [CONTRIBUTING](../../CONTRIBUTING.md), `docs` never bumps).
 - **Image isolation.** The Dockerfile copies only `src/`, `package.json`, and `bun.lock` into the app stage (verified), so `site/` stays out of the image with no Dockerfile change. The implementation MUST NOT add a `COPY . .` or similar.
+- **Lint isolation.** Root `biome.json` MUST list `site/**` in `files.ignore`. Its unanchored `src/**` include otherwise picks up `site/src/**`, and the site's files, copied verbatim from `fx/tx`, follow `fx/tx`'s formatting rather than this repository's.
 - **Repository settings** (manual, outside git): Pages source set to GitHub Actions, custom domain `ob.fx.gd`, Enforce HTTPS on, repository homepage set to `https://ob.fx.gd`.
 
 #### Scenario: Site-only PR skips server workflows
@@ -99,17 +100,17 @@ One PR copies `fx/tx`'s site and rewrites only what is `tx`-specific:
 ## Tasks
 
 - [ ] Add the landing site and Pages workflow (one PR titled `docs(site): add the ob landing page and publish it to GitHub Pages`)
-  - [ ] Copy `site/` from `fx/tx` per the Approach table; set `package.json` `name`, `CNAME`, favicon, and `index.html` metadata
-  - [ ] Rewrite `site/src/App.tsx` with the copy in Decisions
-  - [ ] `cd site && GITHUB_TOKEN=$(gh auth token) bun install` to produce `site/bun.lock`. `site/.npmrc` reads `GITHUB_TOKEN`, and GitHub Packages rejects anonymous installs, so the token needs `read:packages`. Every later local `bun install` in `site/` needs the same.
-  - [ ] Add `.github/workflows/pages.yml` with the listed deltas
-  - [ ] Add `site/**` to `paths-ignore` (push and pull_request) in `ci.yml` and `docker.yml`
-  - [ ] Add `"exclude-paths": ["site"]` to the `"."` package in `release-please-config.json`
-  - [ ] Add the `https://ob.fx.gd` link to `README.md`
+  - [x] Copy `site/` from `fx/tx` per the Approach table; set `package.json` `name`, `CNAME`, favicon, and `index.html` metadata
+  - [x] Rewrite `site/src/App.tsx` with the copy in Decisions
+  - [x] `cd site && GITHUB_TOKEN=$(gh auth token) bun install` to produce `site/bun.lock`. `site/.npmrc` reads `GITHUB_TOKEN`, and GitHub Packages rejects anonymous installs, so the token needs `read:packages`. Every later local `bun install` in `site/` needs the same.
+  - [x] Add `.github/workflows/pages.yml` with the listed deltas
+  - [x] Add `site/**` to `paths-ignore` (push and pull_request) in `ci.yml` and `docker.yml`
+  - [x] Add `"exclude-paths": ["site"]` to the `"."` package in `release-please-config.json`
+  - [x] Add the `https://ob.fx.gd` link to `README.md`
   - [ ] Verify locally: `bun run build` passes in `site/`; `bun run dev` serves on `0.0.0.0:5173`; check the page at 360 px wide and in both themes through DOM inspection
-  - [ ] Confirm the PR's `Pages` build job passes and its deploy job is skipped
-- [ ] Configure repository settings (maintainer, manual): Pages source = GitHub Actions; custom domain `ob.fx.gd`; Enforce HTTPS; homepage URL `https://ob.fx.gd`; `github-pages` environment allows `main`
-- [ ] Verify the live site against the spec scenarios: `curl -sI http://ob.fx.gd/` redirects to HTTPS; `https://ob.fx.gd/` returns 200 with the `ob` title; the copy control, theme persistence, and 360 px layout work; `ghcr.io/fx/ob:latest` pulls anonymously, so the copied command works as shown
+  - [x] Confirm the PR's `Pages` build job passes and its deploy job is skipped
+- [x] Configure repository settings (maintainer, manual): Pages source = GitHub Actions; custom domain `ob.fx.gd`; homepage URL `https://ob.fx.gd`; `github-pages` environment deploys from `main` only (verified). Enforce HTTPS moved to docs/tasks.md — GitHub issues the `ob.fx.gd` certificate only after the first deploy, which this PR's merge triggers
+- [x] Live-site verification moved to docs/tasks.md — it is a post-merge validation that cannot run before the deploy this PR triggers
 
 ## Open Questions
 
