@@ -9,6 +9,28 @@ language. One container, one process, one image — no orchestration required.
 
 Landing page: <https://ob.fx.gd>
 
+## What an agent gets
+
+**A folder of its own.** Hand each agent a scoped MCP URL and it works in one
+folder of a shared vault, presented as the vault root, with nothing to
+provision on the server:
+
+| URL | Session sees |
+|-----|--------------|
+| `/mcp` | Every configured vault. |
+| `/mcp/<vault>` | One vault. |
+| `/mcp/<vault>/<folder>` | That folder, presented as the vault root. |
+
+Scoping confines a cooperating client and is not an access control; see
+[Scoped MCP sessions](#scoped-mcp-sessions) for the details and caveats.
+
+**Twelve MCP tools**, with the same names in every scope:
+
+- Files: `list_files`, `read_file`, `write_file`, `append_file`, `patch_file`,
+  `delete_file`
+- Folders: `list_folders`, `create_folder`, `delete_folder`
+- Vaults and search: `list_vaults`, `vault_status`, `search`
+
 ## Run
 
 The canonical invocation:
