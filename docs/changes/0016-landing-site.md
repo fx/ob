@@ -99,7 +99,7 @@ One PR copies `fx/tx`'s site and rewrites only what is `tx`-specific:
 
 ## Tasks
 
-- [ ] Add the landing site and Pages workflow (one PR titled `docs(site): add the ob landing page and publish it to GitHub Pages`)
+- [x] Add the landing site and Pages workflow (one PR titled `docs(site): add the ob landing page and publish it to GitHub Pages`)
   - [x] Copy `site/` from `fx/tx` per the Approach table; set `package.json` `name`, `CNAME`, favicon, and `index.html` metadata
   - [x] Rewrite `site/src/App.tsx` with the copy in Decisions
   - [x] `cd site && GITHUB_TOKEN=$(gh auth token) bun install` to produce `site/bun.lock`. `site/.npmrc` reads `GITHUB_TOKEN`, and GitHub Packages rejects anonymous installs, so the token needs `read:packages`. Every later local `bun install` in `site/` needs the same.
@@ -107,14 +107,14 @@ One PR copies `fx/tx`'s site and rewrites only what is `tx`-specific:
   - [x] Add `site/**` to `paths-ignore` (push and pull_request) in `ci.yml` and `docker.yml`
   - [x] Add `"exclude-paths": ["site"]` to the `"."` package in `release-please-config.json`
   - [x] Add the `https://ob.fx.gd` link to `README.md`
-  - [ ] Verify locally: `bun run build` passes in `site/`; `bun run dev` serves on `0.0.0.0:5173`; check the page at 360 px wide and in both themes through DOM inspection
+  - [x] Verify locally: `bun run build` passes in `site/`; `bun run dev` serves on `0.0.0.0:5173`; check the page at 360 px wide and in both themes through DOM inspection
   - [x] Confirm the PR's `Pages` build job passes and its deploy job is skipped
 - [x] Configure repository settings (maintainer, manual): Pages source = GitHub Actions; custom domain `ob.fx.gd`; homepage URL `https://ob.fx.gd`; `github-pages` environment deploys from `main` only (verified). Enforce HTTPS moved to docs/tasks.md — GitHub issues the `ob.fx.gd` certificate only after the first deploy, which this PR's merge triggers
 - [x] Live-site verification moved to docs/tasks.md — it is a post-merge validation that cannot run before the deploy this PR triggers
 
 ## Open Questions
 
-- [ ] Custom-domain verification for `fx.gd` at the org level. `tx.fx.gd` already serves with an approved certificate, which suggests it is in place; confirm when setting the custom domain.
+- [x] Custom-domain verification for `fx.gd` at the org level. `tx.fx.gd` already serves with an approved certificate, which suggests it is in place; confirm when setting the custom domain. **Resolved:** GitHub accepted the custom domain `ob.fx.gd` for `fx/ob`'s Pages site when it was configured on 2026-09-15. Certificate issuance and Enforce HTTPS follow the first deploy and are tracked in [docs/tasks.md](../tasks.md).
 
 ## References
 
