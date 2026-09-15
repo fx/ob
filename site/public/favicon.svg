@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="ob">
+  <title>ob</title>
+  <rect width="32" height="32" rx="2" fill="#0a0a0a" />
+  <path
+    d="M5.5 13.5h7v8h-7zM18.5 8.5v13h7v-8h-7"
+    fill="none"
+    stroke="#fafafa"
+    stroke-width="2.5"
+    stroke-linecap="square"
+  />
+</svg>

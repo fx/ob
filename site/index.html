@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>ob — Obsidian vaults, for agents</title>
+    <meta
+      name="description"
+      content="ob keeps your Obsidian vaults synced, indexes them for natural-language search, and serves them over REST and MCP, from a single container."
+    />
+    <meta property="og:title" content="ob — Obsidian vaults, for agents" />
+    <meta
+      property="og:description"
+      content="Synced Obsidian vaults with natural-language search over REST and MCP, from a single container."
+    />
+    <meta property="og:url" content="https://ob.fx.gd" />
+    <meta property="og:type" content="website" />
+    <script>
+      (() => {
+        const stored = localStorage.getItem("theme");
+        const dark =
+          stored === "dark" ||
+          ((stored === null || stored === "system") &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.classList.toggle("dark", dark);
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

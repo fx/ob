@@ -1,0 +1,5 @@
+@import "@fx/ui/styles/globals.css";
+
+/* Tailwind only generates utilities it can see; @fx/ui ships pre-compiled
+   components, so its dist has to be scanned as a source. */
+@source "../node_modules/@fx/ui/dist";
