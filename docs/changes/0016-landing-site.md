@@ -21,7 +21,7 @@ This change MUST satisfy the project's standing testing rules (see [Architecture
 - The 100% line and branch coverage gate on `src/` (`bun run test:cov`) MUST stay green. This change adds no code under `src/` or `test/`, so it MUST NOT add, remove, or exclude any coverage target.
 - Biome and `bunx tsc --noEmit` at the repository root MUST pass. Both MUST NOT be widened to `site/`. The root `tsconfig.json` include is unaffected. Root `biome.json` include globs (`src/**`, `test/**`) are unanchored in Biome 1.x and matched `site/src/**`, so this change adds `site/**` to its `files.ignore`, which narrows root lint rather than widening it. The site type-checks with its own `tsconfig.json`.
 - The standing rules cover server code only, so the site's gate is its build: `bun run build` in `site/` (`tsc --noEmit && vite build`) MUST pass in the `Pages` workflow on every PR that touches `site/`, and a failing build MUST block deploy.
-- The site ships no unit tests, just like `fx/tx`. Its only logic is the copy-to-clipboard control and the theme toggle, both taken unchanged from `fx/tx`. That gap is deliberate and recorded here, not an oversight.
+- The site ships no unit tests, just like `fx/tx`. Its only logic is the copy-to-clipboard control and the theme toggle, both copied from `fx/tx`: the theme toggle unchanged, the copy control with one fix (focus restoration in the clipboard fallback). That gap is deliberate and recorded here, not an oversight.
 
 Skipping or weakening any of these rules to land the PR MUST be treated as a bug in the PR, not in the rule.
 
@@ -35,7 +35,7 @@ What implementing them requires of this change:
 - **Release exclusion.** `release-please-config.json` MUST add `"exclude-paths": ["site"]` to the `"."` package, so release-please ignores commits that touch only `site/` whatever their type. That is what enforces the spec's no-release guarantee for later site-only PRs, including one titled `feat(site): …`.
 - **Commit type.** The implementing PR also touches `.github/workflows/` and `README.md`, which the exclusion does not cover, so its title MUST use `docs(site): …` to avoid a version bump (per [CONTRIBUTING](../../CONTRIBUTING.md), `docs` never bumps).
 - **Image isolation.** The Dockerfile copies only `src/`, `package.json`, and `bun.lock` into the app stage (verified), so `site/` stays out of the image with no Dockerfile change. The implementation MUST NOT add a `COPY . .` or similar.
-- **Lint isolation.** Root `biome.json` MUST list `site/**` in `files.ignore`. Its unanchored `src/**` include otherwise picks up `site/src/**`, and the site's files, copied verbatim from `fx/tx`, follow `fx/tx`'s formatting rather than this repository's.
+- **Lint isolation.** Root `biome.json` MUST list `site/**` in `files.ignore`. Its unanchored `src/**` include otherwise picks up `site/src/**`, and the site's files, copied from `fx/tx`, follow `fx/tx`'s formatting rather than this repository's.
 - **Repository settings** (manual, outside git): Pages source set to GitHub Actions, custom domain `ob.fx.gd`, repository homepage set to `https://ob.fx.gd`, and the `github-pages` environment deploying from `main` only. Enforce HTTPS is enabled once GitHub issues the `ob.fx.gd` certificate after the first deploy, tracked in [docs/tasks.md](../tasks.md).
 
 #### Scenario: Site-only PR skips server workflows
@@ -56,7 +56,8 @@ One PR copies `fx/tx`'s site and rewrites only what is `tx`-specific:
 | `site/package.json`, `site/bun.lock` | From `fx/tx`. `name` → `@fx/ob-site`, same dependency set; regenerate the lockfile with `bun install`. |
 | `site/.npmrc`, `site/tsconfig.json`, `site/vite.config.ts` | Verbatim. |
 | `site/src/main.tsx`, `site/src/index.css` | Verbatim. |
-| `site/src/components/CommandBlock.tsx`, `ThemeToggle.tsx` | Verbatim. |
+| `site/src/components/ThemeToggle.tsx` | Verbatim. |
+| `site/src/components/CommandBlock.tsx` | From `fx/tx`, with one fix: the clipboard fallback restores focus to the copy button after its temporary textarea is removed. |
 | `site/src/App.tsx` | Same structure, `ob` content (see Decisions). |
 | `site/index.html` | Same theme-bootstrap script; `ob` title, description, and `og:*`. |
 | `site/public/CNAME` | `ob.fx.gd` |

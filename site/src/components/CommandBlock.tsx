@@ -87,10 +87,13 @@ function copyViaSelection(text: string): boolean {
   area.style.position = "fixed";
   area.style.opacity = "0";
   document.body.append(area);
+  const previous =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
   area.select();
   try {
     return document.execCommand("copy");
   } finally {
     area.remove();
+    previous?.focus({ preventScroll: true });
   }
 }
