@@ -36,7 +36,7 @@ What implementing them requires of this change:
 - **Commit type.** The implementing PR also touches `.github/workflows/` and `README.md`, which the exclusion does not cover, so its title MUST use `docs(site): …` to avoid a version bump (per [CONTRIBUTING](../../CONTRIBUTING.md), `docs` never bumps).
 - **Image isolation.** The Dockerfile copies only `src/`, `package.json`, and `bun.lock` into the app stage (verified), so `site/` stays out of the image with no Dockerfile change. The implementation MUST NOT add a `COPY . .` or similar.
 - **Lint isolation.** Root `biome.json` MUST list `site/**` in `files.ignore`. Its unanchored `src/**` include otherwise picks up `site/src/**`, and the site's files, copied verbatim from `fx/tx`, follow `fx/tx`'s formatting rather than this repository's.
-- **Repository settings** (manual, outside git): Pages source set to GitHub Actions, custom domain `ob.fx.gd`, Enforce HTTPS on, repository homepage set to `https://ob.fx.gd`.
+- **Repository settings** (manual, outside git): Pages source set to GitHub Actions, custom domain `ob.fx.gd`, repository homepage set to `https://ob.fx.gd`, and the `github-pages` environment deploying from `main` only. Enforce HTTPS is enabled once GitHub issues the `ob.fx.gd` certificate after the first deploy, tracked in [docs/tasks.md](../tasks.md).
 
 #### Scenario: Site-only PR skips server workflows
 
