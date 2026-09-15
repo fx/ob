@@ -112,7 +112,7 @@ export function App() {
             them over REST and MCP, from a single container.
           </p>
 
-          <div className="mt-10 max-w-xl">
+          <div className="mt-10">
             <CommandBlock commands={[RUN_COMMAND]} label="Run" />
           </div>
 
@@ -166,7 +166,7 @@ export function App() {
             the server.
           </p>
 
-          <div className="mt-10 grid gap-10 sm:grid-cols-2">
+          <div className="mt-10 grid gap-10">
             {/* min-w-0: a grid item's default min-width is its content, so the
                 code blocks would otherwise widen the page instead of scrolling. */}
             <div className="min-w-0">
