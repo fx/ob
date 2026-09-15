@@ -7,11 +7,13 @@ on:
       - 'docs/**'
       - '**.md'
       - '.gitignore'
+      - 'site/**'
   pull_request:
     paths-ignore:
       - 'docs/**'
       - '**.md'
       - '.gitignore'
+      - 'site/**'
 
 permissions:
   contents: read
