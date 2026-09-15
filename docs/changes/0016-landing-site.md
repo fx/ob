@@ -32,7 +32,8 @@ The [Landing Site spec](../specs/landing-site/index.md) owns hosting, publishing
 What implementing them requires of this change:
 
 - **Path filters.** `.github/workflows/ci.yml` and `.github/workflows/docker.yml` MUST add `site/**` to both their `push` and `pull_request` `paths-ignore` lists. Without it, a site-only merge republishes `ghcr.io/fx/ob:main` and `:sha-<short>` and runs the full server suite.
-- **Commit type.** The implementing PR title MUST use `docs(site): …`, so release-please does not bump the version or cut an image release for a change that ships nothing in the image (per [CONTRIBUTING](../../CONTRIBUTING.md), `docs` never bumps). Later site-only PRs follow the same rule.
+- **Release exclusion.** `release-please-config.json` MUST add `"exclude-paths": ["site"]` to the `"."` package, so release-please ignores commits that touch only `site/` whatever their type. That is what enforces the spec's no-release guarantee for later site-only PRs, including one titled `feat(site): …`.
+- **Commit type.** The implementing PR also touches `.github/workflows/` and `README.md`, which the exclusion does not cover, so its title MUST use `docs(site): …` to avoid a version bump (per [CONTRIBUTING](../../CONTRIBUTING.md), `docs` never bumps).
 - **Image isolation.** The Dockerfile copies only `src/`, `package.json`, and `bun.lock` into the app stage (verified), so `site/` stays out of the image with no Dockerfile change. The implementation MUST NOT add a `COPY . .` or similar.
 - **Repository settings** (manual, outside git): Pages source set to GitHub Actions, custom domain `ob.fx.gd`, Enforce HTTPS on, repository homepage set to `https://ob.fx.gd`.
 
@@ -81,8 +82,9 @@ One PR copies `fx/tx`'s site and rewrites only what is `tx`-specific:
   - Capability cells: **Sync** (official Obsidian Sync client, bidirectional, restarts itself when sync stalls) · **Search** (hybrid vector + full-text search over Markdown) · **REST and MCP** (the same file and search operations on both, with per-agent folder scoping on MCP) · **One container** (one process, one image, one volume).
   - "Connect an agent": a code block holding `{ "mcpServers": { "ob": { "type": "http", "url": "http://<host>:3000/mcp" } } }`, followed by: "No built-in authentication. Keep it on a private network or behind a proxy that authenticates."
   - Header: `MIT` badge next to the wordmark. Footer: MIT licensed · GitHub · Releases · Issues. The root `LICENSE` (MIT) is already in place.
-- **Decision:** `docs(site)` rather than `feat(site)` (which `fx/tx` used).
-  - **Why:** in `fx/ob`, `feat` drives a minor bump, a `vX.Y.Z` tag, and a full image publish. None of that ships the site.
+- **Decision:** exclude `site/` from release-please, and title the implementing PR `docs(site)` rather than `feat(site)` (which `fx/tx` used).
+  - **Why:** in `fx/ob`, `feat` drives a minor bump, a `vX.Y.Z` tag, and a full image publish, and none of that ships the site. A title convention alone would not hold for future PRs; the path exclusion does.
+  - **Alternatives considered:** relying on `docs(site)` titles for every site PR, which breaks the first time someone writes `feat(site)`.
 - **Decision:** build on PRs, which `fx/tx` does not.
   - **Why:** otherwise a broken site build only shows up after merge. One `if:` line buys a pre-merge signal.
 
@@ -99,9 +101,10 @@ One PR copies `fx/tx`'s site and rewrites only what is `tx`-specific:
 - [ ] Add the landing site and Pages workflow (one PR titled `docs(site): add the ob landing page and publish it to GitHub Pages`)
   - [ ] Copy `site/` from `fx/tx` per the Approach table; set `package.json` `name`, `CNAME`, favicon, and `index.html` metadata
   - [ ] Rewrite `site/src/App.tsx` with the copy in Decisions
-  - [ ] `cd site && bun install` to produce `site/bun.lock`
+  - [ ] `cd site && GITHUB_TOKEN=$(gh auth token) bun install` to produce `site/bun.lock`. `site/.npmrc` reads `GITHUB_TOKEN`, and GitHub Packages rejects anonymous installs, so the token needs `read:packages`. Every later local `bun install` in `site/` needs the same.
   - [ ] Add `.github/workflows/pages.yml` with the listed deltas
   - [ ] Add `site/**` to `paths-ignore` (push and pull_request) in `ci.yml` and `docker.yml`
+  - [ ] Add `"exclude-paths": ["site"]` to the `"."` package in `release-please-config.json`
   - [ ] Add the `https://ob.fx.gd` link to `README.md`
   - [ ] Verify locally: `bun run build` passes in `site/`; `bun run dev` serves on `0.0.0.0:5173`; check the page at 360 px wide and in both themes through DOM inspection
   - [ ] Confirm the PR's `Pages` build job passes and its deploy job is skipped
