@@ -19,7 +19,7 @@ const MCP_CONFIG = `{
   "mcpServers": {
     "ob": {
       "type": "http",
-      "url": "http://<host>:3000/mcp"
+      "url": "http://<host>:3000/mcp/<vault>/agents/<name>"
     }
   }
 }`;
@@ -44,6 +44,34 @@ const FEATURES = [
     icon: Container,
     title: "One container",
     body: "One process, one image, one volume. Nothing to orchestrate.",
+  },
+];
+
+const SCOPES = [
+  { url: "/mcp", sees: "Every vault" },
+  { url: "/mcp/<vault>", sees: "One vault" },
+  { url: "/mcp/<vault>/<folder>", sees: "That folder, presented as the root" },
+];
+
+const TOOL_GROUPS = [
+  {
+    title: "Files",
+    tools: [
+      "list_files",
+      "read_file",
+      "write_file",
+      "append_file",
+      "patch_file",
+      "delete_file",
+    ],
+  },
+  {
+    title: "Folders",
+    tools: ["list_folders", "create_folder", "delete_folder"],
+  },
+  {
+    title: "Vaults and search",
+    tools: ["list_vaults", "vault_status", "search"],
   },
 ];
 
@@ -126,21 +154,84 @@ export function App() {
         <Separator />
 
         <section className="py-20">
-          <h2 className="text-sm uppercase tracking-widest text-muted-foreground">
-            Connect an agent
-          </h2>
-          <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-            Point any MCP client at the server's <code>/mcp</code> endpoint.
+          <p className="text-sm uppercase tracking-widest text-muted-foreground">
+            Path-scoped sessions
           </p>
-          <div className="mt-5 max-w-xl border border-border bg-card">
-            <pre className="overflow-x-auto px-4 py-3 text-sm leading-7">
-              <code>{MCP_CONFIG}</code>
-            </pre>
+          <h2 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl">
+            One vault, a folder per agent.
+          </h2>
+          <p className="mt-4 max-w-2xl text-lg text-muted-foreground">
+            Give each agent its own folder in a shared vault. A scoped URL
+            presents that folder as the vault root, with nothing to provision on
+            the server.
+          </p>
+
+          <div className="mt-10 grid gap-10 sm:grid-cols-2">
+            {/* min-w-0: a grid item's default min-width is its content, so the
+                code blocks would otherwise widen the page instead of scrolling. */}
+            <div className="min-w-0">
+              <h3 className="text-sm uppercase tracking-widest text-muted-foreground">
+                URL shapes
+              </h3>
+              <dl className="mt-5 border border-border bg-card text-sm">
+                {SCOPES.map(({ url, sees }) => (
+                  <div
+                    key={url}
+                    className="border-b border-border px-4 py-3 last:border-b-0"
+                  >
+                    <dt>
+                      <code className="break-all">{url}</code>
+                    </dt>
+                    <dd className="mt-1 text-muted-foreground">{sees}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+
+            <div className="min-w-0">
+              <h3 className="text-sm uppercase tracking-widest text-muted-foreground">
+                Connect an agent
+              </h3>
+              <div className="mt-5 border border-border bg-card">
+                <pre className="overflow-x-auto px-4 py-3 text-sm leading-7">
+                  <code>{MCP_CONFIG}</code>
+                </pre>
+              </div>
+            </div>
           </div>
-          <p className="mt-5 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-            No built-in authentication. Keep it on a private network or behind a
+
+          <p className="mt-8 max-w-2xl text-sm leading-relaxed text-muted-foreground">
+            Scoping confines a cooperating client. It is not access control. No
+            built-in authentication. Keep it on a private network or behind a
             proxy that authenticates.
           </p>
+        </section>
+
+        <Separator />
+
+        <section className="py-20">
+          <h2 className="text-sm uppercase tracking-widest text-muted-foreground">
+            MCP tools
+          </h2>
+          <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground">
+            Twelve tools, with the same names in every scope.
+          </p>
+          <div className="mt-8 grid gap-8 sm:grid-cols-3">
+            {TOOL_GROUPS.map(({ title, tools }) => (
+              <div key={title} className="min-w-0">
+                <h3 className="text-sm font-medium">{title}</h3>
+                <ul className="mt-3 flex flex-wrap gap-2">
+                  {tools.map((name) => (
+                    <li key={name}>
+                      <code className="block border border-border bg-card px-2 py-1 text-xs">
+                        {name}
+                      </code>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
         </section>
       </main>
 
