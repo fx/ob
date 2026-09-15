@@ -19,7 +19,7 @@ const MCP_CONFIG = `{
   "mcpServers": {
     "ob": {
       "type": "http",
-      "url": "http://<host>:3000/mcp/<vault>/agents/<name>"
+      "url": "http://<host>:3000/mcp/<slug>/agents/<name>"
     }
   }
 }`;
@@ -49,8 +49,8 @@ const FEATURES = [
 
 const SCOPES = [
   { url: "/mcp", sees: "Every vault" },
-  { url: "/mcp/<vault>", sees: "One vault" },
-  { url: "/mcp/<vault>/<folder>", sees: "That folder, presented as the root" },
+  { url: "/mcp/<slug>", sees: "One vault" },
+  { url: "/mcp/<slug>/<folder>", sees: "That folder, presented as the root" },
 ];
 
 const TOOL_GROUPS = [
