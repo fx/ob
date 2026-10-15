@@ -140,3 +140,10 @@ changes:
     spec: landing-site
     status: complete
     depends_on: []
+  - id: "0017"
+    name: sync-liveness
+    path: changes/0017-sync-liveness.md
+    description: Crash-loop and stall-loop ceilings become opt-in (OB_SYNC_MAX_CRASHES / OB_SYNC_MAX_STALL_KILLS) so a crashing or stall-killed ob sync child is restarted forever by default (the sync-setup / sync-config 5-attempt limits are unchanged); VaultStatus gains consecutiveFailures, and /healthz returns 503 once a vault is failed or reaches OB_HEALTHZ_SYNC_FAILURE_THRESHOLD consecutive failed attempts, without gating any request.
+    spec: obsidian-sync
+    status: complete
+    depends_on: ["0015"]

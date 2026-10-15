@@ -795,6 +795,73 @@ describe("watchdog — activity reporting and memory", () => {
   });
 });
 
+describe("watchdog — lastActivityObservedAt()", () => {
+  test("is null until this child resolves a log, then the anchor instant", async () => {
+    const fs = createFakeWatchdogFs();
+    const driver = createPollDriver();
+    const log = capture();
+    driver.advance(5_000);
+
+    const wd = start(fs, driver, log);
+    await driver.settle();
+    // Nothing to resolve yet: no evidence for this child at all.
+    expect(wd.lastActivityObservedAt()).toBeNull();
+
+    fs.addDir(SYNC_DIR, ["aaa"]);
+    // An ancient mtime does not matter: the anchor is the instant of
+    // resolution, exactly as for the stall clock.
+    seedVaultDir(fs, "aaa", { log: "", logMtime: 1 });
+    driver.advance(30_000);
+    await driver.nextPoll();
+    expect(wd.snapshot().watchdog.state).toBe("armed");
+    expect(wd.lastActivityObservedAt()).toBe(35_000);
+    wd.stop();
+  });
+
+  test("advances to the poll instant on an mtime change, and only then", async () => {
+    const fs = createFakeWatchdogFs();
+    const driver = createPollDriver();
+    const log = capture();
+    fs.addDir(SYNC_DIR, ["aaa"]);
+    seedVaultDir(fs, "aaa", { log: "", logMtime: 1_000 });
+
+    const wd = start(fs, driver, log);
+    await driver.settle();
+    expect(wd.lastActivityObservedAt()).toBe(0);
+
+    fs.append(logPathOf("aaa"), "tick\n", 2_000);
+    driver.advance(30_000);
+    await driver.nextPoll();
+    expect(wd.lastActivityObservedAt()).toBe(30_000);
+
+    // A poll that finds nothing new leaves it where it was.
+    driver.advance(30_000);
+    await driver.nextPoll();
+    expect(wd.lastActivityObservedAt()).toBe(30_000);
+
+    // And it outlives the child: the run loop reads it after stop().
+    wd.stop();
+    expect(wd.lastActivityObservedAt()).toBe(30_000);
+  });
+
+  test("keeps its value when the log vanishes and the watchdog returns to resolving", async () => {
+    const fs = createFakeWatchdogFs();
+    const driver = createPollDriver();
+    const log = capture();
+    fs.addDir(SYNC_DIR, ["aaa"]);
+    seedVaultDir(fs, "aaa", { log: "", logMtime: 1_000 });
+
+    const wd = start(fs, driver, log);
+    await driver.settle();
+    fs.remove(logPathOf("aaa"));
+    driver.advance(30_000);
+    await driver.nextPoll();
+    expect(wd.snapshot().watchdog.state).toBe("resolving");
+    expect(wd.lastActivityObservedAt()).toBe(0);
+    wd.stop();
+  });
+});
+
 describe("watchdog — lifecycle", () => {
   test("stop() is idempotent and prevents any further poll", async () => {
     const fs = createFakeWatchdogFs();

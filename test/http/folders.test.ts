@@ -15,7 +15,7 @@ import { buildHttpApp } from "../../src/http/index.ts";
 import type { Indexer, IndexerStatus } from "../../src/indexer/index.ts";
 import type { Logger } from "../../src/log.ts";
 import type { Supervisor, VaultStatus } from "../../src/obsidian/index.ts";
-import { TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
+import { TEST_SYNC_HEALTH, TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
 
 function silent(): Logger {
   return {
@@ -50,6 +50,7 @@ function makeFixture(label: string): FolderHttpFixture {
     logLevel: "error",
     syncConfigEnv: {},
     syncWatchdog: TEST_WATCHDOG_OFF,
+    syncHealth: TEST_SYNC_HEALTH,
   };
 
   const ready: IndexerStatus = {

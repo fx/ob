@@ -122,7 +122,10 @@ This spec defines how the `ob` server bootstraps credentials, configures one or 
 - For each configured vault, the supervisor MUST maintain exactly one running `ob sync --continuous --path <dir>` child process.
 - The supervisor MUST tag every child stdio line with `{vault: <slug>, source: "ob"}` and emit it as a structured log line on the parent's stdout.
 - If a child exits with non-zero status, the supervisor MUST restart it with exponential backoff (initial 1s, factor 2, cap 60s). Restart attempts MUST NOT block other vaults.
-- If a child exits ≥ 10 times in 5 minutes, the vault MUST transition to a `failed` state, future restarts MUST be paused, and `/readyz` MUST report 503 with the failed vault listed in the response body. Per the [Architecture spec](../architecture/index.md#observability) (the higher-level authority), `/readyz` returns 200 only when **every** configured vault has reached the ready state; any vault in `starting` or `failed` keeps `/readyz` at 503.
+- By default there is **no ceiling on restarts**: a vault whose child keeps exiting MUST keep being restarted indefinitely with the capped backoff above, and MUST NOT transition to `failed` for exiting too often. This governs only restarts of the continuous `ob sync` child: the `sync-setup` and `sync-config` retry limits and a failure to create the vault directory still mark a vault `failed`, as specified above. A crash-loop ceiling is opt-in through `OB_SYNC_MAX_CRASHES` (see [Restart ceilings and liveness](#restart-ceilings-and-liveness)): when it is greater than 0 and a vault's child exits that many times within a fixed 5-minute window, the vault MUST transition to a `failed` state, future restarts MUST be paused, and `/readyz` MUST report 503 with the failed vault listed in the response body. Per the [Architecture spec](../architecture/index.md#observability) (the higher-level authority), `/readyz` returns 200 only when **every** configured vault has reached the ready state; any vault in `starting` or `failed` keeps `/readyz` at 503.
+- A **failed attempt** is any supervised `ob sync` attempt that ends while no stop was requested: an exit with any code (including 0, since `--continuous` never exits on its own), a spawner that throws or an `exited` that rejects, or a stall kill. Each attempt counts once.
+- A **recovered attempt** is one that showed sustained life: the last instant at which the [stall watchdog](#sync-stall-watchdog) observed sync-log activity for that attempt is at least `healthyResetMs` (300000 ms) after the attempt spawned. Only when the watchdog has no evidence for the attempt at all — stall detection and tailing both disabled, or the attempt's log never resolved — does plain uptime stand in: the attempt's end (or now, while it is alive) minus its spawn.
+- Each vault MUST keep a `consecutiveFailures` count: the number of failed attempts since the last recovered one. When an attempt ends, the supervisor MUST first reset the count (and the crash-window history) to 0 if that attempt recovered, then add 1 for the attempt that just ended. The count drives the restart backoff — the delay before the next attempt is the backoff step at index `consecutiveFailures - 1` — and, through [REST API › Health endpoints](../rest-api/index.md#health-endpoints), liveness.
 - On SIGTERM to the parent, the supervisor MUST SIGTERM every child, await exit up to 5s each (in parallel), then SIGKILL any survivor.
 
 #### Scenario: Child crashes once
@@ -133,9 +136,26 @@ This spec defines how the `ob` server bootstraps credentials, configures one or 
 - **AND** spawns a replacement after ~1s
 - **AND** the vault state remains `running` (not `failed`)
 
-#### Scenario: Child crashes 10 times in 5 minutes
+#### Scenario: Crash loop with no ceiling keeps retrying
 
-- **GIVEN** repeated crash loop on vault `v`
+- **GIVEN** `OB_SYNC_MAX_CRASHES` unset
+- **AND** vault `v` whose child exits immediately on every start
+- **WHEN** fifty attempts have failed
+- **THEN** vault `v` is not `failed` and the supervisor is still restarting it
+- **AND** the restart delay has grown to, and stays at, the 60-second cap
+- **AND** `consecutiveFailures` reads 50
+
+#### Scenario: Recovery resets the counter
+
+- **GIVEN** vault `v` with `consecutiveFailures` 3
+- **WHEN** its next child's sync log shows activity at least 5 minutes after that child spawned
+- **THEN** `consecutiveFailures` reads 0 while that child is still running
+- **AND** when that child later exits, `consecutiveFailures` reads 1 and the next restart uses the initial 1-second delay
+
+#### Scenario: Opt-in crash ceiling fails the vault
+
+- **GIVEN** `OB_SYNC_MAX_CRASHES=10`
+- **AND** repeated crash loop on vault `v`
 - **WHEN** the 10th crash occurs within a 5-minute window
 - **THEN** the supervisor sets vault `v` state to `failed`
 - **AND** stops attempting restarts for `v`
@@ -234,14 +254,14 @@ An `ob sync --continuous` child can stop making progress while remaining alive a
 - The interval between the anchor and the first observed mtime change is therefore the only window in which a never-yet-active child can be killed, and it MUST be treated exactly like any other silence: a child that hangs before its first successful connect writes nothing, so its anchor never refreshes and it is killed one threshold later. A first sync that is merely slow keeps writing progress lines, so its mtime keeps advancing and it is never killed however long the sync itself takes. Slowness is not the signal; total silence is.
 - **Stall** is `now - lastActivityObservedAt >= stallTimeoutMs` (default 300000, ten times the upstream's 30-second progress cadence). Because the anchor is taken when the log resolves and refreshed only by activity, a child that hangs before its first successful connect is detected one threshold after resolution, while a slow-but-progressing first sync is never killed as long as it keeps writing to the log.
 - On detecting a stall the supervisor MUST log at `error` with `{ vault, logPath, lastSyncActivityAt, stalledForMs, thresholdMs }`, then MUST send `SIGTERM` to the child, and MUST send `SIGKILL` if the child has not exited within the stall-kill grace period (default 10000 ms).
-- The stall verdict itself MUST take the vault out of `running` immediately — before the `SIGTERM` is sent, not when the child finally exits — and MUST set `lastError` at the same moment. A child that ignores `SIGTERM` stays alive for the whole grace period, and a vault the supervisor has already declared unhealthy MUST NOT be able to hold `/readyz` at 200 for that window. The vault moves to `starting`, matching the state a vault takes on any other loss of its child; the transition to `failed` happens only if a ceiling is reached.
+- The stall verdict itself MUST take the vault out of `running` immediately — before the `SIGTERM` is sent, not when the child finally exits — and MUST set `lastError` at the same moment. A child that ignores `SIGTERM` stays alive for the whole grace period, and a vault the supervisor has already declared unhealthy MUST NOT be able to hold `/readyz` at 200 for that window. The vault moves to `starting`, matching the state a vault takes on any other loss of its child; the transition to `failed` happens only if a configured ceiling is reached.
 - The supervisor MUST issue at most one stall kill per child lifetime. Once a stall kill is in flight the watchdog MUST NOT issue a second one for the same child.
-- After the kill, the existing restart machinery MUST take over unchanged: `restarts` increments, the capped exponential backoff applies, and a replacement child is spawned — unless that kill takes the vault to either ceiling below, in which case the vault becomes `failed` and no replacement is spawned.
-- Stall classification MUST be driven by the recorded verdict, never by the exit code the killed child happens to produce. A child that installs a `SIGTERM` handler can exit 0, and treating that as an ordinary clean exit would skip stall accounting entirely and let a wedging vault restart forever without ever approaching a ceiling. Whenever a verdict was recorded for the attempt, the stall path applies — `lastError` names the stall, the healthy-uptime reset is suppressed, and both windows are credited — whatever the exit code was.
+- After the kill, the existing restart machinery MUST take over unchanged: `restarts` increments, the capped exponential backoff applies, and a replacement child is spawned — unless that kill takes the vault to a configured ceiling below, in which case the vault becomes `failed` and no replacement is spawned.
+- Stall classification MUST be driven by the recorded verdict, never by the exit code the killed child happens to produce. A child that installs a `SIGTERM` handler can exit 0, and treating that as an ordinary clean exit would skip stall accounting entirely and let a wedging vault restart forever without ever approaching a ceiling. Whenever a verdict was recorded for the attempt, the stall path applies — `lastError` names the stall, it counts as a failed attempt, and both windows are credited — whatever the exit code was.
 - A recorded verdict MUST apply to exactly the attempt that produced it. The supervisor MUST clear it when starting each attempt and after consuming it, so that an ordinary crash on a later attempt cannot inherit an earlier attempt's stall classification and be miscounted toward the stall ceiling.
 - `lastError` MUST name the stall explicitly and MUST carry both the threshold and the last observed sync-log mtime, so that a stalled vault is distinguishable from a crashed one without reading logs — for example `sync stalled: no sync.log activity for 300000ms (last activity 2026-08-16T07:25:09.289Z)`.
-- A child terminated by the watchdog MUST NOT count as healthy uptime, however long it stayed alive. It MUST NOT reset the crash-window history or the consecutive-failure counter that drives the restart backoff.
-- Every stall kill MUST be recorded both in the crash window that drives the [crash-loop ceiling](#sync-supervision) and in a separate rolling stall window (default: 3 stall kills within 3600000 ms). The stall window MUST be rolling and MUST NOT be cleared by anything other than kills ageing out of it — in particular, an ordinary crash-and-recover between two stalls, and any amount of healthy uptime, MUST NOT reset it. Reaching **either** ceiling MUST transition the vault to `failed` with `lastError` naming the reason, after which restarts stop and `/readyz` reports 503 with the vault listed. The separate window is required because a stall kill can only occur once per threshold: with the default 300-second threshold, ten kills cannot fall inside the crash-loop ceiling's 5-minute window, so the crash-loop ceiling alone can never fire on stalls.
+- Whether a killed child had recovered MUST be judged by observed sync-log activity, never by its uptime. A child the watchdog observed active at least `healthyResetMs` after its spawn did recover — it synced, then wedged — and its kill MUST count as the first failure of a fresh streak. A child with no activity since spawn MUST NOT reset the crash-window history or `consecutiveFailures`, however long it stayed alive: its last observed activity is its anchor, one threshold before the kill, so a wedge loop keeps climbing instead of resetting on every 5-minute kill.
+- Every stall kill MUST be recorded both in the crash window that drives the [crash-loop ceiling](#sync-supervision) and in a separate rolling stall window of a fixed 3600000 ms. The stall window MUST be rolling and MUST NOT be cleared by anything other than kills ageing out of it — in particular, an ordinary crash-and-recover between two stalls, and any recovered attempt, MUST NOT reset it. The stall-loop ceiling is opt-in through `OB_SYNC_MAX_STALL_KILLS` (default: none). Reaching **either** configured ceiling MUST transition the vault to `failed` with `lastError` naming the reason, after which restarts stop and `/readyz` reports 503 with the vault listed. With neither configured, a wedge loop is retried forever, and liveness — not a terminal `failed` — is what escalates it. The separate window is required because a stall kill can only occur once per threshold: with the default 300-second threshold, ten kills cannot fall inside the crash-loop ceiling's 5-minute window, so the crash-loop ceiling alone can never fire on stalls.
 - The watchdog MUST NOT poll while the vault has no running child. It MUST stop when the child exits — including when the child is killed by the watchdog itself — so that no poll runs during the restart backoff, during `sync-setup`, or during `sync-config`.
 - After `requestStop()` the watchdog MUST NOT issue a kill and MUST NOT perform any further poll, and the process MUST be able to exit without waiting for a pending poll interval to elapse.
 - The watchdog and the [sync activity log](#sync-activity-log) tail share one poll. Configuration MUST be read from the following environment variables:
@@ -315,18 +335,36 @@ An `ob sync --continuous` child can stop making progress while remaining alive a
 - **AND** `lastSyncActivityAt` tracks the most recently observed mtime
 - **AND** `watchdog.stallKills` remains 0
 
+#### Scenario: Wedge loop retries forever by default
+
+- **GIVEN** `OB_SYNC_MAX_STALL_KILLS` and `OB_SYNC_MAX_CRASHES` unset
+- **AND** vault `v` whose every child wedges immediately after start
+- **WHEN** the third and fourth stall kills occur within one hour
+- **THEN** vault `v` is never `failed` and a replacement child is spawned after each kill
+- **AND** `consecutiveFailures` reads 3 after the third kill and 4 after the fourth
+- **AND** `/healthz` returns 503 from the third kill on (default threshold 3)
+
+#### Scenario: Healthy-then-wedged attempt counts as a recovery
+
+- **GIVEN** vault `v` with `consecutiveFailures` 1
+- **AND** a child whose sync log shows activity every 30 seconds for 14 minutes and then stops
+- **WHEN** the watchdog kills it one threshold later
+- **THEN** `consecutiveFailures` reads 1, not 2
+- **AND** the next restart uses the initial 1-second delay
+
 #### Scenario: Repeated stalls fail the vault
 
-- **GIVEN** vault `v` whose every child wedges immediately after start
+- **GIVEN** `OB_SYNC_MAX_STALL_KILLS=3`
+- **AND** vault `v` whose every child wedges immediately after start
 - **WHEN** the third stall kill occurs within one hour
 - **THEN** vault `v` transitions to `failed` with `lastError` naming the stall ceiling
 - **AND** no further child is spawned for `v`
 - **AND** `/readyz` returns 503 with `v` listed
 - **AND** other vaults continue to be supervised normally
 
-#### Scenario: Stall kill does not count as healthy uptime
+#### Scenario: Stall kill of a child silent since spawn is not a recovery
 
-- **GIVEN** a child that has been running for 10 minutes (longer than the healthy-uptime reset window) with no sync-log activity
+- **GIVEN** a child that has been running for 10 minutes (longer than the 5-minute recovery bar) with no sync-log activity since spawn
 - **WHEN** the watchdog kills it
 - **THEN** the crash-window history and consecutive-failure counter are NOT reset
 - **AND** the next restart uses the next backoff step rather than restarting from the initial delay
@@ -361,6 +399,30 @@ An `ob sync --continuous` child can stop making progress while remaining alive a
 - **THEN** the process exits 78 with a message naming both variables and their values
 - **AND** no `ob` child has been spawned
 
+### Restart ceilings and liveness
+
+Restarting the `ob sync` child forever is the default because a sync outage is almost always upstream — the server, or the network between — and a terminal `failed` turns a transient into an outage that outlives it. Persistent failure is surfaced on `/healthz` instead, so the orchestrator restarts the pod only once in-process retries have demonstrably not brought sync back.
+
+- The two restart ceilings are configured by the following environment variables. Both windows are fixed.
+
+  | Env var | Default | Meaning |
+  |---|---|---|
+  | `OB_SYNC_MAX_CRASHES` | `0` (no ceiling) | Opt-in crash-loop ceiling: the vault goes `failed` once this many attempts end within the fixed 5-minute crash window. Stall kills count here too. |
+  | `OB_SYNC_MAX_STALL_KILLS` | `0` (no ceiling) | Opt-in stall-loop ceiling: the vault goes `failed` once this many stall kills land within the fixed 60-minute rolling stall window. Inert when `OB_SYNC_STALL_TIMEOUT_SECONDS=0`, since nothing is then stall-killed. |
+  | `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD` | `3` | `/healthz` returns 503 once any vault's `consecutiveFailures` reaches this value, or any vault is `failed`. `0` takes sync out of `/healthz` entirely. |
+
+- Validation MUST happen at startup, before any `ob` child is spawned, and any violation MUST exit 78 naming the offending variable and its value. Each variable MUST match `^\d+$` (the empty string is rejected) and MUST be at most 10000 — an unbounded value parses to `Infinity`, which would silently disable a ceiling or the liveness check while the configuration claims it is set. No value is cross-validated against the windows: a crash ceiling above about 10, or a stall ceiling above about 12, can never be reached with the default timings and is accepted as effectively unlimited.
+- These variables MUST reach the supervisor and the HTTP adapter as a resolved `Config` field, never by reading `process.env` inside `src/obsidian/`. They do not feed `ob sync-config`.
+- The `/healthz` rule itself — which vaults fail liveness and the 503 body — is owned by [REST API › Health endpoints](../rest-api/index.md#health-endpoints).
+- Sync health MUST NOT gate request handling. A vault whose sync is down — retrying, past the threshold, or `failed` — MUST keep serving REST and MCP reads and writes from its directory on disk; changes made meanwhile are carried up once sync recovers or the pod restarts.
+
+#### Scenario: Invalid ceiling rejected at startup
+
+- **GIVEN** `OB_SYNC_MAX_CRASHES=-1`
+- **WHEN** the server starts
+- **THEN** it exits with code 78 and a message naming `OB_SYNC_MAX_CRASHES` and `-1`
+- **AND** no `ob` child has been spawned
+
 ### Public surface to the rest of the app
 
 The supervisor module MUST expose:
@@ -381,6 +443,7 @@ interface VaultStatus {
   state: VaultState;
   pid: number | null;
   restarts: number;
+  consecutiveFailures: number;
   lastError: string | null;
   lastSyncActivityAt: number | null;
   watchdog: WatchdogStatus;
@@ -394,6 +457,7 @@ interface Supervisor {
 
 - `list()` and `get()` MUST be synchronous, non-blocking reads of in-memory state.
 - The supervisor MUST NOT expose raw child handles to other modules.
+- `consecutiveFailures` MUST be present on every `VaultStatus` and MUST be a non-negative integer, `0` before the first attempt ends. It reports the count defined under [Sync supervision](#sync-supervision), with one live adjustment: while the attempt in flight has already recovered, it MUST read `0` even though the stored count only resets when that attempt ends — a vault that came back MUST NOT hold `/healthz` at 503 until it next fails. It MUST be retained once the vault is `failed`.
 - `lastSyncActivityAt` MUST be the epoch-millisecond mtime of the resolved sync log as of the most recent successful poll — the upstream's own timestamp, not the instant the supervisor observed it. During a wedge it stays pinned at the moment the child stopped writing, which is what makes it the field an operator alerts on.
 - `lastSyncActivityAt` is **last observed log activity, not last successful sync**, and MUST NOT be documented or presented as the latter. The mtime advances on any line the upstream writes, including the `Disconnected` / `Waiting to connect to server` / `Connecting...` sequence a reconnect loop emits. A recent value therefore proves only that the child is still writing — a vault churning through reconnects indefinitely has a fresh `lastSyncActivityAt` and is not syncing. Distinguishing the two would require parsing log contents, which [Change 0015](../../changes/0015-sync-stall-watchdog.md) rules out; the watchdog deliberately detects total silence, not unsuccessful progress.
 - `lastSyncActivityAt` MUST be present on every `VaultStatus` and MUST be `null`, never absent, while the value is unknown. It follows the same never-versus-not-yet split as `logPath` below: `null` only while the vault has **never** resolved a log or the watchdog is `disabled`, and thereafter the most recently observed mtime — including while `state` is `resolving` for a later child. It matches the existing `pid` / `lastError` convention, so consumers never have to distinguish "absent" from "unknown".
@@ -453,9 +517,9 @@ src/obsidian/
 | `SetupPermanentError` | `ob sync-setup` non-zero, attempt ≥ 5 | mark vault `failed` |
 | `SyncConfigTransientError` | `ob sync-config` non-zero, attempt < 5 | retry with backoff |
 | `SyncConfigPermanentError` | `ob sync-config` non-zero, attempt ≥ 5 | mark vault `failed` |
-| `SyncCrashLoop` | ≥ 10 crashes in 5 min | mark vault `failed` |
-| `SyncStalled` | no `sync.log` activity within the stall threshold | SIGTERM → SIGKILL after grace; restart via the usual backoff; counts toward both the crash-loop and stall ceilings |
-| `SyncStallLoop` | ≥ 3 stall kills in 60 min | mark vault `failed` |
+| `SyncCrashLoop` | `OB_SYNC_MAX_CRASHES` > 0 and that many crashes in 5 min | mark vault `failed` |
+| `SyncStalled` | no `sync.log` activity within the stall threshold | SIGTERM → SIGKILL after grace; restart via the usual backoff; counts as a failed attempt and toward both the crash-loop and stall ceilings |
+| `SyncStallLoop` | `OB_SYNC_MAX_STALL_KILLS` > 0 and that many stall kills in 60 min | mark vault `failed` |
 
 ## Constraints
 
@@ -482,3 +546,4 @@ src/obsidian/
 | 2026-05-03 | Align `/readyz` semantics with Architecture spec: strict 200-only-if-all-ready (replaces the prior "200 if any vault healthy" wording). | [Change 0002](../../changes/0002-obsidian-supervisor.md) |
 | 2026-05-06 | Add Sync-configuration-bootstrap requirements: env-var-driven `ob sync-config` step between `sync-setup` and `sync --continuous`, with `OB_SYNC_*` mapping, validation, and retry semantics. Replaces the prior "Per-vault sync mode override is OUT OF SCOPE for v1" deferral with a global, env-driven mechanism; per-vault overrides remain out of scope. | [Change 0011](../../changes/0011-sync-config-bootstrap.md) |
 | 2026-08-21 | Add Sync-activity-log and Sync-stall-watchdog requirements: per-vault resolution of the upstream `sync.log` by matching `config.json`'s `vaultPath`, incremental tailing of that log into the parent structured logger, and an mtime-silence watchdog that SIGTERM/SIGKILLs a hung-but-alive child so the existing restart loop can take over. Extends the public `VaultStatus` with `lastSyncActivityAt` and a `watchdog` sub-object, and adds the `OB_SYNC_STALL_TIMEOUT_SECONDS` / `OB_SYNC_STALL_POLL_SECONDS` / `OB_SYNC_LOG_TAIL` env vars plus the `SyncStalled` and `SyncStallLoop` error classes. | [Change 0015](../../changes/0015-sync-stall-watchdog.md) |
+| 2026-10-15 | Restart ceilings become opt-in: by default a vault's crashing or stall-killed `ob sync` child is restarted forever with the capped backoff (the `sync-setup` / `sync-config` limits are unchanged), and `OB_SYNC_MAX_CRASHES` / `OB_SYNC_MAX_STALL_KILLS` restore the crash-loop and stall-loop ceilings. Defines failed and recovered attempts — recovery judged by watchdog-observed activity, not uptime — and adds `consecutiveFailures` to `VaultStatus`, plus the `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD` liveness threshold. | [Change 0017](../../changes/0017-sync-liveness.md) |

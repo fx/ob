@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import type { Config } from "../src/config/index.ts";
 import { buildHttpApp } from "../src/http/index.ts";
 import type { Indexer, IndexerStatus } from "../src/indexer/index.ts";
 import type { Supervisor, VaultStatus } from "../src/obsidian/index.ts";
-import { TEST_WATCHDOG_OFF, makeVaultStatus } from "./helpers/vaultStatus.ts";
+import { TEST_SYNC_HEALTH, TEST_WATCHDOG_OFF, makeVaultStatus } from "./helpers/vaultStatus.ts";
 
 interface ReadyzBody {
   readonly ok: boolean;
@@ -15,6 +16,34 @@ function fakeSupervisor(statuses: VaultStatus[] = []): Supervisor {
     list: () => statuses.slice(),
     get: (slug) => statuses.find((s) => s.slug === slug) ?? null,
     stop: async () => undefined,
+  };
+}
+
+interface HealthzBody {
+  readonly ok: boolean;
+  readonly unhealthy?: Array<{
+    slug: string;
+    reason: string;
+    state: string;
+    consecutiveFailures: number;
+    lastError: string | null;
+  }>;
+}
+
+/** A Config whose only interesting field is the `/healthz` sync threshold. */
+function configWithThreshold(healthzFailureThreshold: number): Config {
+  return {
+    obsidianAuthToken: undefined,
+    vaults: [{ name: "v", slug: "v" }],
+    dataDir: "/tmp/no-such-dir",
+    httpPort: 0,
+    httpHost: "127.0.0.1",
+    embeddingProvider: "transformers",
+    embeddingModel: "x",
+    logLevel: "error",
+    syncConfigEnv: {},
+    syncWatchdog: TEST_WATCHDOG_OFF,
+    syncHealth: { ...TEST_SYNC_HEALTH, healthzFailureThreshold },
   };
 }
 
@@ -93,6 +122,7 @@ describe("buildHttpApp", () => {
         logLevel: "error",
         syncConfigEnv: {},
         syncWatchdog: TEST_WATCHDOG_OFF,
+        syncHealth: TEST_SYNC_HEALTH,
       },
     });
     const res = await app.request("/v1/vaults/v/search", {
@@ -219,14 +249,107 @@ describe("buildHttpApp", () => {
     expect(body.vaults[0]?.watchdog).toEqual(vault.watchdog);
   });
 
-  test("GET /healthz stays 200 while /readyz reports 503", async () => {
+  test("GET /healthz stays 200 while /readyz reports 503 for a transient reconnect", async () => {
+    // Retrying, below the threshold: not ready, but not a liveness failure.
     const app = buildHttpApp({
-      supervisor: fakeSupervisor([makeVaultStatus({ slug: "v", state: "failed", pid: null })]),
+      supervisor: fakeSupervisor([
+        makeVaultStatus({ slug: "v", state: "starting", pid: null, consecutiveFailures: 2 }),
+      ]),
       indexer: fakeIndexer([readyIndexer("v")]),
     });
     expect((await app.request("/readyz")).status).toBe(503);
     const health = await app.request("/healthz");
     expect(health.status).toBe(200);
     expect(await health.json()).toEqual({ ok: true });
+  });
+});
+
+describe("GET /healthz — sync health", () => {
+  test("503 naming a failed vault", async () => {
+    const app = buildHttpApp({
+      supervisor: fakeSupervisor([
+        makeVaultStatus({
+          slug: "v",
+          state: "failed",
+          pid: null,
+          lastError: "crash-loop: 10 crashes within 300000ms",
+        }),
+      ]),
+    });
+    const res = await app.request("/healthz");
+    expect(res.status).toBe(503);
+    expect((await res.json()) as HealthzBody).toEqual({
+      ok: false,
+      unhealthy: [
+        {
+          slug: "v",
+          reason: "failed",
+          state: "failed",
+          consecutiveFailures: 0,
+          lastError: "crash-loop: 10 crashes within 300000ms",
+        },
+      ],
+    });
+  });
+
+  test("503 `failed_attempts` at 3 consecutive failures with no config (the default)", async () => {
+    const app = buildHttpApp({
+      supervisor: fakeSupervisor([
+        makeVaultStatus({ slug: "v", state: "starting", pid: null, consecutiveFailures: 3 }),
+      ]),
+    });
+    const res = await app.request("/healthz");
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as HealthzBody;
+    expect(body.ok).toBe(false);
+    expect(body.unhealthy?.map((u) => [u.slug, u.reason, u.consecutiveFailures])).toEqual([
+      ["v", "failed_attempts", 3],
+    ]);
+  });
+
+  test("the threshold comes from Config.syncHealth when a config is wired", async () => {
+    const at = (n: number): Supervisor =>
+      fakeSupervisor([makeVaultStatus({ slug: "v", consecutiveFailures: n })]);
+    const config = configWithThreshold(5);
+    expect((await buildHttpApp({ supervisor: at(3), config }).request("/healthz")).status).toBe(
+      200,
+    );
+    expect((await buildHttpApp({ supervisor: at(5), config }).request("/healthz")).status).toBe(
+      503,
+    );
+  });
+
+  test("threshold 0 keeps /healthz at 200 {ok:true} even for a failed vault", async () => {
+    const app = buildHttpApp({
+      supervisor: fakeSupervisor([makeVaultStatus({ slug: "v", state: "failed", pid: null })]),
+      config: configWithThreshold(0),
+    });
+    const res = await app.request("/healthz");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  test("lists only the unhealthy vaults, in configuration order", async () => {
+    const app = buildHttpApp({
+      supervisor: fakeSupervisor([
+        makeVaultStatus({ slug: "a", consecutiveFailures: 4 }),
+        makeVaultStatus({ slug: "b" }),
+        makeVaultStatus({ slug: "c", state: "failed", pid: null }),
+      ]),
+    });
+    const res = await app.request("/healthz");
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as HealthzBody;
+    expect(body.unhealthy?.map((u) => [u.slug, u.reason])).toEqual([
+      ["a", "failed_attempts"],
+      ["c", "failed"],
+    ]);
+  });
+
+  test("200 at startup, before any vault has failed an attempt", async () => {
+    const app = buildHttpApp({
+      supervisor: fakeSupervisor([makeVaultStatus({ slug: "v", state: "starting", pid: null })]),
+    });
+    expect((await app.request("/healthz")).status).toBe(200);
   });
 });

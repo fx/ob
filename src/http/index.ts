@@ -2,7 +2,10 @@
  * HTTP adapter — Hono app construction.
  *
  * Health endpoints:
- *   - `GET /healthz` — liveness; 200 once the listener is up.
+ *   - `GET /healthz` — liveness; 200 `{ok:true}` unless a vault's sync is
+ *                      down — `failed`, or at least the configured number
+ *                      of consecutive failed attempts — in which case 503
+ *                      `{ok:false, unhealthy}`. Never gates any other route.
  *   - `GET /readyz`  — readiness AND the aggregate status surface; 200 only
  *                      when at least one vault is configured, every
  *                      supervised vault is `running`, and every configured
@@ -23,11 +26,11 @@
 
 import { join } from "node:path";
 import { Hono } from "hono";
-import type { Config } from "../config/index.ts";
+import { type Config, DEFAULT_SYNC_HEALTH } from "../config/index.ts";
 import type { Indexer, IndexerStatus } from "../indexer/index.ts";
 import { type Logger, createLogger } from "../log.ts";
 import { buildMcpRoutes } from "../mcp/index.ts";
-import { type Supervisor, isAllRunning } from "../obsidian/index.ts";
+import { type Supervisor, isAllRunning, unhealthyVaults } from "../obsidian/index.ts";
 import type { VaultDescriptor, VaultServiceDeps } from "../vault/files.ts";
 import { startingIndexerStatus } from "../vault/status.ts";
 import { mapErrorToHttp } from "./errors.ts";
@@ -43,12 +46,16 @@ export interface HttpAppDeps {
   /**
    * Optional during 0001 (pre-supervisor); required for `/v1/*`. The
    * `/healthz` and `/readyz` endpoints still work without it (an absent
-   * supervisor reports an empty list, which forces 503).
+   * supervisor reports an empty list, which forces `/readyz` to 503 and
+   * leaves `/healthz` at 200).
    */
   readonly supervisor?: Supervisor;
   /** Per spec: `/readyz` 200 requires every indexer in `ready`. */
   readonly indexer?: Indexer;
-  /** Required for `/v1/*` because routes resolve vault roots from cfg. */
+  /**
+   * Required for `/v1/*` because routes resolve vault roots from cfg. Also
+   * supplies the `/healthz` sync threshold; without it the default applies.
+   */
   readonly config?: Config;
   /** Override default logger (tests). */
   readonly logger?: Logger;
@@ -82,7 +89,14 @@ export function buildHttpApp(deps: HttpAppDeps = {}): Hono {
   app.use("*", requestIdMiddleware());
   app.use("*", logMiddleware({ logger }));
 
-  app.get("/healthz", (c) => c.json({ ok: true }));
+  const healthzThreshold = (deps.config?.syncHealth ?? DEFAULT_SYNC_HEALTH).healthzFailureThreshold;
+  // Liveness reads the same in-memory `list()` as `/readyz` — never anything
+  // that can block — and only reports. Request handling below never consults
+  // sync health: a vault whose sync is down still serves reads and writes.
+  app.get("/healthz", (c) => {
+    const unhealthy = unhealthyVaults(deps.supervisor?.list() ?? [], healthzThreshold);
+    return unhealthy.length === 0 ? c.json({ ok: true }) : c.json({ ok: false, unhealthy }, 503);
+  });
   app.get("/readyz", (c) => {
     const sup = deps.supervisor;
     const vaults = sup === undefined ? [] : sup.list();

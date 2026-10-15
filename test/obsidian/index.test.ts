@@ -16,10 +16,11 @@ import {
   SyncConfigPermanentError,
   isAllRunning,
   startSupervisor,
+  unhealthyVaults,
 } from "../../src/obsidian/index.ts";
 import { createFakeSpawner } from "../helpers/fakeSpawner.ts";
 import { createFakeWatchdogFs, createPollDriver } from "../helpers/fakeWatchdogFs.ts";
-import { TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
+import { TEST_SYNC_HEALTH, TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
 
 const silentLog = createLogger({ level: "error", write: () => undefined });
 
@@ -40,6 +41,7 @@ function buildConfig(over: Partial<Config> = {}): Config {
     logLevel: "error",
     syncConfigEnv: {},
     syncWatchdog: TEST_WATCHDOG_OFF,
+    syncHealth: TEST_SYNC_HEALTH,
     ...over,
   };
 }
@@ -1003,6 +1005,142 @@ describe("startSupervisor — sync-log watchdog wiring", () => {
     expect(warns).toContain("sync log append exceeded the per-poll cap; skipped ahead");
     release();
     await sup.stop();
+  });
+});
+
+describe("startSupervisor — opt-in restart ceilings from Config.syncHealth", () => {
+  test("OB_SYNC_MAX_CRASHES reaches the child: 2 crashes fail the vault", async () => {
+    const sp = createFakeSpawner({ defaultHandle: { exitCode: 1 } });
+    sp.enqueue({ exitCode: 0 }); // sync-status: already configured
+    const sup = await startSupervisor(
+      buildConfig({ syncHealth: { ...TEST_SYNC_HEALTH, maxCrashes: 2 } }),
+      {
+        logger: silentLog,
+        spawner: sp,
+        sleep: noSleep,
+        xdgConfigHome: makeTmp("ob-xdg-"),
+        homeDir: makeTmp("ob-home-"),
+        skipAuthBootstrap: true,
+      },
+    );
+    await waitFor(() => sup.get("v")?.state === "failed", "vault failed");
+    const snap = sup.get("v");
+    expect(snap?.lastError).toContain("crash-loop: 2 crashes");
+    expect(snap?.consecutiveFailures).toBe(2);
+    // sync-status plus exactly two `ob sync` attempts.
+    expect(sp.calls.filter((c) => c.args[0] === "sync")).toHaveLength(2);
+    await sup.stop();
+  });
+
+  test("OB_SYNC_MAX_STALL_KILLS reaches the child: 1 stall kill fails the vault", async () => {
+    const xdg = makeTmp("ob-xdg-");
+    const driver = createPollDriver();
+    const cfgDataDir = makeTmp("ob-data-");
+    const syncEntry = join(xdg, "obsidian-headless", "sync", "abc");
+    mkdirSync(syncEntry, { recursive: true });
+    writeFileSync(
+      join(syncEntry, "config.json"),
+      JSON.stringify({ vaultPath: join(cfgDataDir, "vaults", "v") }),
+    );
+    writeFileSync(join(syncEntry, "sync.log"), "");
+
+    const sp = createFakeSpawner();
+    sp.enqueue({ exitCode: 0 }); // sync-status: already configured
+    let resolveSync!: (n: number) => void;
+    sp.enqueue({
+      exitWhen: new Promise<number>((r) => {
+        resolveSync = r;
+      }),
+      onKill: () => resolveSync(0),
+    });
+    const sup = await startSupervisor(
+      buildConfig({
+        dataDir: cfgDataDir,
+        syncWatchdog: { stallTimeoutMs: 300_000, pollIntervalMs: 30_000, logTail: false },
+        syncHealth: { ...TEST_SYNC_HEALTH, maxStallKills: 1 },
+      }),
+      {
+        logger: silentLog,
+        spawner: sp,
+        sleep: driver.sleep,
+        now: driver.now,
+        xdgConfigHome: xdg,
+        homeDir: makeTmp("ob-home-"),
+        skipAuthBootstrap: true,
+      },
+    );
+    await waitFor(() => sup.get("v")?.watchdog.state === "armed", "watchdog armed");
+    await driver.settle();
+    driver.advance(300_000);
+    driver.release();
+    await waitFor(() => sup.get("v")?.state === "failed", "vault failed");
+    expect(sup.get("v")?.lastError).toBe("sync stall-loop: 1 stall kills within 3600000ms");
+    await sup.stop();
+  });
+});
+
+describe("unhealthyVaults", () => {
+  const failed = makeVaultStatus({
+    slug: "f",
+    state: "failed",
+    pid: null,
+    consecutiveFailures: 7,
+    lastError: "crash-loop: 10 crashes within 300000ms",
+  });
+
+  test("threshold 0 takes sync out of liveness, even for a failed vault", () => {
+    expect(unhealthyVaults([failed], 0)).toEqual([]);
+  });
+
+  test("an empty list is healthy", () => {
+    expect(unhealthyVaults([], 3)).toEqual([]);
+  });
+
+  test("a failed vault is reported as `failed`, which wins over a high counter", () => {
+    expect(unhealthyVaults([failed], 3)).toEqual([
+      {
+        slug: "f",
+        reason: "failed",
+        state: "failed",
+        consecutiveFailures: 7,
+        lastError: "crash-loop: 10 crashes within 300000ms",
+      },
+    ]);
+  });
+
+  test("the counter trips at the threshold, not one below it", () => {
+    const below = makeVaultStatus({ slug: "a", state: "starting", consecutiveFailures: 2 });
+    const at = makeVaultStatus({
+      slug: "b",
+      state: "running",
+      consecutiveFailures: 3,
+      lastError: "sync stalled",
+    });
+    expect(unhealthyVaults([below], 3)).toEqual([]);
+    expect(unhealthyVaults([at], 3)).toEqual([
+      {
+        slug: "b",
+        reason: "failed_attempts",
+        state: "running",
+        consecutiveFailures: 3,
+        lastError: "sync stalled",
+      },
+    ]);
+  });
+
+  test("lists only the offenders, in configuration order", () => {
+    const out = unhealthyVaults(
+      [
+        makeVaultStatus({ slug: "z", consecutiveFailures: 5 }),
+        makeVaultStatus({ slug: "ok" }),
+        failed,
+      ],
+      3,
+    );
+    expect(out.map((u) => [u.slug, u.reason])).toEqual([
+      ["z", "failed_attempts"],
+      ["f", "failed"],
+    ]);
   });
 });
 

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Config } from "../../src/config/index.ts";
 import { EmbedderError, buildEmbedder } from "../../src/embeddings/index.ts";
-import { TEST_WATCHDOG_OFF } from "../helpers/vaultStatus.ts";
+import { TEST_SYNC_HEALTH, TEST_WATCHDOG_OFF } from "../helpers/vaultStatus.ts";
 
 function baseConfig(over: Partial<Config> = {}): Config {
   const cfg: Config = {
@@ -15,6 +15,7 @@ function baseConfig(over: Partial<Config> = {}): Config {
     logLevel: "error",
     syncConfigEnv: {},
     syncWatchdog: TEST_WATCHDOG_OFF,
+    syncHealth: TEST_SYNC_HEALTH,
     ...over,
   };
   return cfg;

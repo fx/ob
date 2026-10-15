@@ -14,7 +14,7 @@ import { buildHttpApp } from "../../src/http/index.ts";
 import { type Indexer, startIndexer } from "../../src/indexer/index.ts";
 import type { Logger } from "../../src/log.ts";
 import type { Supervisor, VaultStatus } from "../../src/obsidian/index.ts";
-import { TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
+import { TEST_SYNC_HEALTH, TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
 
 function silent(): Logger {
   return {
@@ -43,7 +43,14 @@ export interface HttpFixture {
   readonly stop: () => Promise<void>;
 }
 
-export async function makeHttpFixture(label = "http"): Promise<HttpFixture> {
+/**
+ * `status` overrides fields of the fixture's single (otherwise healthy) vault
+ * status — e.g. a vault whose sync is down, to prove routes ignore it.
+ */
+export async function makeHttpFixture(
+  label = "http",
+  status: Partial<VaultStatus> = {},
+): Promise<HttpFixture> {
   const dataDir = mkdtempSync(join(tmpdir(), `ob-${label}-`));
   const slug = "v";
   const vaultRoot = join(dataDir, "vaults", slug);
@@ -60,6 +67,7 @@ export async function makeHttpFixture(label = "http"): Promise<HttpFixture> {
     logLevel: "error",
     syncConfigEnv: {},
     syncWatchdog: TEST_WATCHDOG_OFF,
+    syncHealth: TEST_SYNC_HEALTH,
   };
 
   const indexer = await startIndexer(cfg, {
@@ -67,7 +75,7 @@ export async function makeHttpFixture(label = "http"): Promise<HttpFixture> {
     embedder: buildHashEmbedder(8),
   });
 
-  const supervisor = fakeSupervisor([makeVaultStatus({ slug })]);
+  const supervisor = fakeSupervisor([makeVaultStatus({ ...status, slug })]);
 
   const app = buildHttpApp({ supervisor, indexer, config: cfg, logger: silent() });
 

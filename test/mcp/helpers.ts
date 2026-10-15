@@ -25,7 +25,7 @@ import { type ToolRegistry, buildMcpServer } from "../../src/mcp/server.ts";
 import type { ToolDefinition } from "../../src/mcp/tool.ts";
 import type { Supervisor, VaultStatus } from "../../src/obsidian/index.ts";
 import type { VaultDescriptor, VaultServiceDeps } from "../../src/vault/files.ts";
-import { TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
+import { TEST_SYNC_HEALTH, TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
 
 function silent(): Logger {
   return {
@@ -89,6 +89,7 @@ export async function makeMcpFixture(opts: McpFixtureOptions = {}): Promise<McpF
     logLevel: "error",
     syncConfigEnv: {},
     syncWatchdog: TEST_WATCHDOG_OFF,
+    syncHealth: TEST_SYNC_HEALTH,
   };
 
   const indexer = await startIndexer(cfg, {
@@ -96,12 +97,14 @@ export async function makeMcpFixture(opts: McpFixtureOptions = {}): Promise<McpF
     embedder: buildHashEmbedder(8),
   });
 
-  // Non-default watchdog values on purpose: the parity tests deep-compare
-  // REST and MCP payloads, and defaults would let a dropped field pass.
+  // Non-default watchdog and failure-count values on purpose: the parity
+  // tests deep-compare REST and MCP payloads, and defaults would let a
+  // dropped field pass. 2 stays below the default `/healthz` threshold.
   const supervisor = fakeSupervisor(
     slugs.map((s) =>
       makeVaultStatus({
         slug: s,
+        consecutiveFailures: 2,
         lastSyncActivityAt: 1_700_000_000_000,
         watchdog: {
           state: "tailing",

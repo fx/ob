@@ -63,7 +63,8 @@ All runtime configuration MUST come from environment variables. The container MU
 | `OPENAI_API_KEY` | when provider=openai | API key. |
 | `OPENAI_BASE_URL` | no | Override OpenAI base URL (for compatible endpoints). |
 | `LOG_LEVEL` | no | `trace` `debug` `info` `warn` `error`. Default `info`. |
-| `OB_SYNC_*` | no | The sync-behavior family, owned by the [Obsidian Sync](../obsidian-sync/) spec: `ob sync-config` flags (see [Sync configuration bootstrap](../obsidian-sync/index.md#sync-configuration-bootstrap)) and the sync-log watchdog knobs `OB_SYNC_STALL_TIMEOUT_SECONDS` / `OB_SYNC_STALL_POLL_SECONDS` / `OB_SYNC_LOG_TAIL` (see [Sync stall watchdog](../obsidian-sync/index.md#sync-stall-watchdog)). Every member is optional and every member is validated at startup, before any `ob` child is spawned; an invalid value exits 78. |
+| `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD` | no | Consecutive failed sync attempts on any one vault at which `GET /healthz` returns 503. Default `3`; `0` takes sync out of liveness. Owned by the [Obsidian Sync](../obsidian-sync/index.md#restart-ceilings-and-liveness) spec; the `/healthz` rule itself by [REST API › Health endpoints](../rest-api/index.md#health-endpoints). Validated at startup; an invalid value exits 78. |
+| `OB_SYNC_*` | no | The sync-behavior family, owned by the [Obsidian Sync](../obsidian-sync/) spec: `ob sync-config` flags (see [Sync configuration bootstrap](../obsidian-sync/index.md#sync-configuration-bootstrap)) and the sync-log watchdog knobs `OB_SYNC_STALL_TIMEOUT_SECONDS` / `OB_SYNC_STALL_POLL_SECONDS` / `OB_SYNC_LOG_TAIL` (see [Sync stall watchdog](../obsidian-sync/index.md#sync-stall-watchdog)), and the opt-in restart ceilings `OB_SYNC_MAX_CRASHES` / `OB_SYNC_MAX_STALL_KILLS` (see [Restart ceilings and liveness](../obsidian-sync/index.md#restart-ceilings-and-liveness)). Every member is optional and every member is validated at startup, before any `ob` child is spawned; an invalid value exits 78. |
 
 - Missing `VAULTS_JSON` MUST cause the process to exit non-zero before opening any port.
 - Missing `OBSIDIAN_AUTH_TOKEN` MUST cause the process to exit non-zero **only when** no `auth_token` file is present at `${XDG_CONFIG_HOME:-${HOME:-/home/ob}/.config}/obsidian-headless/auth_token`. A pre-existing token file (e.g. mounted volume) is an acceptable substitute, per [Obsidian Sync › Auth-token bootstrap](../obsidian-sync/index.md#credential-bootstrap).
@@ -170,19 +171,27 @@ REST and MCP MUST be two interfaces to the same functionality, not two implement
 
 - Structured JSON logs MUST be emitted to stdout. Each log line MUST include `level`, `msg`, `vault` (when applicable), and a monotonic `ts`.
 - The HTTP server MUST expose:
-  - `GET /healthz` — liveness, returns 200 once the process is up.
+  - `GET /healthz` — liveness, returns 200 once the process is up and fails only on persistent sync failure.
   - `GET /readyz` — readiness **and** the aggregate process-health surface. Returns 503 whenever any critical component is not healthy, and its body reports the state of every critical long-lived component. The exact 200/503 conditions and the body shape are owned by [REST API › Health endpoints](../rest-api/index.md#health-endpoints).
   - `GET /metrics` — text/plain Prometheus exposition (basic counters: indexed docs, search queries, sync errors).
-- `/healthz` MUST remain a dependency-free liveness probe: its status code MUST NOT depend on vault sync state, indexer state, or any other subsystem, and it MUST NOT read any state that can block. Sync health MUST NOT be attached to it. The container is a single process hosting the API and every vault child, so a liveness failure restarts all of them; using one wedged vault to trigger that would take down the API and every healthy vault to recover one child. In-process supervision (restarting the individual `ob` child) is the correct blast radius, and `/readyz` is the correct place to *report* the condition.
+- `/healthz` MUST reflect sync health only through the persistent-failure rule owned by [REST API › Health endpoints](../rest-api/index.md#health-endpoints) — a vault in `failed`, or one whose `consecutiveFailures` has reached `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD` — and MUST NOT depend on indexer state or any other subsystem, nor read any state that can block. The container is a single process hosting the API and every vault child, so a liveness failure restarts all of them. In-process supervision (restarting the individual `ob` child, forever by default) remains the first line and handles transients; liveness is the backstop once those retries have demonstrably not brought sync back. [Change 0017](../../changes/0017-sync-liveness.md) records why this reverses [0015](../../changes/0015-sync-stall-watchdog.md)'s "no sync health on `/healthz`": once a ceiling made `failed` terminal, a dead sync was invisible to everything outside the process and stayed dead until someone restarted the pod by hand.
+- Sync health MUST NOT gate request handling: while `/healthz` reports a vault's sync down, the API keeps serving reads and writes for it.
 - `/readyz` MUST be the single aggregate status surface: every critical long-lived in-process component MUST be represented in its body. Today that is the per-vault `ob sync` children and the per-vault indexers. Introducing another long-lived component MUST extend the body rather than add a fourth health route — a status surface that does not enumerate everything long-lived is worse than none, because it reads as an all-clear.
 
-#### Scenario: A wedged vault does not restart the pod
+#### Scenario: A transient wedge does not restart the pod
 
-- **GIVEN** two configured vaults, one of whose `ob sync` children has stopped making progress
+- **GIVEN** two configured vaults, one of whose `ob sync` children has stopped making progress and been stall-killed once
 - **WHEN** the orchestrator polls `GET /healthz`
-- **THEN** the response is 200 — the process is alive and serving
+- **THEN** the response is 200 — one failed attempt is below the threshold
 - **AND** `GET /readyz` reports 503 with the affected vault's state, `lastError`, and `lastSyncActivityAt` in the body
 - **AND** the healthy vault's child and the HTTP listener are untouched
+
+#### Scenario: A persistently down vault fails liveness
+
+- **GIVEN** a vault whose last three `ob sync` attempts all failed without one recovering
+- **WHEN** the orchestrator polls `GET /healthz`
+- **THEN** the response is 503 naming that vault, so the liveness probe restarts the pod
+- **AND** until it does, the API keeps serving reads and writes for every vault
 
 ## Design
 
@@ -263,3 +272,4 @@ process.on("SIGINT", shutdown);
 | 2026-08-09 | Policy change: the runtime stage's apt packages (`tini`, `curl`, `ca-certificates`) are now installed unpinned, and hadolint's DL3008 is silenced by an inline directive on that one instruction. The exact `=<version>` pins were breaking unrelated builds every time Debian dropped a superseded version on a point release; apt-level reproducibility is deliberately traded for build resilience. The toolchain ARGs (`NODE_VERSION`, `BUN_VERSION`, `OBSIDIAN_HEADLESS_VERSION`) and the base image stay pinned and remain the basis for image reproducibility. Supersedes the "`tini` pinned" detail recorded in [0006 — Production image](../../changes/0006-production-image.md), which stands as the historical record of the original decision. | — |
 | 2026-08-21 | Observability: `/healthz` is pinned as a dependency-free liveness probe that MUST NOT reflect sync or indexer state, and `/readyz` is designated the single aggregate status surface that MUST enumerate every critical long-lived component. Rationale recorded: the container is one process hosting the API and every vault child, so failing liveness on a wedged vault would restart the API and the healthy vaults to recover one child. Config table gains a row for the `OB_SYNC_*` family (owned by the Obsidian Sync spec), covering both the existing `sync-config` vars and the new watchdog knobs. | [Change 0015](../../changes/0015-sync-stall-watchdog.md) |
 | 2026-09-15 | Project Layout gains a `site/` top-level directory for the static landing site at `ob.fx.gd`. It is a standalone package outside the root lint/typecheck/coverage scope, with `site/` excluded from root Biome through `biome.json`'s ignore list, and is never copied into the image; its behavior is owned by the [Landing Site spec](../landing-site/index.md). | [Change 0016](../../changes/0016-landing-site.md) |
+| 2026-10-15 | Observability: `/healthz` now fails on persistent sync failure — a `failed` vault, or `consecutiveFailures` at `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD` — reversing 0015's dependency-free rule, with the rationale recorded; it still never reflects indexer state or reads blocking state, and sync health never gates request handling. Config table gains `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD`, and the `OB_SYNC_*` row gains `OB_SYNC_MAX_CRASHES` / `OB_SYNC_MAX_STALL_KILLS`. | [Change 0017](../../changes/0017-sync-liveness.md) |

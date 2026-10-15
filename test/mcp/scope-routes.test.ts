@@ -40,7 +40,7 @@ import {
 import { SCOPED_INSTRUCTIONS, VAULT_WIDE_COUNTS_NOTE } from "../../src/mcp/scope-tools.ts";
 import type { Supervisor } from "../../src/obsidian/index.ts";
 import type { VaultDescriptor } from "../../src/vault/files.ts";
-import { TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
+import { TEST_SYNC_HEALTH, TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
 import { waitFor } from "./helpers.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -110,6 +110,7 @@ async function makeScopeFixture(
     logLevel: "error",
     syncConfigEnv: {},
     syncWatchdog: TEST_WATCHDOG_OFF,
+    syncHealth: TEST_SYNC_HEALTH,
   };
 
   const real = await startIndexer(cfg, { logger: silent(), embedder: buildHashEmbedder(8) });
