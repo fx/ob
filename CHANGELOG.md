@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/fx/ob/compare/v1.4.0...v1.5.0) (2026-10-15)
+
+
+### Features
+
+* **sync:** retry sync forever by default and fail /healthz while sync stays down ([#28](https://github.com/fx/ob/issues/28)) ([4066035](https://github.com/fx/ob/commit/40660358cb39385aa1b4c60031157eb184b94753))
+
 ## [1.4.0](https://github.com/fx/ob/compare/v1.3.0...v1.4.0) (2026-09-15)
 
 
