@@ -79,12 +79,16 @@ this table mirrors it for convenience.
 | `OB_SYNC_STALL_TIMEOUT_SECONDS` | no | Seconds of sync-log silence after which a running `ob sync` child is treated as crashed and killed (SIGTERM, then SIGKILL after 10 s). Default `300`. `0` disarms the kill while leaving resolution, tailing, and `lastSyncActivityAt` in place. Must match `^\d+$` and be at most `86400`; anything else exits 78 at startup. |
 | `OB_SYNC_STALL_POLL_SECONDS` | no | Seconds between polls of the resolved sync log. Default `30`. Must be at least `1`, at most `86400`, and — when the timeout is greater than `0` — no greater than the timeout. |
 | `OB_SYNC_LOG_TAIL` | no | `true` (default) or `false`. When `true`, newly appended sync-log lines are forwarded to the parent's structured logs as `ob output` with `stream: "sync.log"`. |
+| `OB_SYNC_MAX_CRASHES` | no | Opt-in crash-loop ceiling: a vault goes `failed` (no more restarts) once this many `ob sync` attempts end within a fixed 5-minute window. Default `0` — no ceiling, retry forever with backoff capped at 60 s. Must match `^\d+$` and be at most `10000`; values above about `10` can never be reached. |
+| `OB_SYNC_MAX_STALL_KILLS` | no | Opt-in stall-loop ceiling: a vault goes `failed` once this many stall kills land within a fixed 60-minute window. Default `0` — no ceiling. Same validation; values above about `12` can never be reached, and it is inert with `OB_SYNC_STALL_TIMEOUT_SECONDS=0`. |
+| `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD` | no | `GET /healthz` returns 503 once any vault has failed this many `ob sync` attempts in a row without one recovering, or any vault is `failed`. Default `3`; `0` takes sync out of `/healthz` (always `200 {"ok":true}`). Same validation. |
 
 The `OB_SYNC_*` family runs `ob sync-config` once per vault between
 `ob sync-setup` and `ob sync --continuous`. Unset vars omit the
 corresponding flag entirely (preserving whatever was on disk); empty
 strings forward verbatim as the upstream "empty to clear" sentinel; if
-every `OB_SYNC_*` var is unset the call is skipped. Invalid enum values
+every sync-config var above (`OB_SYNC_FILE_TYPES` through `OB_SYNC_CONFIGS`)
+is unset the call is skipped; the watchdog and ceiling vars never reach it. Invalid enum values
 fail fast with exit 78 before any vault is touched. For example,
 `-e OB_SYNC_FILE_TYPES=image,audio,pdf,video,unsupported` keeps the
 default attachment types AND syncs everything else (the typical fix for
@@ -101,9 +105,13 @@ to skip the local model entirely.
 
 ### Health & readiness
 
-- `GET /healthz` — liveness; returns 200 `{"ok":true}` once the process is up.
-  Wired into the image's `HEALTHCHECK`. Its status code never varies with
-  vault, supervisor, or indexer state.
+- `GET /healthz` — liveness; returns 200 `{"ok":true}` once the process is up,
+  and 503 `{"ok":false,"unhealthy":[…]}` only while a vault's sync is down:
+  the vault is `failed`, or it has failed `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD`
+  (default 3) `ob sync` attempts in a row without one recovering. Each
+  `unhealthy` entry names the vault's `slug`, `reason` (`failed` or
+  `failed_attempts`), `state`, `consecutiveFailures`, and `lastError`. Never
+  reflects indexer state. Wired into the image's `HEALTHCHECK`.
 - `GET /readyz` — readiness **and** the aggregate status surface. Returns
   `{ok, vaults, indexers}` on both paths, and 200 only when at least one vault
   is configured, every configured vault is `running`, and every configured
@@ -113,25 +121,34 @@ to skip the local model entirely.
 
 The image's `HEALTHCHECK` deliberately probes `/healthz` rather than
 `/readyz` so a long initial scan doesn't flap the container as unhealthy.
-Orchestrators that want readiness-gated traffic should configure their own
-probe against `/readyz`.
+It does mark the container `unhealthy` during a persistent sync outage;
+plain Docker only reports that, it does not restart on it. Orchestrators
+that want readiness-gated traffic should configure their own probe against
+`/readyz`.
 
 > **The Kubernetes liveness probe MUST stay pointed at `/healthz`.** Do not
-> "improve" the deployment by repointing it at `/readyz`. The container is a
-> single process hosting the HTTP API *and* every vault child, so failing
-> liveness because one vault is unhealthy restarts the API and every healthy
-> vault to recover one child — and a vault that is failing for an external
-> reason turns into an unbounded pod restart loop. `/readyz` is the readiness
-> probe and the alerting surface; `/healthz` is the restart decision.
+> "improve" the deployment by repointing it at `/readyz`, which fails during
+> every startup scan and every transient reconnect. `/healthz` fails only
+> when a vault is `failed` or has failed `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD`
+> attempts in a row without recovering — about 15 minutes of continuous
+> wedge at the defaults (three 5-minute stall kills). By then in-process
+> retries have demonstrably not brought sync back, so restarting the pod is
+> the backstop. The container is a single process hosting the HTTP API *and*
+> every vault child, so that restart takes the API and every healthy vault
+> with it; until it happens the API keeps serving reads and writes for every
+> vault, sync down or not. Set `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD=0` for the
+> old always-200 behaviour. `/readyz` is the readiness probe and the alerting
+> surface; `/healthz` is the restart decision.
 
 #### Recognizing a stalled vault
 
 An `ob sync --continuous` child can stop making progress while staying alive
 and never exiting. The supervisor watches each vault's upstream `sync.log` and
 treats prolonged silence as a crash: SIGTERM, then SIGKILL 10 seconds later,
-then the ordinary restart backoff. Three such kills within an hour — or the
-usual ten crashes in five minutes — put the vault in `failed`, where restarts
-stop and `/readyz` reports 503 with the vault listed.
+then the ordinary restart backoff. Retries continue indefinitely unless
+`OB_SYNC_MAX_STALL_KILLS` or `OB_SYNC_MAX_CRASHES` is set; reaching a
+configured ceiling puts the vault in `failed`, where restarts stop and both
+`/readyz` and `/healthz` report 503 with the vault listed.
 
 What to look at in the `/readyz` body, per vault:
 
@@ -140,10 +157,16 @@ What to look at in the `/readyz` body, per vault:
   stays pinned at the moment the child stopped writing.
 - **`watchdog.stallKills`** — cumulative stall kills for that vault over the
   process lifetime. Climbing means the vault keeps wedging and getting
-  replaced; three inside an hour fails it.
+  replaced.
+- **`consecutiveFailures`** — `ob sync` attempts (exits and stall kills) in a
+  row since the last one that recovered, i.e. showed sync-log activity at
+  least 5 minutes after it spawned. It reads `0` again as soon as the running
+  attempt recovers. At `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD` it fails
+  `/healthz`.
 - **`lastError`** — reads `sync stalled: no sync.log activity for <N>ms (last
-  activity <timestamp>)` after a stall kill, and `sync stall-loop: 3 stall
-  kills within 3600000ms` once the ceiling is reached. That is what tells a
+  activity <timestamp>)` after a stall kill, and — only when a ceiling is
+  configured — `sync stall-loop: 3 stall kills within 3600000ms` once it is
+  reached. That is what tells a
   stalled vault apart from a crashed one without reading logs.
 - **`watchdog.state`** — `armed` (log resolved, stall detection active),
   `tailing` (resolved, kill disarmed via `OB_SYNC_STALL_TIMEOUT_SECONDS=0`),

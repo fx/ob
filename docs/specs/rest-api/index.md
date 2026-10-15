@@ -22,9 +22,28 @@ The REST API exposes vault-scoped CRUD over arbitrary files (Markdown, images, P
 
 ### Health endpoints
 
-`GET /healthz` is the liveness probe and `GET /readyz` is both the readiness probe and the aggregate status surface for every critical long-lived component. The split, and the prohibition on wiring subsystem health into liveness, are owned by [Architecture › Observability](../architecture/index.md#observability).
+`GET /healthz` is the liveness probe and `GET /readyz` is both the readiness probe and the aggregate status surface for every critical long-lived component. The split, and the rule that liveness reflects only persistent sync failure, are owned by [Architecture › Observability](../architecture/index.md#observability).
 
-- `GET /healthz` MUST return `200 {"ok":true}` once the process has bound the port. Its status code and body MUST NOT vary with vault, supervisor, or indexer state, and it MUST NOT read state that can block.
+- `GET /healthz` MUST return `200 {"ok":true}` once the process has bound the port, unless a vault's sync is down. A vault's sync is down when, with `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD` (default `3`) greater than 0, either:
+  - its supervisor state is `failed` (reason `failed`) — an opt-in restart ceiling, a permanent `sync-setup` / `sync-config` failure, or a failure to create its directory; or
+  - its `consecutiveFailures` is at least the threshold (reason `failed_attempts`) — that many supervised attempts in a row ended without one recovering in between. `consecutiveFailures` is owned by [Obsidian Sync › Sync supervision](../obsidian-sync/index.md#sync-supervision).
+
+  `failed` wins when both apply. `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD=0` takes sync out of liveness entirely, and `/healthz` then never returns anything but `200 {"ok":true}`.
+- When any vault's sync is down, `GET /healthz` MUST return `503` with this body, listing only the vaults whose sync is down, in configuration order:
+
+  ```jsonc
+  {
+    "ok": false,
+    "unhealthy": [
+      { "slug": string, "reason": "failed" | "failed_attempts",
+        "state": VaultState, "consecutiveFailures": number, "lastError": string | null }
+    ]
+  }
+  ```
+
+- The 200 body MUST stay exactly `{"ok":true}`. `/healthz` MUST NOT read indexer state, MUST NOT read state that can block — it reads the supervisor's synchronous in-memory `list()`, the same input as `/readyz` — and MUST return 200 when no supervisor is wired: unlike readiness, liveness MUST NOT fail before a supervisor exists.
+- A vault starting up, or retrying below the threshold, MUST NOT fail `/healthz`. Only persistent failure does: liveness restarts the whole process, API and healthy vaults included, so it is the backstop for a sync that in-process retries have not brought back, not a reaction to a single reconnect.
+- Sync health MUST NOT gate request handling. Every REST route and MCP call MUST keep serving reads and writes for a vault whose sync is down, whatever `/healthz` reports.
 - `GET /readyz` MUST return the following body on both the 200 and the 503 path:
 
   ```jsonc
@@ -53,7 +72,22 @@ The REST API exposes vault-scoped CRUD over arbitrary files (Markdown, images, P
 - **WHEN** the client calls `GET /readyz`
 - **THEN** the response is `503` with `ok: false`
 - **AND** the entry for `v` in `vaults` carries `state` `starting`, a `lastError` naming the stall, and a `lastSyncActivityAt` pinned to the last upstream sync-log write
-- **AND** `GET /healthz` still returns `200 {"ok":true}`
+- **AND** `GET /healthz` still returns `200 {"ok":true}` (first stall kill; below the threshold)
+
+#### Scenario: Persistent sync failure fails liveness
+
+- **GIVEN** `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD` unset
+- **AND** vault `v` whose last three supervised attempts all failed with no recovery in between
+- **WHEN** the client calls `GET /healthz`
+- **THEN** the response is `503` with `ok: false` and one `unhealthy` entry for `v` with reason `failed_attempts` and `consecutiveFailures` 3
+- **AND** `PUT` and `GET` on `/v1/vaults/v/files/*` and MCP `read_file` still succeed
+
+#### Scenario: Failed vault fails liveness
+
+- **GIVEN** vault `v` in state `failed`
+- **WHEN** the client calls `GET /healthz`
+- **THEN** the response is `503` with one `unhealthy` entry for `v` with reason `failed`
+- **AND** with `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD=0` the same call returns `200 {"ok":true}`
 
 #### Scenario: Everything healthy
 
@@ -367,3 +401,4 @@ function safeJoin(root: string, rel: string): string {
 | 2026-05-25 | Added Folder CRUD section: `GET /v1/vaults/:slug/folders` (list) plus `PUT` and `DELETE` on `/v1/vaults/:slug/folders/*path` (create / delete). Required because `GET /v1/vaults/:slug/files` only emits files, hiding empty folders. New error code `folder_not_empty` (409) added to the closed set. | [Change 0012](../../changes/0012-folder-operations.md) |
 | 2026-07-01 | JSON read variant (`Accept: application/json`) now accepts `.pdf` and returns extracted text with `pdf: { pages, hasTextLayer }` metadata; other non-Markdown files still get `406`. New error code `extraction_failed` (422) added to the closed set. Plain GET byte semantics unchanged. | [Change 0013](../../changes/0013-pdf-text-extraction.md) |
 | 2026-08-21 | Health endpoints section rewritten: `/healthz` is pinned as a dependency-free liveness probe, and `/readyz` gains an explicit body contract (`{ ok, vaults, indexers }`, identical in shape on 200 and 503) plus the exact three-part 200 rule. The `vaults` entries inherit the supervisor's new `lastSyncActivityAt` and `watchdog` fields, which also surface unchanged through `GET /v1/vaults` and `GET /v1/vaults/:slug`. One status-code change: `indexers` must now carry an entry for every configured vault, synthesized as `starting` when the indexer has not registered it, so a vault missing from that array can no longer leave `/readyz` at 200 — it returns 503 until the indexer registers and reaches `ready`. No route additions and no change to `/healthz`. | [Change 0015](../../changes/0015-sync-stall-watchdog.md) |
+| 2026-10-15 | `/healthz` now reflects persistent sync failure: `503 {ok:false, unhealthy:[…]}` when any vault is `failed` or has `consecutiveFailures` at or above `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD` (default 3, `0` disables). The 200 body is unchanged, `/readyz` is unchanged, and sync health is pinned as never gating request handling. Reverses 0015's "`/healthz` never varies with vault state". | [Change 0017](../../changes/0017-sync-liveness.md) |
