@@ -2,7 +2,7 @@
 
 ## Summary
 
-Make the crash-loop and stall-loop restart ceilings opt-in, so a vault whose sync keeps failing is retried forever with the existing capped backoff instead of being parked in a terminal `failed` state. Track each vault's consecutive failed sync attempts as a new `VaultStatus.consecutiveFailures` field, and make `GET /healthz` return 503 once any vault is `failed` or has failed a configurable number of attempts in a row without recovering, so the orchestrator's liveness probe restarts the pod when in-process retries cannot bring sync back. Request handling is never gated on sync health. Implements the new [Restart ceilings and liveness](../specs/obsidian-sync/index.md#restart-ceilings-and-liveness) section and the failed/recovered-attempt rules in [Obsidian Sync › Sync supervision](../specs/obsidian-sync/index.md#sync-supervision), the rewritten `/healthz` contract in [REST API › Health endpoints](../specs/rest-api/index.md#health-endpoints), and the revised liveness rule in [Architecture › Observability](../specs/architecture/index.md#observability).
+Make the crash-loop and stall-loop restart ceilings opt-in, so a vault whose `ob sync` child keeps crashing or getting stall-killed is restarted forever with the existing capped backoff instead of being parked in a terminal `failed` state. The `sync-setup` / `sync-config` 5-attempt retry limits and a failure to create the vault directory still mark a vault `failed`, as before. Track each vault's consecutive failed sync attempts as a new `VaultStatus.consecutiveFailures` field, and make `GET /healthz` return 503 once any vault is `failed` or has failed a configurable number of attempts in a row without recovering, so the orchestrator's liveness probe restarts the pod when in-process retries cannot bring sync back. Request handling is never gated on sync health. Implements the new [Restart ceilings and liveness](../specs/obsidian-sync/index.md#restart-ceilings-and-liveness) section and the failed/recovered-attempt rules in [Obsidian Sync › Sync supervision](../specs/obsidian-sync/index.md#sync-supervision), the rewritten `/healthz` contract in [REST API › Health endpoints](../specs/rest-api/index.md#health-endpoints), and the revised liveness rule in [Architecture › Observability](../specs/architecture/index.md#observability).
 
 **Spec:** [Obsidian Sync](../specs/obsidian-sync/)
 **Status:** complete
@@ -67,7 +67,7 @@ What implementing them requires of this change:
 
 ### Approach
 
-**Ceilings.** `DEFAULT_CRASH_LOOP.maxCrashes` and `DEFAULT_STALL_LOOP.maxStalls` become `0`, meaning no ceiling, and both checks are guarded by `> 0`. The supervisor fills them per child from `Config.syncHealth` (`OB_SYNC_MAX_CRASHES`, `OB_SYNC_MAX_STALL_KILLS`). Windows are unchanged and fixed. Stall kills are still recorded in both windows whether or not a ceiling is configured.
+**Ceilings.** `DEFAULT_CRASH_LOOP.maxCrashes` and `DEFAULT_STALL_LOOP.maxStalls` become `0`, meaning no ceiling, and both checks are guarded by `> 0`. This covers restarts of the continuous `ob sync` child only; the setup pipeline's own retry limits are untouched. The supervisor fills them per child from `Config.syncHealth` (`OB_SYNC_MAX_CRASHES`, `OB_SYNC_MAX_STALL_KILLS`). Windows are unchanged and fixed. Stall kills are still recorded in both windows whether or not a ceiling is configured.
 
 **Failed and recovered attempts.** Every supervised attempt that ends without a stop request is a failed attempt. An attempt *recovered* when it showed life for `healthyResetMs` (5 minutes) after it spawned:
 
@@ -98,12 +98,12 @@ return unhealthy.length === 0 ? c.json({ ok: true }) : c.json({ ok: false, unhea
 
 ### Decisions
 
-- **Decision:** Both ceilings are opt-in and default to unlimited.
+- **Decision:** Both `ob sync` child restart ceilings are opt-in and default to unlimited.
   - **Why:** In the incident the outage was over within minutes and the ceiling kept sync dead for good. A sync outage is almost always upstream; a terminal state turns a transient into an outage that outlives it. The existing capped backoff already bounds the cost of retrying forever to one spawn a minute per vault.
   - **Alternatives considered:** **Keep 0015's terminal `failed`** — it needs a pod restart that nothing triggers. **Higher default ceilings** — the same failure, later.
 
 - **Decision:** Sync health is part of `/healthz`, reversing 0015's explicitly rejected alternative.
-  - **Why:** 0015's premise was that in-process supervision is the right blast radius. That premise failed once a ceiling made failure terminal and nothing outside the process could see it. With unlimited retries, in-process recovery handles transients, and liveness becomes the backstop only after a run of consecutive failed attempts. The pod restart does take the API and the healthy vault with it; the user accepted that, and the threshold limits it to persistent failure. The API keeps serving until the restart.
+  - **Why:** 0015's premise was that in-process supervision is the right blast radius. That premise failed once a ceiling made failure terminal and nothing outside the process could see it. With unlimited child restarts, in-process recovery handles transients, and liveness becomes the backstop only after a run of consecutive failed attempts. The pod restart does take the API and the healthy vault with it; the user accepted that, and the threshold limits it to persistent failure. The API keeps serving until the restart.
   - **Alternatives considered:** **Keep `/healthz` dumb and alert on `/readyz`** — no automated recovery, which is what failed here. **Point liveness at `/readyz`** — fails on every startup scan and every transient reconnect.
 
 - **Decision:** The trigger is a count of consecutive failed attempts, not time since last activity.
@@ -131,7 +131,7 @@ return unhealthy.length === 0 ? c.json({ ok: true }) : c.json({ ok: false, unhea
 
 ### Non-Goals
 
-- **The stale lock.** `Another sync instance is already running` after a SIGKILL is not fixed here; with unlimited retries it is now retried through. See Open Questions.
+- **The stale lock.** `Another sync instance is already running` after a SIGKILL is not fixed here; with unlimited child restarts it is now retried through. See Open Questions.
 - **Diagnosing the outage** — whether it was Obsidian or the network.
 - **Kubernetes manifests.** They live in another repository; probe tuning is operator guidance only.
 - **Parsing `sync.log` contents** or using the `Fully synced` heartbeat as a progress signal (0015's standing non-goal).
@@ -161,7 +161,7 @@ return unhealthy.length === 0 ? c.json({ ok: true }) : c.json({ ok: false, unhea
 - **Residual risk (unchanged from 0015): a chatty reconnect loop.** Recovery is judged by sync-log activity, which proves the child is writing, not that it is syncing. A child looping `Disconnected` → `Connecting...` keeps writing, so it counts as recovered and is never stall-killed. This change introduces no new blind spot there.
 - **Risk: Docker `HEALTHCHECK`.** The image's health check now marks the container unhealthy during a persistent sync outage. Plain Docker reports that but does not restart on it.
 - **Operator guidance: probe tuning.** At the defaults `/healthz` fails about 15 minutes into a continuous wedge. The threshold already debounces transients, so the probe's own `failureThreshold` × `periodSeconds` only adds delay on top of that; a few minutes is plenty.
-- **Open question: the stale lock after SIGKILL.** A restart after a SIGKILL hit `Another sync instance is already running`, which suggests `obsidian-headless` leaves a lock behind when killed. Not fixed here; unlimited retries now retry through it. Worth investigating whether the lock lives under the persistent config volume — if it does, a pod restart may not clear it either, and the liveness backstop would loop. Tracked in [docs/tasks.md](../tasks.md).
+- **Open question: the stale lock after SIGKILL.** A restart after a SIGKILL hit `Another sync instance is already running`, which suggests `obsidian-headless` leaves a lock behind when killed. Not fixed here; unlimited child restarts now retry through it. Worth investigating whether the lock lives under the persistent config volume — if it does, a pod restart may not clear it either, and the liveness backstop would loop. Tracked in [docs/tasks.md](../tasks.md).
 
 ## References
 

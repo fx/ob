@@ -161,7 +161,8 @@ export async function startSupervisor(cfg: Config, deps: SupervisorDeps): Promis
       now,
       sleep,
       ...(deps.childBackoff !== undefined ? { backoff: deps.childBackoff } : {}),
-      // Both ceilings are opt-in: `0` (the default) means retry forever.
+      // Both ceilings are opt-in: `0` (the default) means the `ob sync`
+      // child is restarted forever. The setup pipeline's limits are separate.
       crashLoop: deps.crashLoop ?? {
         ...DEFAULT_CRASH_LOOP,
         maxCrashes: cfg.syncHealth.maxCrashes,

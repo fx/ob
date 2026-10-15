@@ -65,8 +65,9 @@ export interface SyncWatchdogConfig {
  * Resolved sync-health knobs (`OB_SYNC_MAX_CRASHES`,
  * `OB_SYNC_MAX_STALL_KILLS`, `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD`).
  *
- * `0` means "no ceiling" for the two `max*` fields — the vault retries
- * forever with capped backoff — and "sync health is not part of liveness"
+ * `0` means "no ceiling" for the two `max*` fields — the vault's `ob sync`
+ * child is restarted forever with capped backoff (the setup pipeline's own
+ * retry limits are separate) — and "sync health is not part of liveness"
  * for `healthzFailureThreshold`.
  */
 export interface SyncHealthConfig {

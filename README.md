@@ -79,7 +79,7 @@ this table mirrors it for convenience.
 | `OB_SYNC_STALL_TIMEOUT_SECONDS` | no | Seconds of sync-log silence after which a running `ob sync` child is treated as crashed and killed (SIGTERM, then SIGKILL after 10 s). Default `300`. `0` disarms the kill while leaving resolution, tailing, and `lastSyncActivityAt` in place. Must match `^\d+$` and be at most `86400`; anything else exits 78 at startup. |
 | `OB_SYNC_STALL_POLL_SECONDS` | no | Seconds between polls of the resolved sync log. Default `30`. Must be at least `1`, at most `86400`, and — when the timeout is greater than `0` — no greater than the timeout. |
 | `OB_SYNC_LOG_TAIL` | no | `true` (default) or `false`. When `true`, newly appended sync-log lines are forwarded to the parent's structured logs as `ob output` with `stream: "sync.log"`. |
-| `OB_SYNC_MAX_CRASHES` | no | Opt-in crash-loop ceiling: a vault goes `failed` (no more restarts) once this many `ob sync` attempts end within a fixed 5-minute window. Default `0` — no ceiling, retry forever with backoff capped at 60 s. Must match `^\d+$` and be at most `10000`; values above about `10` can never be reached. |
+| `OB_SYNC_MAX_CRASHES` | no | Opt-in crash-loop ceiling: a vault goes `failed` (no more restarts) once this many `ob sync` attempts end within a fixed 5-minute window. Default `0` — no ceiling: the `ob sync` child is restarted forever with backoff capped at 60 s (the 5-attempt `sync-setup` / `sync-config` limits are separate and unchanged). Must match `^\d+$` and be at most `10000`; values above about `10` can never be reached. |
 | `OB_SYNC_MAX_STALL_KILLS` | no | Opt-in stall-loop ceiling: a vault goes `failed` once this many stall kills land within a fixed 60-minute window. Default `0` — no ceiling. Same validation; values above about `12` can never be reached, and it is inert with `OB_SYNC_STALL_TIMEOUT_SECONDS=0`. |
 | `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD` | no | `GET /healthz` returns 503 once any vault has failed this many `ob sync` attempts in a row without one recovering, or any vault is `failed`. Default `3`; `0` takes sync out of `/healthz` (always `200 {"ok":true}`). Same validation. |
 
@@ -145,7 +145,7 @@ that want readiness-gated traffic should configure their own probe against
 An `ob sync --continuous` child can stop making progress while staying alive
 and never exiting. The supervisor watches each vault's upstream `sync.log` and
 treats prolonged silence as a crash: SIGTERM, then SIGKILL 10 seconds later,
-then the ordinary restart backoff. Retries continue indefinitely unless
+then the ordinary restart backoff. Restarts of the child continue indefinitely unless
 `OB_SYNC_MAX_STALL_KILLS` or `OB_SYNC_MAX_CRASHES` is set; reaching a
 configured ceiling puts the vault in `failed`, where restarts stop and both
 `/readyz` and `/healthz` report 503 with the vault listed.
