@@ -213,6 +213,7 @@ describe("VaultSummary, VaultsListResponse, VaultSyncStatus, VaultIndexerStatus"
     state: "running",
     pid: 1,
     restarts: 0,
+    consecutiveFailures: 0,
     lastError: null,
     lastSyncActivityAt: 1_700_000_000_000,
     watchdog: {
@@ -252,6 +253,11 @@ describe("VaultSummary, VaultsListResponse, VaultSyncStatus, VaultIndexerStatus"
         },
       }),
     ).not.toThrow();
+  });
+  test("VaultSyncStatus rejects a negative or missing consecutiveFailures", () => {
+    expect(() => VaultSyncStatus.parse({ ...sync, consecutiveFailures: -1 })).toThrow();
+    const { consecutiveFailures: _omit, ...without } = sync;
+    expect(() => VaultSyncStatus.parse(without)).toThrow();
   });
   test("VaultSyncStatus rejects an unknown watchdog state", () => {
     expect(() =>

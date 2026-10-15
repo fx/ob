@@ -61,6 +61,23 @@ export interface SyncWatchdogConfig {
   readonly logTail: boolean;
 }
 
+/**
+ * Resolved sync-health knobs (`OB_SYNC_MAX_CRASHES`,
+ * `OB_SYNC_MAX_STALL_KILLS`, `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD`).
+ *
+ * `0` means "no ceiling" for the two `max*` fields — the vault retries
+ * forever with capped backoff — and "sync health is not part of liveness"
+ * for `healthzFailureThreshold`.
+ */
+export interface SyncHealthConfig {
+  /** Crash-loop ceiling: attempts ending inside the 5-minute crash window. */
+  readonly maxCrashes: number;
+  /** Stall-loop ceiling: stall kills inside the 60-minute stall window. */
+  readonly maxStallKills: number;
+  /** `/healthz` returns 503 once any vault reaches this many consecutive failed attempts. */
+  readonly healthzFailureThreshold: number;
+}
+
 export interface Config {
   /**
    * Value of `OBSIDIAN_AUTH_TOKEN`. OPTIONAL at the env layer because the
@@ -87,6 +104,8 @@ export interface Config {
   readonly syncConfigEnv: SyncConfigEnv;
   /** Resolved sync-log watchdog knobs (validated). */
   readonly syncWatchdog: SyncWatchdogConfig;
+  /** Resolved restart ceilings and the `/healthz` sync threshold (validated). */
+  readonly syncHealth: SyncHealthConfig;
 }
 
 /**
@@ -377,6 +396,58 @@ export function loadSyncWatchdogConfig(
   };
 }
 
+/** Defaults: no restart ceilings, `/healthz` fails after 3 consecutive failed attempts. */
+export const DEFAULT_SYNC_HEALTH: SyncHealthConfig = {
+  maxCrashes: 0,
+  maxStallKills: 0,
+  healthzFailureThreshold: 3,
+};
+
+/**
+ * Upper bound on every sync-health count. Without one, a 400-digit value
+ * parses to `Infinity`, which silently disables a ceiling (or the liveness
+ * check) while the configuration claims it is set — the same reason the
+ * watchdog durations are bounded.
+ */
+const MAX_SYNC_COUNT = 10_000;
+
+function parseCount(varName: string, raw: string): number {
+  if (!/^\d+$/.test(raw)) {
+    throw new ConfigError(`${varName} must be a non-negative integer, got "${raw}"`);
+  }
+  const n = Number.parseInt(raw, 10);
+  if (n > MAX_SYNC_COUNT) {
+    throw new ConfigError(`${varName} must be at most ${MAX_SYNC_COUNT}, got ${n}`);
+  }
+  return n;
+}
+
+/**
+ * Resolve and validate the sync-health env vars.
+ *
+ * Pure over its `env` argument, like every other loader here. Throws
+ * `ConfigError` (exit 78) naming the offending variable and value.
+ */
+export function loadSyncHealthConfig(env: Record<string, string | undefined>): SyncHealthConfig {
+  const crashesRaw = env.OB_SYNC_MAX_CRASHES;
+  const stallsRaw = env.OB_SYNC_MAX_STALL_KILLS;
+  const thresholdRaw = env.OB_HEALTHZ_SYNC_FAILURE_THRESHOLD;
+  return {
+    maxCrashes:
+      crashesRaw !== undefined
+        ? parseCount("OB_SYNC_MAX_CRASHES", crashesRaw)
+        : DEFAULT_SYNC_HEALTH.maxCrashes,
+    maxStallKills:
+      stallsRaw !== undefined
+        ? parseCount("OB_SYNC_MAX_STALL_KILLS", stallsRaw)
+        : DEFAULT_SYNC_HEALTH.maxStallKills,
+    healthzFailureThreshold:
+      thresholdRaw !== undefined
+        ? parseCount("OB_HEALTHZ_SYNC_FAILURE_THRESHOLD", thresholdRaw)
+        : DEFAULT_SYNC_HEALTH.healthzFailureThreshold,
+  };
+}
+
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const tokenRaw = env.OBSIDIAN_AUTH_TOKEN;
   // OBSIDIAN_AUTH_TOKEN is OPTIONAL at the env layer. A pre-existing
@@ -424,6 +495,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
 
   const syncConfigEnv = loadSyncConfigEnv(env);
   const syncWatchdog = loadSyncWatchdogConfig(env);
+  const syncHealth = loadSyncHealthConfig(env);
 
   const cfg: Config = {
     // Trimmed token, or `undefined` when unset/whitespace-only —
@@ -440,6 +512,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     logLevel,
     syncConfigEnv,
     syncWatchdog,
+    syncHealth,
   };
   return cfg;
 }

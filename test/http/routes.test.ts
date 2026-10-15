@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadPdfFixture } from "../helpers/loadPdfFixture.ts";
-import { TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
+import { TEST_SYNC_HEALTH, TEST_WATCHDOG_OFF, makeVaultStatus } from "../helpers/vaultStatus.ts";
 import { makeHttpFixture, waitFor } from "./helpers.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -678,6 +678,7 @@ describe("server-error logging branch", () => {
         logLevel: "error",
         syncConfigEnv: {},
         syncWatchdog: TEST_WATCHDOG_OFF,
+        syncHealth: TEST_SYNC_HEALTH,
       },
       logger,
     });

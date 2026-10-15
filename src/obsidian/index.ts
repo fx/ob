@@ -6,10 +6,11 @@
  * ```ts
  * type VaultState = "starting" | "running" | "failed";
  * interface VaultStatus {
- *   slug; name; state; pid; restarts; lastError;
+ *   slug; name; state; pid; restarts; consecutiveFailures; lastError;
  *   lastSyncActivityAt; watchdog;
  * }
  * interface Supervisor { list(); get(slug); stop(): Promise<void>; }
+ * function unhealthyVaults(statuses, threshold): UnhealthyVault[];
  * ```
  *
  * Workflow per vault:
@@ -27,7 +28,15 @@ import type { Config } from "../config/index.ts";
 import type { Logger } from "../log.ts";
 import type { Backoff } from "./backoff.ts";
 import { ensureAuthToken, resolveXdgConfigBase } from "./bootstrap.ts";
-import { type ChildBackoff, type CrashLoop, VaultChild, type VaultStatus } from "./child.ts";
+import {
+  type ChildBackoff,
+  type CrashLoop,
+  DEFAULT_CRASH_LOOP,
+  DEFAULT_STALL_LOOP,
+  VaultChild,
+  type VaultState,
+  type VaultStatus,
+} from "./child.ts";
 import { SetupPermanentError, ensureVaultSetup } from "./setup.ts";
 import { type Spawner, realSpawner } from "./spawn.ts";
 import { SyncConfigPermanentError, applyVaultSyncConfig } from "./syncconfig.ts";
@@ -60,6 +69,7 @@ export interface SupervisorDeps {
   readonly xdgConfigHome?: string;
   readonly setupBackoff?: Backoff;
   readonly childBackoff?: ChildBackoff;
+  /** Replaces the whole crash-loop config, ceiling included — tests use this. */
   readonly crashLoop?: CrashLoop;
   readonly obBin?: string;
   /** Per-vault stop grace period before SIGKILL. Default 5 s. */
@@ -151,7 +161,12 @@ export async function startSupervisor(cfg: Config, deps: SupervisorDeps): Promis
       now,
       sleep,
       ...(deps.childBackoff !== undefined ? { backoff: deps.childBackoff } : {}),
-      ...(deps.crashLoop !== undefined ? { crashLoop: deps.crashLoop } : {}),
+      // Both ceilings are opt-in: `0` (the default) means retry forever.
+      crashLoop: deps.crashLoop ?? {
+        ...DEFAULT_CRASH_LOOP,
+        maxCrashes: cfg.syncHealth.maxCrashes,
+      },
+      stallLoop: { ...DEFAULT_STALL_LOOP, maxStalls: cfg.syncHealth.maxStallKills },
       ...(deps.obBin !== undefined ? { obBin: deps.obBin } : {}),
       watchdog: {
         config: cfg.syncWatchdog,
@@ -314,4 +329,50 @@ export async function startSupervisor(cfg: Config, deps: SupervisorDeps): Promis
 export function isAllRunning(statuses: readonly VaultStatus[]): boolean {
   if (statuses.length === 0) return false;
   return statuses.every((s) => s.state === "running");
+}
+
+/** Why a vault fails liveness. */
+export type SyncUnhealthyReason = "failed" | "failed_attempts";
+
+/** One entry of the `/healthz` 503 body. */
+export interface UnhealthyVault {
+  readonly slug: string;
+  readonly reason: SyncUnhealthyReason;
+  readonly state: VaultState;
+  readonly consecutiveFailures: number;
+  readonly lastError: string | null;
+}
+
+/**
+ * Vaults whose sync should fail liveness, in configuration order: any vault
+ * in `failed` (reason `failed`, which wins when both apply), and any vault
+ * whose `consecutiveFailures` has reached `threshold` (reason
+ * `failed_attempts`). `threshold === 0` takes sync out of liveness entirely.
+ *
+ * A pure function of `list()` — the same input `/readyz` reads — so the two
+ * endpoints can never disagree about a vault's state.
+ */
+export function unhealthyVaults(
+  statuses: readonly VaultStatus[],
+  threshold: number,
+): UnhealthyVault[] {
+  if (threshold === 0) return [];
+  const out: UnhealthyVault[] = [];
+  for (const s of statuses) {
+    const reason: SyncUnhealthyReason | null =
+      s.state === "failed"
+        ? "failed"
+        : s.consecutiveFailures >= threshold
+          ? "failed_attempts"
+          : null;
+    if (reason === null) continue;
+    out.push({
+      slug: s.slug,
+      reason,
+      state: s.state,
+      consecutiveFailures: s.consecutiveFailures,
+      lastError: s.lastError,
+    });
+  }
+  return out;
 }

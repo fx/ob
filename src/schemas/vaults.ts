@@ -23,6 +23,7 @@ export const VaultSyncStatus = z.object({
   state: VaultState,
   pid: z.number().nullable(),
   restarts: z.number().int().nonnegative(),
+  consecutiveFailures: z.number().int().nonnegative(),
   lastError: z.string().nullable(),
   lastSyncActivityAt: z.number().nullable(),
   watchdog: VaultWatchdogStatus,

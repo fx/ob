@@ -150,6 +150,16 @@ export interface WatchdogHandle {
   snapshot(): WatchdogSnapshot;
   /** State to carry into the next child of the same vault. */
   memory(): WatchdogMemory;
+  /**
+   * Wall-clock instant of this child's last observed activity — the stall
+   * clock's own notion of it, including the resolution anchor — or `null`
+   * until a log has been resolved for this child at least once. Keeps its
+   * value across a return to `resolving` and after `stop()`.
+   *
+   * Exposed so `child.ts` can judge whether an attempt recovered; it is not
+   * part of the public status.
+   */
+  lastActivityObservedAt(): number | null;
   /** Idempotent; wakes the poll sleep so no interval is waited out. */
   stop(): void;
 }
@@ -245,6 +255,8 @@ export function startWatchdog(
    * while `activePath !== null`, which is the only state that reads it.
    */
   let lastActivityObservedAt = 0;
+  /** Has a log ever been resolved for THIS child? Gates `lastActivityObservedAt()`. */
+  let anchored = false;
   /** Previously recorded mtime, for the activity comparison. */
   let observedMtimeMs = 0;
   /** One verdict per child lifetime: once a kill is in flight, never again. */
@@ -376,6 +388,7 @@ export function startWatchdog(
     // Time between spawn and resolution contributes nothing: every child gets
     // one full threshold of grace from this instant.
     lastActivityObservedAt = deps.now();
+    anchored = true;
     observedMtimeMs = logStat.mtimeMs;
     discardStraddlingLine = midLine;
     deps.logger.info("sync log resolved", {
@@ -594,6 +607,7 @@ export function startWatchdog(
   return {
     snapshot: () => watchdogSnapshot(config, currentMemory(), activePath !== null),
     memory: currentMemory,
+    lastActivityObservedAt: (): number | null => (anchored ? lastActivityObservedAt : null),
     stop: (): void => {
       if (stopped) return;
       stopped = true;

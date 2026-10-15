@@ -25,7 +25,8 @@ test("vault_status parity (success)", async () => {
 
 test("the new sync-status fields reach /readyz, both REST vault routes, and MCP alike", async () => {
   // Spec scenario "Status fields reach every surface": all four surfaces
-  // MUST report identical `lastSyncActivityAt` and `watchdog` values.
+  // MUST report identical `consecutiveFailures`, `lastSyncActivityAt` and
+  // `watchdog` values.
   const fx = await makeParityFixture({ label: "p-vs-wd" });
   cleanup.push(fx.stop);
   await waitFor(() => fx.indexer.status("v")?.state === "ready");
@@ -36,6 +37,7 @@ test("the new sync-status fields reach /readyz, both REST vault routes, and MCP 
   const readyz = await callRestJson(fx, "GET", "/readyz");
 
   const expected = {
+    consecutiveFailures: 2,
     lastSyncActivityAt: 1_700_000_000_000,
     watchdog: {
       state: "tailing",
@@ -46,8 +48,16 @@ test("the new sync-status fields reach /readyz, both REST vault routes, and MCP 
     },
   };
   const pick = (sync: unknown): unknown => {
-    const s = sync as { lastSyncActivityAt: unknown; watchdog: unknown };
-    return { lastSyncActivityAt: s.lastSyncActivityAt, watchdog: s.watchdog };
+    const s = sync as {
+      consecutiveFailures: unknown;
+      lastSyncActivityAt: unknown;
+      watchdog: unknown;
+    };
+    return {
+      consecutiveFailures: s.consecutiveFailures,
+      lastSyncActivityAt: s.lastSyncActivityAt,
+      watchdog: s.watchdog,
+    };
   };
 
   expect(pick((mcp.body as { sync: unknown }).sync)).toEqual(expected);

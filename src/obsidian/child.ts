@@ -6,9 +6,16 @@
  * and tags every stdio line with `{vault, source: "ob"}` for the parent
  * logger.
  *
- * The crash-loop ceiling (≥ 10 crashes within 5 min) flips the vault to
- * `failed` and stops further restart attempts for that vault only —
- * isolation between vaults is the whole point of one child per vault.
+ * Restarts continue indefinitely by default. The optional crash-loop and
+ * stall-loop ceilings (off unless `OB_SYNC_MAX_CRASHES` /
+ * `OB_SYNC_MAX_STALL_KILLS` is set) flip the vault to `failed` and stop
+ * further restart attempts for that vault only — isolation between vaults is
+ * the whole point of one child per vault.
+ *
+ * Every attempt that ends without a stop request is a failed attempt, and
+ * `consecutiveFailures` counts them until one recovers. It drives the restart
+ * backoff and, through `/healthz`, liveness — so a vault that in-process
+ * retries cannot bring back eventually gets the pod restarted.
  *
  * A hung-but-alive child never settles `exited`, so the crash machinery above
  * is blind to it. The sync-log watchdog supplies that missing signal: on a
@@ -17,7 +24,7 @@
  * restart path take over. A stall kill is credited to BOTH the crash window
  * and a separate rolling stall window, because a stall can only happen once
  * per threshold and ten of them can never land inside the crash window's five
- * minutes — the crash ceiling alone could never fire on stalls.
+ * minutes — a crash ceiling alone could never fire on stalls.
  *
  * `now()` and the sleep primitive are injected so crash-loop tests can
  * collapse a 5-minute window down to a deterministic sequence of fake
@@ -47,6 +54,18 @@ export interface VaultStatus {
   readonly state: VaultState;
   readonly pid: number | null;
   readonly restarts: number;
+  /**
+   * Supervised attempts that ended — any exit, a spawn throw, or a stall
+   * kill — since the last attempt that recovered. An attempt recovered once
+   * the watchdog observed sync-log activity at least `healthyResetMs` after
+   * it spawned (plain uptime when the watchdog has no evidence for it).
+   *
+   * Reads 0 while the attempt in flight has recovered, even before the stored
+   * count resets at its exit; a vault that came back must not hold `/healthz`
+   * at 503 until it next fails. Retained in `failed`. `/healthz` fails once
+   * any vault reaches `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD`.
+   */
+  readonly consecutiveFailures: number;
   readonly lastError: string | null;
   /**
    * Epoch-ms mtime of the resolved sync log as of the most recent successful
@@ -79,27 +98,35 @@ export const DEFAULT_CHILD_BACKOFF: ChildBackoff = {
   capMs: 60_000,
 };
 
-/** Crash-loop config. Defaults match the spec: ≥ 10 crashes in 5 min. */
+/**
+ * Crash-loop config. `maxCrashes === 0` means no ceiling, which is the
+ * default; the supervisor fills it from `OB_SYNC_MAX_CRASHES`.
+ */
 export interface CrashLoop {
   readonly windowMs: number;
   readonly maxCrashes: number;
-  /** A child that stays up this long resets the crash counter. */
+  /**
+   * An attempt that shows life for this long after it spawned has recovered:
+   * it resets the crash window and `consecutiveFailures`. See
+   * `attemptRecovered`.
+   */
   readonly healthyResetMs: number;
 }
 
 export const DEFAULT_CRASH_LOOP: CrashLoop = {
   windowMs: 5 * 60_000,
-  maxCrashes: 10,
+  maxCrashes: 0,
   healthyResetMs: 5 * 60_000,
 };
 
 /**
  * Stall-loop config. Separate from `CrashLoop` on purpose: a stall kill can
  * only occur once per stall threshold, so with the 300-second default ten of
- * them cannot land inside `DEFAULT_CRASH_LOOP.windowMs`, and a child wedged
- * for 300 s also clears the healthy-uptime bar. Counting stalls toward
- * `crashTimes` alone therefore never escalates — wedge, kill, wedge, kill,
- * forever. Defaults match the spec: ≥ 3 stall kills in 60 min.
+ * them cannot land inside `DEFAULT_CRASH_LOOP.windowMs`. Counting stalls
+ * toward `crashTimes` alone therefore never escalates — wedge, kill, wedge,
+ * kill, forever. `maxStalls === 0` means no ceiling, which is the default; the
+ * supervisor fills it from `OB_SYNC_MAX_STALL_KILLS`. The 60-min window is
+ * fixed.
  */
 export interface StallLoop {
   readonly windowMs: number;
@@ -108,7 +135,7 @@ export interface StallLoop {
 
 export const DEFAULT_STALL_LOOP: StallLoop = {
   windowMs: 60 * 60_000,
-  maxStalls: 3,
+  maxStalls: 0,
 };
 
 /** Grace between the stall SIGTERM and the SIGKILL that follows it. */
@@ -152,6 +179,7 @@ interface MutableStatus {
   state: VaultState;
   pid: number | null;
   restarts: number;
+  consecutiveFailures: number;
   lastError: string | null;
 }
 
@@ -163,6 +191,20 @@ interface MutableStatus {
 export function childBackoffDelay(b: ChildBackoff, attemptIndex: number): number {
   const raw = b.initialMs * b.factor ** attemptIndex;
   return Math.min(raw, b.capMs);
+}
+
+/**
+ * True once an attempt spawned at `startedAt` has shown life for
+ * `healthyResetMs`. `evidenceAt` is the last instant the watchdog observed
+ * sync-log activity for the attempt, or — when it has no evidence for it —
+ * the attempt's end (or now, while it is still alive).
+ */
+export function attemptRecovered(
+  startedAt: number,
+  evidenceAt: number,
+  healthyResetMs: number,
+): boolean {
+  return evidenceAt - startedAt >= healthyResetMs;
 }
 
 /**
@@ -231,9 +273,10 @@ export class VaultChild {
   private readonly crashTimes: number[] = [];
   /**
    * Rolling window of stall-kill instants. Cleared only by kills ageing out
-   * of it — never by healthy uptime and never by an ordinary crash in
+   * of it — never by a recovered attempt and never by an ordinary crash in
    * between, because a vault that alternates between crashing and wedging is
-   * not healthier than one that only wedges.
+   * not healthier than one that only wedges. Recorded whether or not a stall
+   * ceiling is configured.
    */
   private readonly stallTimes: number[] = [];
   /**
@@ -269,6 +312,12 @@ export class VaultChild {
    * mtime that proves it stalled while its replacement is starting up.
    */
   private watchdogMemory: WatchdogMemory = EMPTY_WATCHDOG_MEMORY;
+  /**
+   * The ended attempt's `lastActivityObservedAt`, captured as its watchdog
+   * stops; `null` when no log was ever resolved for it (or no watchdog runs).
+   * Reset at the top of every attempt.
+   */
+  private attemptActivityAt: number | null = null;
 
   constructor(vault: ChildVault, deps: ChildDeps) {
     this.vault = vault;
@@ -277,6 +326,7 @@ export class VaultChild {
       state: "starting",
       pid: null,
       restarts: 0,
+      consecutiveFailures: 0,
       lastError: null,
     };
     this.watchdogConfig = deps.watchdog?.config ?? DISABLED_SYNC_WATCHDOG;
@@ -298,10 +348,27 @@ export class VaultChild {
       state: this.status.state,
       pid: this.status.pid,
       restarts: this.status.restarts,
+      consecutiveFailures: this.liveConsecutiveFailures(),
       lastError: this.status.lastError,
       lastSyncActivityAt: wd.lastSyncActivityAt,
       watchdog: wd.watchdog,
     };
+  }
+
+  /**
+   * The stored count, or 0 while the attempt in flight has already
+   * recovered. The stored value itself only resets when that attempt ends.
+   * `now()` is consulted only when there is no watchdog evidence to judge by.
+   */
+  private liveConsecutiveFailures(): number {
+    const stored = this.status.consecutiveFailures;
+    if (this.currentHandle === null || stored === 0) return stored;
+    const healthyResetMs = (this.deps.crashLoop ?? DEFAULT_CRASH_LOOP).healthyResetMs;
+    // `attemptActivityAt` covers the shutdown window, where `requestStop()`
+    // has already stopped the watchdog but the child has not exited yet.
+    const evidenceAt =
+      this.watchdogHandle?.lastActivityObservedAt() ?? this.attemptActivityAt ?? this.deps.now();
+    return attemptRecovered(this.childStartedAt, evidenceAt, healthyResetMs) ? 0 : stored;
   }
 
   /** Start the per-child watchdog. No-op when none is wired. */
@@ -332,7 +399,7 @@ export class VaultChild {
    * stays alive for the whole grace period, and a vault the supervisor has
    * already declared unhealthy must not hold `/readyz` at 200 for that
    * window. `starting` is the state any other loss of a child produces; the
-   * move to `failed` happens only if a ceiling is reached.
+   * move to `failed` happens only if a ceiling is configured and reached.
    */
   private onStallVerdict(handle: SpawnHandle, reason: string): void {
     this.stallReason = reason;
@@ -381,6 +448,7 @@ export class VaultChild {
     // we keep cannot be overwritten by a poll belonging to a dead child.
     handle.stop();
     this.watchdogMemory = handle.memory();
+    this.attemptActivityAt = handle.lastActivityObservedAt();
     this.watchdogHandle = null;
   }
 
@@ -407,8 +475,6 @@ export class VaultChild {
     const stallCfg = this.deps.stallLoop ?? DEFAULT_STALL_LOOP;
     const obBin = this.deps.obBin ?? "ob";
 
-    let consecutiveFailures = 0;
-
     while (!this.stopRequested) {
       // `attemptCode` is the exit code we should treat the attempt as having
       // produced. A spawner that throws synchronously, or an `exited`
@@ -417,8 +483,10 @@ export class VaultChild {
       // and we treat it that way to keep the supervisor running.
       let attemptCode: number;
       this.childStartedAt = this.deps.now();
-      // A verdict must never outlive the attempt that produced it.
+      // A verdict must never outlive the attempt that produced it, and
+      // neither may the activity evidence of the previous attempt.
       this.stallReason = null;
+      this.attemptActivityAt = null;
       try {
         const handle = this.deps.spawner.run(obBin, [
           "sync",
@@ -471,7 +539,7 @@ export class VaultChild {
 
       // Per the spec, a vault that just exited is no longer ready. Flip
       // back to `starting`; the next successful spawn will return us to
-      // `running`. The crash-loop branch may overwrite this with `failed`
+      // `running`. A configured ceiling may overwrite this with `failed`
       // before the loop iterates again.
       if (this.status.state !== "failed") this.status.state = "starting";
 
@@ -483,16 +551,21 @@ export class VaultChild {
         return;
       }
 
-      // Healthy uptime resets the failure counter and crash-window history —
-      // but a child the watchdog had to kill was never healthy, however long
-      // it stayed alive. Without this exemption a child wedged for the full
-      // healthy-uptime window would clear the counters on its way out and
-      // nothing could ever escalate.
-      const uptimeMs = this.childExitedAt - this.childStartedAt;
-      if (stallReason === null && uptimeMs >= crashCfg.healthyResetMs) {
-        consecutiveFailures = 0;
+      // A recovered attempt resets the failure counter and crash-window
+      // history. Recovery is judged by observed sync-log activity, never by
+      // uptime, whenever the watchdog has evidence for the attempt: a child
+      // wedged from spawn has none after its anchor, so however long it
+      // stayed alive it never clears the counters on its way out and the
+      // count keeps climbing. Only with no evidence at all does plain uptime
+      // stand in for it.
+      const evidenceAt = this.attemptActivityAt ?? this.childExitedAt;
+      if (attemptRecovered(this.childStartedAt, evidenceAt, crashCfg.healthyResetMs)) {
+        this.status.consecutiveFailures = 0;
         this.crashTimes.length = 0;
       }
+      // Counted before the ceiling checks, so a vault that goes `failed`
+      // reports a truthful count.
+      this.status.consecutiveFailures += 1;
 
       this.status.restarts += 1;
       // Preserve a "spawn threw" error message if the catch already set one.
@@ -508,12 +581,13 @@ export class VaultChild {
         vault: this.vault.slug,
         code: attemptCode,
         restarts: this.status.restarts,
+        consecutiveFailures: this.status.consecutiveFailures,
         stalled: stallReason !== null,
       });
 
       // Track this crash for the rolling window. A stall kill counts here as
       // well as in its own window, so a vault mixing real crashes with stalls
-      // still trips the original ceiling.
+      // still trips a configured crash ceiling.
       this.crashTimes.push(this.childExitedAt);
       trimWindow(this.crashTimes, this.childExitedAt - crashCfg.windowMs);
 
@@ -522,7 +596,7 @@ export class VaultChild {
         trimWindow(this.stallTimes, this.childExitedAt - stallCfg.windowMs);
       }
 
-      if (this.crashTimes.length >= crashCfg.maxCrashes) {
+      if (crashCfg.maxCrashes > 0 && this.crashTimes.length >= crashCfg.maxCrashes) {
         this.status.state = "failed";
         this.status.lastError = `crash-loop: ${this.crashTimes.length} crashes within ${crashCfg.windowMs}ms`;
         this.deps.logger.error("ob sync crash-loop ceiling reached", {
@@ -533,7 +607,7 @@ export class VaultChild {
         return;
       }
 
-      if (this.stallTimes.length >= stallCfg.maxStalls) {
+      if (stallCfg.maxStalls > 0 && this.stallTimes.length >= stallCfg.maxStalls) {
         this.status.state = "failed";
         this.status.lastError = `sync stall-loop: ${this.stallTimes.length} stall kills within ${stallCfg.windowMs}ms`;
         this.deps.logger.error("ob sync stall-loop ceiling reached", {
@@ -544,8 +618,7 @@ export class VaultChild {
         return;
       }
 
-      const delay = childBackoffDelay(backoff, consecutiveFailures);
-      consecutiveFailures += 1;
+      const delay = childBackoffDelay(backoff, this.status.consecutiveFailures - 1);
       this.deps.logger.info("ob sync restarting", {
         vault: this.vault.slug,
         delayMs: delay,

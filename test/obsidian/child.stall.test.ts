@@ -218,9 +218,34 @@ function harness(opts: HarnessOpts = {}): Harness {
   };
 }
 
+/**
+ * Keep the child in flight writing to its log every poll for `ms`, so the
+ * watchdog observes activity right up to the end of the span.
+ */
+async function writeFor(h: Harness, ms: number): Promise<void> {
+  await h.awaitArmed();
+  for (let t = 0; t < ms; t += POLL_MS) {
+    h.fs.append(LOG_PATH, "Fully synced\n", h.driver.now() + POLL_MS);
+    h.driver.advance(POLL_MS);
+    await h.poll();
+  }
+  // `poll()` returns once the sleep is released; wait for that poll to finish
+  // and park again so its observation is visible to the caller.
+  await until(() => h.driver.count(POLL_MS) > 0, "poll settled");
+}
+
+/** Stall-kill the child in flight and let the replacement through its backoff. */
+async function killAndRestart(h: Harness, restarts: number, delay: number): Promise<void> {
+  await h.stallOnce();
+  await until(() => h.child.snapshot().restarts === restarts, `restart ${restarts}`);
+  await until(() => h.driver.count(delay) > 0, `backoff ${delay} parked`);
+  h.driver.release(delay);
+  await until(() => h.child.snapshot().state === "running", `child ${restarts + 1} running`);
+}
+
 describe("stall defaults", () => {
-  test("match the spec: 3 kills in 60 minutes, 10 s SIGKILL grace", () => {
-    expect(DEFAULT_STALL_LOOP).toEqual({ windowMs: 60 * 60_000, maxStalls: 3 });
+  test("match the spec: no ceiling, a 60-minute window, 10 s SIGKILL grace", () => {
+    expect(DEFAULT_STALL_LOOP).toEqual({ windowMs: 60 * 60_000, maxStalls: 0 });
     expect(DEFAULT_STALL_KILL_GRACE_MS).toBe(10_000);
   });
 });
@@ -372,8 +397,8 @@ describe("VaultChild — stall ceiling", () => {
       await h.stallOnce();
       await until(() => h.child.snapshot().restarts === attempt, `restart ${attempt}`);
       if (attempt === 3) break;
-      // The backoff doubles every time, because a stall kill is never
-      // healthy uptime and so never resets the consecutive-failure counter.
+      // The backoff doubles every time, because a child silent since spawn
+      // never recovered and so never resets the consecutive-failure counter.
       const delay = BACKOFF_MS * 2 ** (attempt - 1);
       await until(() => h.driver.count(delay) > 0, `backoff ${delay} parked`);
       h.driver.release(delay);
@@ -384,6 +409,7 @@ describe("VaultChild — stall ceiling", () => {
     expect(snap.state).toBe("failed");
     expect(snap.lastError).toBe("sync stall-loop: 3 stall kills within 3600000ms");
     expect(snap.watchdog.stallKills).toBe(3);
+    expect(snap.consecutiveFailures).toBe(3);
     // No fourth child: `failed` is terminal until the process restarts.
     expect(h.signals).toEqual(["SIGTERM", "SIGTERM", "SIGTERM"]);
     expect(h.logged.some((l) => l.msg === "ob sync stall-loop ceiling reached")).toBe(true);
@@ -424,19 +450,21 @@ describe("VaultChild — stall ceiling", () => {
     await healthy.loop;
   });
 
-  test("a stall kill never counts as healthy uptime, so the backoff keeps growing", async () => {
-    // Each child stays alive for a full threshold — longer than the 5-minute
-    // healthy-uptime reset. If the reset applied, every backoff would restart
+  test("a stall kill of a child with no activity since spawn never counts as a recovery", async () => {
+    // Each child stays alive for a full threshold — as long as the 5-minute
+    // recovery bar. Were plain uptime the judge, every backoff would restart
     // from the initial delay and nothing could ever escalate.
     const h = harness({ stallLoop: { windowMs: 60 * 60_000, maxStalls: 3 } });
 
     await h.stallOnce();
     await until(() => h.child.snapshot().restarts === 1, "restart 1");
+    expect(h.child.snapshot().consecutiveFailures).toBe(1);
     await until(() => h.driver.count(BACKOFF_MS) > 0, "first backoff");
     h.driver.release(BACKOFF_MS);
 
     await h.stallOnce();
     await until(() => h.child.snapshot().restarts === 2, "restart 2");
+    expect(h.child.snapshot().consecutiveFailures).toBe(2);
     await until(() => h.driver.count(BACKOFF_MS * 2) > 0, "second backoff doubled");
 
     const backoffs = h.driver.requested.filter((ms) => ms !== POLL_MS && ms !== GRACE_MS);
@@ -471,6 +499,110 @@ describe("VaultChild — stall ceiling", () => {
     h.child.requestStop();
     await until(() => h.driver.count(BACKOFF_MS * 2) > 0, "second backoff");
     h.driver.release(BACKOFF_MS * 2);
+    await h.loop;
+  });
+});
+
+describe("VaultChild — no stall ceiling by default", () => {
+  test("a wedge loop retries forever, the counter climbing with every kill", async () => {
+    const h = harness({ children: 5 });
+
+    for (let kill = 1; kill <= 4; kill++) {
+      await killAndRestart(h, kill, BACKOFF_MS * 2 ** (kill - 1));
+      const snap = h.child.snapshot();
+      expect(snap.state).toBe("running");
+      expect(snap.consecutiveFailures).toBe(kill);
+      expect(snap.watchdog.stallKills).toBe(kill);
+    }
+
+    const backoffs = h.driver.requested.filter((ms) => ms !== POLL_MS && ms !== GRACE_MS);
+    expect(backoffs).toEqual([BACKOFF_MS, BACKOFF_MS * 2, BACKOFF_MS * 4, BACKOFF_MS * 8]);
+    expect(h.logged.some((l) => l.msg === "ob sync stall-loop ceiling reached")).toBe(false);
+
+    h.child.requestStop();
+    h.crashCurrent(0);
+    await h.loop;
+  });
+});
+
+describe("VaultChild — recovery is judged by observed activity", () => {
+  test("a healthy-then-wedged attempt counts as a recovery (the incident)", async () => {
+    const h = harness();
+    // One wedge from spawn first, so there is a streak to reset.
+    await killAndRestart(h, 1, BACKOFF_MS);
+    expect(h.child.snapshot().consecutiveFailures).toBe(1);
+
+    // Fourteen minutes of writes, then the server drops it and it hangs.
+    await writeFor(h, 14 * 60_000);
+    // The attempt in flight has recovered, so it already reads 0.
+    expect(h.child.snapshot().consecutiveFailures).toBe(0);
+    await h.stallOnce();
+    await until(() => h.child.snapshot().restarts === 2, "restart 2");
+
+    // A recovery followed by one failure — not failure #2 — and the backoff
+    // starts over instead of doubling.
+    expect(h.child.snapshot().consecutiveFailures).toBe(1);
+    await until(() => h.driver.count(BACKOFF_MS) > 0, "backoff reset");
+    expect(h.driver.count(BACKOFF_MS * 2)).toBe(0);
+
+    h.child.requestStop();
+    await h.loop;
+  });
+
+  test("activity for less than healthyResetMs after spawn does not reset the counter", async () => {
+    const h = harness();
+    await killAndRestart(h, 1, BACKOFF_MS);
+
+    await writeFor(h, 4 * 60_000);
+    expect(h.child.snapshot().consecutiveFailures).toBe(1);
+    await h.stallOnce();
+    await until(() => h.child.snapshot().restarts === 2, "restart 2");
+
+    expect(h.child.snapshot().consecutiveFailures).toBe(2);
+    await until(() => h.driver.count(BACKOFF_MS * 2) > 0, "backoff doubled");
+
+    h.child.requestStop();
+    await h.loop;
+  });
+
+  test("a vault at the threshold reads 0 once its new attempt recovers, and resets at its exit", async () => {
+    const h = harness({ children: 5 });
+    for (let kill = 1; kill <= 3; kill++) {
+      await killAndRestart(h, kill, BACKOFF_MS * 2 ** (kill - 1));
+    }
+    expect(h.child.snapshot().consecutiveFailures).toBe(3);
+
+    await writeFor(h, 4 * 60_000 + POLL_MS);
+    // Activity at 4.5 min after spawn: not yet recovered.
+    expect(h.child.snapshot().consecutiveFailures).toBe(3);
+    await writeFor(h, POLL_MS);
+    // Activity at 5 min after spawn: recovered while still running.
+    expect(h.child.snapshot().state).toBe("running");
+    expect(h.child.snapshot().consecutiveFailures).toBe(0);
+
+    // Its later crash starts a fresh streak with the initial backoff.
+    h.crashCurrent(1);
+    await until(() => h.child.snapshot().restarts === 4, "restart 4");
+    expect(h.child.snapshot().consecutiveFailures).toBe(1);
+    await until(() => h.driver.count(BACKOFF_MS) > 0, "backoff reset");
+
+    h.child.requestStop();
+    await h.loop;
+  });
+
+  test("during shutdown the stopped watchdog's evidence still judges the attempt", async () => {
+    // requestStop() ends the watchdog before the child exits; until it does,
+    // the live count must come from the evidence the watchdog left behind
+    // rather than from plain uptime.
+    const h = harness({ children: 2 });
+    await killAndRestart(h, 1, BACKOFF_MS);
+    await h.awaitArmed();
+    h.driver.advance(10 * 60_000);
+    h.child.requestStop();
+    // The SIGTERM has been sent but the loop has not yet seen the exit. Ten
+    // minutes alive, yet silent since its anchor: not recovered.
+    expect(h.child.snapshot().pid).not.toBeNull();
+    expect(h.child.snapshot().consecutiveFailures).toBe(1);
     await h.loop;
   });
 });
@@ -586,15 +718,69 @@ describe("a stalled vault on the health endpoints", () => {
     expect(body.vaults[0]?.lastError).toContain("sync stalled");
     expect(body.vaults[0]?.lastSyncActivityAt).toBe(1_000);
 
-    // Liveness is deliberately blind to sync state: the container hosts the
-    // API and every vault child, so failing liveness for one wedged vault
-    // would restart the API and the healthy vaults to recover one child.
+    // Liveness tolerates a single wedge: the container hosts the API and
+    // every vault child, so only a vault that keeps failing (or is `failed`)
+    // is worth restarting the pod for. This first kill is below the threshold.
     const health = await app.request("/healthz");
     expect(health.status).toBe(200);
     expect(await health.json()).toEqual({ ok: true });
 
     h.driver.release(GRACE_MS);
     await until(() => h.child.snapshot().restarts === 1, "restart counted");
+    h.child.requestStop();
+    h.crashCurrent(0);
+    await h.loop;
+  });
+});
+
+describe("persistent sync failure on /healthz, end to end", () => {
+  test("three consecutive stall kills fail liveness; a recovered attempt restores it", async () => {
+    const h = harness({ children: 5 });
+    const supervisor: Supervisor = {
+      list: () => [h.child.snapshot()],
+      get: (slug) => (slug === "v" ? h.child.snapshot() : null),
+      stop: async () => undefined,
+    };
+    const app = buildHttpApp({ supervisor });
+
+    await h.awaitArmed();
+    expect((await app.request("/healthz")).status).toBe(200);
+
+    for (let kill = 1; kill <= 2; kill++) {
+      await killAndRestart(h, kill, BACKOFF_MS * 2 ** (kill - 1));
+      const res = await app.request("/healthz");
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
+    }
+
+    await killAndRestart(h, 3, BACKOFF_MS * 4);
+    const down = await app.request("/healthz");
+    expect(down.status).toBe(503);
+    const body = (await down.json()) as {
+      ok: boolean;
+      unhealthy: Array<{
+        slug: string;
+        reason: string;
+        state: string;
+        consecutiveFailures: number;
+      }>;
+    };
+    expect(body.ok).toBe(false);
+    expect(body.unhealthy).toHaveLength(1);
+    expect(body.unhealthy[0]).toMatchObject({
+      slug: "v",
+      reason: "failed_attempts",
+      state: "running",
+      consecutiveFailures: 3,
+    });
+
+    // The fourth child syncs for five minutes: liveness comes back while it
+    // is still running, without waiting for it to exit.
+    await writeFor(h, 5 * 60_000);
+    const back = await app.request("/healthz");
+    expect(back.status).toBe(200);
+    expect(await back.json()).toEqual({ ok: true });
+
     h.child.requestStop();
     h.crashCurrent(0);
     await h.loop;

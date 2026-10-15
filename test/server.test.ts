@@ -15,7 +15,7 @@ import {
   startServer,
   withTimeout,
 } from "../src/server.ts";
-import { TEST_WATCHDOG_OFF, makeVaultStatus } from "./helpers/vaultStatus.ts";
+import { TEST_SYNC_HEALTH, TEST_WATCHDOG_OFF, makeVaultStatus } from "./helpers/vaultStatus.ts";
 
 const TOKEN = "tk";
 const VAULTS = '[{"name":"v"}]';
@@ -82,6 +82,7 @@ function baseConfig(overrides: Partial<Config> = {}): Config {
     logLevel: "error",
     syncConfigEnv: {},
     syncWatchdog: TEST_WATCHDOG_OFF,
+    syncHealth: TEST_SYNC_HEALTH,
     ...overrides,
   };
   return cfg;

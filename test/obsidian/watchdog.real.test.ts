@@ -288,8 +288,12 @@ describe("watchdog against a real filesystem", () => {
       // rather than on the code under test.
       const st = statSync(logPath);
       utimesSync(logPath, st.atime, new Date(st.mtimeMs + 1_000));
+      expect(fx.wd.lastActivityObservedAt()).toBe(0);
       await fx.driver.nextPoll();
       expect(fx.lines).toEqual(["Fully synced"]);
+      // The append is this child's activity, observed at the poll instant —
+      // the evidence `VaultChild` judges recovery by.
+      expect(fx.wd.lastActivityObservedAt()).toBe(299_000);
 
       fx.driver.advance(299_999);
       await fx.driver.nextPoll();
