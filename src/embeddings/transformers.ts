@@ -33,7 +33,13 @@ export interface TransformersDeps {
 export type TransformersPipeline = (
   texts: string[],
   opts: { pooling: "mean"; normalize: true },
-) => Promise<{ data: Float32Array; dims: readonly number[] }>;
+) => Promise<TransformersTensor>;
+
+interface TransformersTensor {
+  readonly data: Float32Array;
+  readonly dims: readonly number[];
+  dispose?(): void;
+}
 
 export interface TransformersEmbedderInput {
   readonly model: string;
@@ -57,7 +63,7 @@ export interface TransformersModule {
   readonly pipeline: (
     task: "feature-extraction",
     model: string,
-    opts: { cache_dir: string; device: "cpu" },
+    opts: { cache_dir: string; device: "cpu"; session_options: { enableCpuMemArena: false } },
   ) => Promise<unknown>;
 }
 
@@ -76,13 +82,13 @@ export function realLoadPipeline(
     const pipe = await mod.pipeline("feature-extraction", model, {
       cache_dir: cacheDir,
       device: "cpu",
+      // ONNX's CPU arena retains the high-water allocation across edit
+      // batches. The vault server needs memory to return after each batch.
+      session_options: { enableCpuMemArena: false },
     });
     return ((texts, opts) =>
       // biome-ignore lint/suspicious/noExplicitAny: pipeline call signature is `(input, options) => Promise<Tensor>`; we coerce because upstream typings do not narrow on options.
-      (pipe as any)(texts, opts) as Promise<{
-        data: Float32Array;
-        dims: readonly number[];
-      }>) as TransformersPipeline;
+      (pipe as any)(texts, opts) as Promise<TransformersTensor>) as TransformersPipeline;
   };
 }
 
@@ -136,36 +142,40 @@ export function buildTransformersEmbedder(
       if (texts.length === 0) return [];
       const pipe = await getPipeline();
       const out = await pipe(texts, { pooling: "mean", normalize: true });
-      if (out.dims.length < 2) {
-        throw new EmbedderError(
-          `transformers output had unexpected shape ${JSON.stringify(out.dims)}`,
-        );
+      try {
+        if (out.dims.length < 2) {
+          throw new EmbedderError(
+            `transformers output had unexpected shape ${JSON.stringify(out.dims)}`,
+          );
+        }
+        const last = out.dims[out.dims.length - 1];
+        if (typeof last !== "number") {
+          throw new EmbedderError("transformers output dims missing trailing axis");
+        }
+        const vectorDim = last;
+        // Refuse to slice if the underlying buffer is shorter than
+        // `texts.length * vectorDim`. Without this guard, a buggy upstream
+        // pipeline returning a truncated buffer would silently emit short
+        // (and therefore wrong-length) Float32Arrays — the indexer would
+        // then store malformed vectors that fail vector search at query
+        // time. Surface the mismatch immediately as a typed error so the
+        // pipeline's per-file error counter and logger can record it.
+        const expected = texts.length * vectorDim;
+        if (out.data.length !== expected) {
+          throw new EmbedderError(
+            `transformers tensor size mismatch: expected ${expected} (texts=${texts.length}*dim=${vectorDim}), got ${out.data.length}`,
+          );
+        }
+        if (dim === 0) dim = vectorDim;
+        const result: Float32Array[] = [];
+        for (let i = 0; i < texts.length; i++) {
+          const slice = out.data.slice(i * vectorDim, (i + 1) * vectorDim);
+          result.push(slice);
+        }
+        return result;
+      } finally {
+        out.dispose?.();
       }
-      const last = out.dims[out.dims.length - 1];
-      if (typeof last !== "number") {
-        throw new EmbedderError("transformers output dims missing trailing axis");
-      }
-      const vectorDim = last;
-      // Refuse to slice if the underlying buffer is shorter than
-      // `texts.length * vectorDim`. Without this guard, a buggy upstream
-      // pipeline returning a truncated buffer would silently emit short
-      // (and therefore wrong-length) Float32Arrays — the indexer would
-      // then store malformed vectors that fail vector search at query
-      // time. Surface the mismatch immediately as a typed error so the
-      // pipeline's per-file error counter and logger can record it.
-      const expected = texts.length * vectorDim;
-      if (out.data.length !== expected) {
-        throw new EmbedderError(
-          `transformers tensor size mismatch: expected ${expected} (texts=${texts.length}*dim=${vectorDim}), got ${out.data.length}`,
-        );
-      }
-      if (dim === 0) dim = vectorDim;
-      const result: Float32Array[] = [];
-      for (let i = 0; i < texts.length; i++) {
-        const slice = out.data.slice(i * vectorDim, (i + 1) * vectorDim);
-        result.push(slice);
-      }
-      return result;
     },
   };
 }

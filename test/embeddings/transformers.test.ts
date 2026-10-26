@@ -76,6 +76,31 @@ describe("buildTransformersEmbedder (unit)", () => {
     for (const v of out) expect(v.length).toBe(4);
   });
 
+  test("copies vectors before disposing the upstream tensor", async () => {
+    let disposed = false;
+    const data = new Float32Array([1, 2, 3, 4]);
+    const e = buildTransformersEmbedder(
+      { model: "m", dataDir: "/tmp/data" },
+      {
+        loadPipeline: async () => async () => ({
+          data,
+          dims: [2, 2],
+          dispose: () => {
+            disposed = true;
+            data.fill(0);
+          },
+        }),
+        setCacheEnv: () => undefined,
+      },
+    );
+    const vectors = await e.embed(["a", "b"]);
+    expect(disposed).toBe(true);
+    expect(vectors.map((v) => Array.from(v))).toEqual([
+      [1, 2],
+      [3, 4],
+    ]);
+  });
+
   test("empty input array short-circuits without loading the pipeline", async () => {
     let loadCount = 0;
     const e = buildTransformersEmbedder(
@@ -284,6 +309,7 @@ describe("realLoadPipeline", () => {
         expect(model).toBe("Xenova/all-MiniLM-L6-v2");
         expect(opts.device).toBe("cpu");
         expect(opts.cache_dir).toBe("/tmp/realload/models");
+        expect(opts).toHaveProperty("session_options.enableCpuMemArena", false);
         // Return a 1-D pipeline that emits 4-dim vectors.
         return async (texts: string[]) => ({
           data: new Float32Array(texts.length * 4),
