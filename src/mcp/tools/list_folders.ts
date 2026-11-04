@@ -19,5 +19,6 @@ export function listFoldersTool(deps: VaultServiceDeps): ToolDefinition {
       if (args.cursor !== undefined) opts.cursor = args.cursor;
       return listFolders(deps, args.vault, opts);
     },
+    { readOnlyHint: true },
   );
 }

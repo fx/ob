@@ -21,5 +21,6 @@ export function vaultStatusTool(deps: StatusDeps): ToolDefinition {
       if (status === null) throw new VaultNotFoundError(args.vault);
       return status;
     },
+    { readOnlyHint: true },
   );
 }

@@ -32,3 +32,4 @@
 | 0015 | [sync-stall-watchdog](changes/0015-sync-stall-watchdog.md) | [obsidian-sync](specs/obsidian-sync/) | complete | 0002, 0011 |
 | 0016 | [landing-site](changes/0016-landing-site.md) | [landing-site](specs/landing-site/) | complete | — |
 | 0017 | [sync-liveness](changes/0017-sync-liveness.md) | [obsidian-sync](specs/obsidian-sync/) | complete | 0015 |
+| 0018 | [mcp-read-only-annotations](changes/0018-mcp-read-only-annotations.md) | [mcp-server](specs/mcp-server/) | complete | 0005 |

@@ -20,5 +20,6 @@ export function listVaultsTool(deps: StatusDeps): ToolDefinition {
     "List every configured vault and its current sync + indexer status. Mirrors REST GET /v1/vaults — returns the bare VaultSummary array.",
     Input,
     async () => listVaults(deps),
+    { readOnlyHint: true },
   );
 }

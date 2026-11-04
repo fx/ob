@@ -27,5 +27,6 @@ export function listFilesTool(deps: VaultServiceDeps): ToolDefinition {
       if (args.cursor !== undefined) opts.cursor = args.cursor;
       return listFiles(deps, args.vault, opts);
     },
+    { readOnlyHint: true },
   );
 }

@@ -117,6 +117,7 @@ export function buildMcpServer(
         // properties?, required? }`. zodToJsonSchema in `tool.ts` already
         // produces that exact shape.
         inputSchema: t.inputSchema,
+        annotations: t.annotations,
       })),
     }),
   );

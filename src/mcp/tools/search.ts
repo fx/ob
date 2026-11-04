@@ -40,24 +40,30 @@ const DESCRIPTION = [
 ].join(" ");
 
 export function searchTool(deps: VaultServiceDeps): ToolDefinition {
-  return tool("search", DESCRIPTION, Input, async (args) => {
-    const opts: {
-      query: string;
-      limit?: number;
-      filter?: typeof args.filter;
-      mode?: typeof args.mode;
-      threshold?: number;
-      mmrLambda?: number;
-      maxPerPath?: number;
-    } = {
-      query: args.query,
-    };
-    if (args.limit !== undefined) opts.limit = args.limit;
-    if (args.filter !== undefined) opts.filter = args.filter;
-    if (args.mode !== undefined) opts.mode = args.mode;
-    if (args.threshold !== undefined) opts.threshold = args.threshold;
-    if (args.mmrLambda !== undefined) opts.mmrLambda = args.mmrLambda;
-    if (args.maxPerPath !== undefined) opts.maxPerPath = args.maxPerPath;
-    return search(deps, args.vault, opts);
-  });
+  return tool(
+    "search",
+    DESCRIPTION,
+    Input,
+    async (args) => {
+      const opts: {
+        query: string;
+        limit?: number;
+        filter?: typeof args.filter;
+        mode?: typeof args.mode;
+        threshold?: number;
+        mmrLambda?: number;
+        maxPerPath?: number;
+      } = {
+        query: args.query,
+      };
+      if (args.limit !== undefined) opts.limit = args.limit;
+      if (args.filter !== undefined) opts.filter = args.filter;
+      if (args.mode !== undefined) opts.mode = args.mode;
+      if (args.threshold !== undefined) opts.threshold = args.threshold;
+      if (args.mmrLambda !== undefined) opts.mmrLambda = args.mmrLambda;
+      if (args.maxPerPath !== undefined) opts.maxPerPath = args.maxPerPath;
+      return search(deps, args.vault, opts);
+    },
+    { readOnlyHint: true },
+  );
 }

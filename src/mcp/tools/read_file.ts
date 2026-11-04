@@ -127,5 +127,6 @@ export function readFileTool(deps: VaultServiceDeps): ToolDefinition {
         sha256: result.sha256,
       };
     },
+    { readOnlyHint: true },
   );
 }

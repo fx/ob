@@ -22,6 +22,7 @@
  *   `isError` payload itself.
  */
 
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { ZodTypeAny, z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { InvalidInputError } from "../errors.ts";
@@ -57,6 +58,8 @@ export interface ToolDefinition {
    * `src/schemas/` first and be referenced by both adapters.
    */
   readonly inputSchema: Record<string, unknown>;
+  /** MCP behavior hints (e.g. `readOnlyHint`) advertised verbatim in `tools/list`. */
+  readonly annotations?: ToolAnnotations;
   /**
    * Validates `raw` and runs the bound service-core function. Returns either
    * the success shape or the `isError` failure shape — never throws.
@@ -75,6 +78,7 @@ export function tool<S extends ZodTypeAny, O>(
   description: string,
   schema: S,
   handler: (args: z.infer<S>) => Promise<O>,
+  annotations?: ToolAnnotations,
 ): ToolDefinition {
   // Strip `$schema` and unused `definitions` keys so the wire payload matches
   // what the SDK validates against (`{ type: "object", properties, required }`).
@@ -86,6 +90,7 @@ export function tool<S extends ZodTypeAny, O>(
     name,
     description,
     inputSchema: json,
+    ...(annotations && { annotations }),
     call: async (raw: unknown): Promise<McpToolResult> => {
       // Step 1: validate. ZodError → typed `InvalidInputError` so the same
       // error mapper that handles the service-core's typed errors handles
