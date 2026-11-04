@@ -185,7 +185,7 @@ const Input = z.object({
 export const readFile = (deps: Deps) => ({
   name: "read_file",
   description: "Read any file from a vault. Returns utf-8 text for Markdown and other text files, extracted text for PDFs, and base64 for other binaries. Pass format: \"binary\" for verbatim base64 bytes of any file.",
-  inputSchema: zodToJsonSchema(Input),
+  inputSchema: z.toJSONSchema(Input, { io: "input" }),
   handler: async (raw: unknown) => {
     const args = Input.parse(raw);
     const result = await deps.files.read(args.vault, args.path, { format: args.format });
