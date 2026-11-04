@@ -130,10 +130,13 @@ test("tools/list over HTTP returns every registered tool", async () => {
   for (const t of body.result.tools) {
     expect((t.inputSchema as { type: string }).type).toBe("object");
   }
-  // Exactly the read tools advertise `readOnlyHint`, so clients (e.g. Claude
-  // Code in plan mode) can call them without a permission prompt.
-  const readOnly = body.result.tools.filter((t) => t.annotations?.readOnlyHint === true);
-  expect(readOnly.map((t) => t.name).sort()).toEqual([
+  // Exactly the read tools advertise `readOnlyHint`, always as `true`, so
+  // clients (e.g. Claude Code in plan mode) can call them without a permission
+  // prompt. Selecting on "defined" rather than "=== true" also catches a write
+  // tool that advertises `readOnlyHint: false`.
+  const hinted = body.result.tools.filter((t) => t.annotations?.readOnlyHint !== undefined);
+  expect(hinted.every((t) => t.annotations?.readOnlyHint === true)).toBe(true);
+  expect(hinted.map((t) => t.name).sort()).toEqual([
     "list_files",
     "list_folders",
     "list_vaults",

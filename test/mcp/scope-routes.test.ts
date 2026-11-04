@@ -719,6 +719,7 @@ describe("scoped vault visibility", () => {
       name: string;
       description: string;
       inputSchema: { required?: string[] } & Record<string, unknown>;
+      annotations?: { readOnlyHint?: boolean };
     }
     const scoped = await rpc<{ tools: ToolInfo[] }>(
       fx.app,
@@ -728,6 +729,18 @@ describe("scoped vault visibility", () => {
     );
     const plain = await rpc<{ tools: ToolInfo[] }>(fx.app, "/mcp", plainSid, "tools/list");
     expect(scoped.tools.map((t) => t.name)).toEqual(plain.tools.map((t) => t.name));
+    // A scoped session advertises `readOnlyHint` exactly like an unscoped one:
+    // only the read tools carry it, and always as `true`.
+    const hinted = scoped.tools.filter((t) => t.annotations?.readOnlyHint !== undefined);
+    expect(hinted.every((t) => t.annotations?.readOnlyHint === true)).toBe(true);
+    expect(hinted.map((t) => t.name).sort()).toEqual([
+      "list_files",
+      "list_folders",
+      "list_vaults",
+      "read_file",
+      "search",
+      "vault_status",
+    ]);
 
     for (const [i, tool] of scoped.tools.entries()) {
       const base = plain.tools[i] as ToolInfo;
