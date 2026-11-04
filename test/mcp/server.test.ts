@@ -67,6 +67,33 @@ test("buildMcpServer constructs a Server (smoke; verified via tools/list end-to-
   expect(s).toBeDefined();
 });
 
+test("tool(): inputSchema is the plain input-side JSON Schema of the Zod schema", () => {
+  const t = tool(
+    "shape",
+    "x",
+    z
+      .object({
+        vault: z.string().min(1).describe("vault slug"),
+        format: z.enum(["text", "binary"]).default("text"),
+        limit: z.number().int().min(1).max(100).optional(),
+      })
+      .strict(),
+    async () => ({ ok: true }),
+  );
+  // No `$schema` / `$defs` noise; a `.default()` field is optional for the
+  // caller (input side), not required as it would be on the output side.
+  expect(t.inputSchema).toEqual({
+    type: "object",
+    properties: {
+      vault: { type: "string", minLength: 1, description: "vault slug" },
+      format: { type: "string", enum: ["text", "binary"], default: "text" },
+      limit: { type: "integer", minimum: 1, maximum: 100 },
+    },
+    required: ["vault"],
+    additionalProperties: false,
+  });
+});
+
 test("tools/list over HTTP returns every registered tool", async () => {
   const fx = await makeMcpFixture({ label: "srv-list" });
   cleanup.push(fx.stop);

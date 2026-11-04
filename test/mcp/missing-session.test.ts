@@ -50,7 +50,7 @@ test("tools/call without session id is a 4xx with JSON-RPC error", async () => {
       params: { name: "list_vaults", arguments: {} },
     }),
   });
-  // SDK 1.29.0 returns 400 with a JSON-RPC error envelope. Pin both so a
+  // SDK 1.32.2 returns 400 with a JSON-RPC error envelope. Pin both so a
   // future SDK upgrade has to acknowledge any change.
   expect(res.status).toBe(400);
   const body = (await res.json()) as { error: { code: number; message: string } };

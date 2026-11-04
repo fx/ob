@@ -23,8 +23,7 @@
  */
 
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
-import type { ZodTypeAny, z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
+import { type ZodType, z } from "zod";
 import { InvalidInputError } from "../errors.ts";
 import { mapErrorToMcpResult } from "./errors.ts";
 
@@ -45,8 +44,8 @@ export interface ToolDefinition {
   readonly description: string;
   /**
    * Plain JSON Schema (object type with `properties` / `required`).
-   * Derived at registration time from the per-tool Zod schema via
-   * `zod-to-json-schema`, so the wire `inputSchema` and the runtime
+   * Derived at registration time from the per-tool Zod schema via Zod's
+   * native `z.toJSONSchema()`, so the wire `inputSchema` and the runtime
    * validator are guaranteed to agree.
    *
    * Most MCP tool inputs today are tool-local Zod schemas (kept next to
@@ -73,19 +72,22 @@ export interface ToolDefinition {
  * `handler` MUST be a thin wrapper over a function in `src/vault/`. Anything
  * beyond `parse → call → respond` belongs in the service core.
  */
-export function tool<S extends ZodTypeAny, O>(
+export function tool<S extends ZodType, O>(
   name: string,
   description: string,
   schema: S,
   handler: (args: z.infer<S>) => Promise<O>,
   annotations?: ToolAnnotations,
 ): ToolDefinition {
-  // Strip `$schema` and unused `definitions` keys so the wire payload matches
+  // `io: "input"` describes what a caller may SEND: a field with a
+  // `.default()` stays optional on the wire (the output view would list it
+  // as required, since it is always present after parsing).
+  // Strip `$schema` and any unused `$defs` keys so the wire payload matches
   // what the SDK validates against (`{ type: "object", properties, required }`).
   // Destructure the noisy keys off and keep the rest — `delete` would force
   // mutation Biome's `noDelete` rule rejects.
-  const raw = zodToJsonSchema(schema, { target: "jsonSchema7" }) as Record<string, unknown>;
-  const { $schema: _$schema, definitions: _definitions, ...json } = raw;
+  const raw = z.toJSONSchema(schema, { target: "draft-7", io: "input" }) as Record<string, unknown>;
+  const { $schema: _$schema, $defs: _$defs, definitions: _definitions, ...json } = raw;
   return {
     name,
     description,

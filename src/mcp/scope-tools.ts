@@ -9,7 +9,7 @@
  * - `scopeToolDefinition` returns a scoped VIEW of an existing
  *   `ToolDefinition`: `vault` drops out of the advertised `required` array and
  *   is injected with the scope slug when the caller omits it. It is a shallow
- *   transform of the plain JSON Schema object `zodToJsonSchema` already
+ *   transform of the plain JSON Schema object `z.toJSONSchema` already
  *   produced in `tool.ts` — the Zod schemas themselves are never forked, so
  *   the wire schema and the runtime validator cannot drift apart. The
  *   transform is pure: neither the source `ToolDefinition` nor its

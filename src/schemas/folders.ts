@@ -3,7 +3,7 @@
  *
  * Mirrors `src/schemas/files.ts`. The REST handlers parse the `*Query`
  * schemas; the MCP tools parse the `*Input` schemas (whose `inputSchema` is
- * derived from the same Zod values via `zod-to-json-schema`). A field is
+ * derived from the same Zod values via `z.toJSONSchema()`). A field is
  * defined once here and reused by both adapters — no duplicated zod defs.
  */
 

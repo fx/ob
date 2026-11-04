@@ -3,7 +3,7 @@
  *
  * Drives `scopeToolDefinition` against the REAL tool registry built by
  * `buildToolRegistry` (via `makeMcpFixture`), so the schemas under test are
- * the ones `zodToJsonSchema` actually emits and the calls under test hit the
+ * the ones `z.toJSONSchema` actually emits and the calls under test hit the
  * real service core. Hand-rolled `ToolDefinition`s appear only where a real
  * tool cannot express the shape (a schema with no `properties`, or a
  * vault-taking schema with no `required` array).
