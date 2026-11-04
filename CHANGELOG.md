@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.5.0](https://github.com/fx/ob/compare/v1.4.0...v1.5.0) (2026-11-04)
+
+
+### Features
+
+* **mcp:** mark the read-only tools readOnlyHint in tools/list ([#30](https://github.com/fx/ob/issues/30)) ([46a992e](https://github.com/fx/ob/commit/46a992e12fd66d13b298c73a13f01d6ade2af135))
+* **sync:** retry sync forever by default and fail /healthz while sync stays down ([#28](https://github.com/fx/ob/issues/28)) ([4066035](https://github.com/fx/ob/commit/40660358cb39385aa1b4c60031157eb184b94753))
+
+
+### Bug Fixes
+
+* **deps:** upgrade hono to 4.13.16 ([#32](https://github.com/fx/ob/issues/32)) ([eecf227](https://github.com/fx/ob/commit/eecf227ab81cfcb542709be9ff1f65c5e6ac7f0e))
+* **deps:** upgrade the MCP SDK to 1.32.2 and zod to 4.6.7 ([#33](https://github.com/fx/ob/issues/33)) ([3371d9a](https://github.com/fx/ob/commit/3371d9aee2eef0f188289f8ba2307e6d25f90657))
+
 ## [1.4.0](https://github.com/fx/ob/compare/v1.3.0...v1.4.0) (2026-09-15)
 
 
