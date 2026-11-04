@@ -5,7 +5,8 @@
  * coverage.
  */
 
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { makeMcpFixture } from "./helpers.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -179,4 +180,63 @@ test("transport.onerror logs to the configured logger", async () => {
   const body = (await r.json()) as { error: { code: number } };
   expect(body.error.code).toBe(-32700);
   expect(warns.some((w) => w.includes("mcp transport error"))).toBe(true);
+});
+
+test("a rejected server.close() on session teardown is logged, not thrown", async () => {
+  // Teardown is fire-and-forget (`disposeServer`): the SDK does not await the
+  // `onsessionclosed` callback, so a failing `Server.close()` has no caller to
+  // surface to and must be logged instead.
+  const { buildMcpRoutes } = await import("../../src/mcp/index.ts");
+  const { Hono } = await import("hono");
+  const fx = await makeMcpFixture({ label: "tx-close-fail" });
+  cleanup.push(fx.stop);
+  const warns: { m: string; f: unknown }[] = [];
+  const sub = buildMcpRoutes({
+    ...fx.serviceDeps,
+    supervisor: { list: () => [], get: () => null, stop: async () => undefined },
+    indexer: fx.indexer,
+    logger: {
+      trace: () => undefined,
+      debug: () => undefined,
+      info: () => undefined,
+      warn: (m: string, f?: unknown) => warns.push({ m, f }),
+      error: () => undefined,
+    },
+  });
+  const app = new Hono();
+  app.route("/mcp", sub);
+  const init = await app.request("/mcp", {
+    method: "POST",
+    headers: { accept: ACCEPT, "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "t", version: "0" },
+      },
+    }),
+  });
+  expect(init.status).toBe(200);
+  const sid = init.headers.get("mcp-session-id");
+  expect(sid).not.toBeNull();
+
+  const close = spyOn(Server.prototype, "close").mockImplementation(() =>
+    Promise.reject(new Error("boom")),
+  );
+  try {
+    const del = await app.request("/mcp", {
+      method: "DELETE",
+      headers: { "mcp-session-id": sid ?? "" },
+    });
+    expect(del.status).toBe(200);
+    // The rejection is handled on a later microtask; let it settle.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(close).toHaveBeenCalled();
+  } finally {
+    close.mockRestore();
+  }
+  expect(warns).toContainEqual({ m: "mcp server.close failed", f: { error: "boom" } });
 });

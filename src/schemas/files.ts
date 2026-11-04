@@ -2,8 +2,8 @@
  * Zod schemas for file-related inputs and outputs.
  *
  * The REST handlers parse with these schemas; the MCP adapter (0005) registers
- * tools whose `inputSchema` is derived from the same Zod values via
- * `zod-to-json-schema`. A field MUST NOT be defined twice — when a shape
+ * tools whose `inputSchema` is derived from the same Zod values via Zod's
+ * native `z.toJSONSchema()`. A field MUST NOT be defined twice — when a shape
  * needs adjusting, edit it here.
  */
 

@@ -19,7 +19,7 @@
   "dependencies": {
     "@huggingface/transformers": "4.2.0",
     "@lancedb/lancedb": "0.27.2",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "chokidar": "5.0.0",
     "gray-matter": "4.0.3",
     "hono": "4.13.16",
@@ -28,8 +28,7 @@
     "remark-gfm": "4.0.1",
     "unist-util-visit": "5.1.0",
     "unpdf": "1.6.2",
-    "zod": "3.24.1",
-    "zod-to-json-schema": "3.24.1"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",

@@ -114,7 +114,7 @@ export function buildMcpServer(
         name: t.name,
         description: t.description,
         // The SDK validates `inputSchema` on the wire as `{ type: "object",
-        // properties?, required? }`. zodToJsonSchema in `tool.ts` already
+        // properties?, required? }`. z.toJSONSchema in `tool.ts` already
         // produces that exact shape.
         inputSchema: t.inputSchema,
         annotations: t.annotations,
