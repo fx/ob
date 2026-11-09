@@ -228,7 +228,7 @@ interface TagListing {
 
 - `search` MUST return at most `limit ?? 20` hits ordered by descending fused score (after MMR and threshold).
 - `reindex` and `drop` are imperative hooks called by REST writes, deletes, moves, and copies — they let the API skip waiting for the chokidar debounce when the API itself was the writer.
-- A move is indexed as a drop of every Markdown path that left and a reindex of every Markdown path that arrived. Rows are not renamed in place: `embed_text` starts with the note's path, so a moved note's vectors and full-text tokens MUST be recomputed for its new path, and a note whose content is unchanged is still re-embedded after a move.
+- A move is indexed as a drop of every indexed Markdown path that left and a reindex of every Markdown path that arrived and that the watcher would index (hidden paths and symlinks travel with a moved folder but are not indexed). Rows are not renamed in place: `embed_text` starts with the note's path, so a moved note's vectors and full-text tokens MUST be recomputed for its new path, and a note whose content is unchanged is still re-embedded after a move.
 
 #### Scenario: Moved note is re-embedded under its new path
 

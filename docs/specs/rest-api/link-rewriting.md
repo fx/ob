@@ -33,7 +33,7 @@ The rules below are ob's own, modelled on Obsidian's behavior. Obsidian does not
 
 `resolve(link, S, F)` maps a recognized link in the note at vault-relative path `S` to one file of the vault file set `F`, or to nothing. Path comparison is case-insensitive, and when several files match a step only by case, the one matching case exactly wins. `match(P)` is the file whose path is `P`, else the file whose path is `P.md`.
 
-1. **Relative.** If the linkpath starts with `./` or `../`, or the link is a Markdown link, let `R` be the linkpath joined to the folder of `S` and normalized. If `match(R)` exists, it is the result. A relative linkpath that climbs above the vault root resolves to nothing.
+1. **Relative.** If the linkpath starts with `./` or `../`, or the link is a Markdown link whose destination does not start with `/`, let `R` be the linkpath joined to the folder of `S` and normalized. If `match(R)` exists, it is the result. A relative linkpath that climbs above the vault root resolves to nothing.
 2. **Vault-absolute.** Otherwise, if `match(L)` exists, where `L` is the linkpath with one leading `/` removed, it is the result.
 3. **By name.** Otherwise, the candidates are the files whose path ends with `/L` or `/L.md`. One candidate is the result. Among several, the result is the candidate in the same folder as `S`, else the one with the fewest path segments, else the first in path order.
 4. Otherwise the link is unresolved.
@@ -100,6 +100,12 @@ This covers both halves of a move: links into the moved files, and the moved not
 - **GIVEN** `notes/a.md` containing `![diagram](img/d%201.png)` and the file `notes/img/d 1.png`
 - **WHEN** `notes/a.md` is moved to `archive/a.md`
 - **THEN** `archive/a.md` contains `![diagram](../notes/img/d%201.png)`, even though the old text would still have found the image by name
+
+#### Scenario: Vault-absolute Markdown link keeps its leading slash
+
+- **GIVEN** `assets/logo.png` and `notes/a.md` containing `![logo](/assets/logo.png)`
+- **WHEN** `assets/logo.png` is moved to `media/logo.png`
+- **THEN** `notes/a.md` contains `![logo](/media/logo.png)`, because a destination starting with `/` resolves at the vault-absolute step and keeps that style
 
 #### Scenario: Attachment move updates embeds
 
