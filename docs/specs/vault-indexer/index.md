@@ -27,7 +27,13 @@ One predicate, `isIndexablePath`, decides what the index may hold, and the initi
 
 A path that fails the rule is never embedded or stored, whichever route it arrived by, and a reindex of such a path drops any rows it has rather than indexing it.
 
-The rule gates only what is *added* to the index. Drops are never gated by it, and never by whether a file currently exists at the path: a path that has just been moved away or deleted fails the filesystem half of the rule by definition, and dropping a path that has no rows is a no-op. So every drop — a deleted or moved-away file, a folder's prefix, an overwritten destination, a reindex of a path that is gone or not indexable — removes whatever rows the path has, unconditionally. The one guard any drop site may apply is ordering against a concurrent writer that has recreated the path, as a folder move's old-path drop does.
+The rule gates only what is *added* to the index. Drops are never gated by it — a path that has just been moved away or deleted fails its filesystem half by definition, and dropping a path that has no rows is a no-op — and are guarded only by existence at drop time:
+
+- **Drop guard.** A removed path's rows are dropped only if nothing exists at that path when the drop runs. For ob's own operations the check and the drop happen under the path's write lock. A path that was recreated in the meantime keeps its rows: its writer reindexed it, or the watcher will. This applies to every removed path: a deleted file, each indexed path under a deleted folder, and each old path of a moved file or folder.
+- **Overwritten destination.** The one drop of a path that still exists: an `overwrite` move or copy replaced its content, and the drop of its old rows runs under the destination's lock immediately before that same path is reindexed.
+- **Reindex of a non-indexable or missing path.** It drops the path's rows, as stated above.
+
+The watcher follows the same split. It prunes directories while traversing — a hidden directory, a `node_modules` directory, and a symlinked directory are never descended into — by the segment and symlink parts of the rule, not by the file predicate, which would reject every directory. It applies `isIndexablePath` only to `add` and `change` events, and handles `unlink` by dropping the path's rows under the drop guard.
 
 #### Scenario: Symlinked note is never indexed
 
@@ -38,7 +44,7 @@ The rule gates only what is *added* to the index. Drops are never gated by it, a
 ### Watcher
 
 - For each configured vault, the indexer MUST watch `<DATA_DIR>/vaults/<slug>/` recursively with `chokidar` (or the Bun-native equivalent if it covers add/change/unlink semantics on Linux — to be confirmed in Change 0003).
-- The watcher MUST ignore every path that is not [indexable](#indexable-paths), and MUST NOT follow symlinks while watching.
+- The watcher MUST prune and filter exactly as [Indexable paths](#indexable-paths) states — directories pruned by segment and symlink, `isIndexablePath` applied to `add` / `change`, `unlink` dropping under the drop guard — and MUST NOT follow symlinks while watching.
 - The watcher MUST coalesce events on the same path within a 250 ms debounce window.
 - The watcher MUST handle `add`, `change`, and `unlink` events. Renames MUST be observable as `unlink` followed by `add` (chokidar default).
 
@@ -239,7 +245,7 @@ interface Indexer {
   search(slug: string, query: string, opts?: SearchOptions): Promise<SearchHit[]>;
   reindex(slug: string, path: string): Promise<void>;
   drop(slug: string, path: string): Promise<void>;
-  dropPrefix(slug: string, prefix: string): Promise<void>;   // every row whose path starts with prefix
+  indexedPaths(slug: string, prefix: string): Promise<string[]>;   // distinct indexed paths starting with prefix
   tags(slug: string, opts?: { pathPrefix?: string; limit?: number }): Promise<TagListing>;
   stop(): Promise<void>;
 }
@@ -252,8 +258,8 @@ interface TagListing {
 - `search` MUST return at most `limit ?? 20` hits ordered by descending fused score (after MMR and threshold).
 - `reindex` and `drop` are imperative hooks called by REST writes, deletes, moves, and copies — they let the API skip waiting for the chokidar debounce when the API itself was the writer.
 - `reindex` MUST resolve only when the path's rows reflect its current content (including the unchanged-`sha256` short-circuit, and including dropping the rows of a path that is gone or not indexable), and MUST reject when they could not be brought there — a read, chunk, embed, or store failure after its retries. The failure is still counted in `IndexerStatus.errors`. This is what lets every API response's `indexed` flag report a failed index update.
-- `dropPrefix` removes every row whose path starts with `prefix` (a literal prefix, as in `filter.pathPrefix`); a recursive folder delete calls it with the folder's path followed by `/`, so a note indexed into the folder after the delete collected its contents is dropped too.
-- A move is indexed as an unconditional drop of every path that left (rows exist only for paths that were indexable, so the drop needs no predicate) and a reindex of every [indexable](#indexable-paths) path that arrived (hidden paths, `node_modules`, and symlinks travel with a moved folder but are not indexed). Rows are not renamed in place: `embed_text` starts with the note's path, so a moved note's vectors and full-text tokens MUST be recomputed for its new path, and a note whose content is unchanged is still re-embedded after a move.
+- `indexedPaths` returns the distinct paths that have rows and start with `prefix` (a literal prefix, as in `filter.pathPrefix`). A recursive folder delete calls it with the folder's path followed by `/` after the removal and drops each returned path under the drop guard, so a note indexed into the folder after the delete collected its contents is dropped, while one recreated after the removal keeps its rows.
+- A move is indexed as a drop of every path that left, never gated by `isIndexablePath` (rows exist only for paths that were indexable) and guarded only by existence at drop time, and a reindex of every [indexable](#indexable-paths) path that arrived (hidden paths, `node_modules`, and symlinks travel with a moved folder but are not indexed). Rows are not renamed in place: `embed_text` starts with the note's path, so a moved note's vectors and full-text tokens MUST be recomputed for its new path, and a note whose content is unchanged is still re-embedded after a move.
 
 #### Scenario: Moved note is re-embedded under its new path
 

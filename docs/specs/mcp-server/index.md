@@ -100,8 +100,8 @@ The path tools' descriptions MUST state that they work on files and folders alik
 
 - `list` — that entries carry `type: "file" | "folder"`, that empty folders are listed, and what `type` and `recursive: false` do.
 - `delete` — that a non-empty folder is refused with `folder_not_empty` unless `recursive: true`, which removes everything under it.
-- `move` — that `destination` is the exact new path (not a folder to move into), that an existing destination is refused with `already_exists` unless `overwrite: true` (which never applies to folders), and that internal links pointing at the moved files are rewritten unless `updateLinks: false`, with the rewritten and failed notes reported.
-- `copy` — that a folder needs `recursive: true`, that an existing destination is refused unless `overwrite: true` (files only), and that links are not rewritten.
+- `move` — that `destination` is the exact new path (not a folder to move into), that an existing destination is refused with `already_exists` unless `overwrite: true` (which never applies to folders), and that internal links pointing at the moved files are rewritten unless `updateLinks: false`, with the rewritten notes (each with its own `indexed`) and failed notes reported, and that `indexed` is `true` only when at least one note was indexed and every index update succeeded.
+- `copy` — that a folder needs `recursive: true`, that an existing destination is refused unless `overwrite: true` (files only), that links are not rewritten, and that `indexed` is `true` only when at least one copied note was indexed and every index update succeeded.
 
 `list_tags`'s description MUST state that it lists inline tags from the search index with the number of documents carrying each, that nested tags are not rolled up into their parents, and that every listed tag can be passed to `search` as `filter.tag`. `grep`'s description MUST state that it matches exact text (or a regular expression with `regex: true`) line by line in text files on disk, that PDFs and binaries are not searched, that results are capped and flagged `truncated`, and that `search` is the tool for finding notes by meaning.
 

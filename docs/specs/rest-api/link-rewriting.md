@@ -42,7 +42,7 @@ Resolution is a pure function of the link, the note's path, and the file set, an
 
 ### Which links are rewritten
 
-Let `M` map the old path of every moved file to its new path — one entry for a file, one per descendant file (of any type) for a folder. For each recognized link in a referring note whose pre-move path is `S0` and post-move path is `S1` (equal unless the note itself moved):
+Let `M` map the old path of every moved file to its new path — one entry for a file, and for a folder one per descendant file (of any type) that `GET /paths` would list. Hidden entries and symlinks travel with a moved folder but are not in `M`: they are neither scanned as referring notes nor treated as link targets that moved. For each recognized link in a referring note whose pre-move path is `S0` and post-move path is `S1` (equal unless the note itself moved):
 
 - Let `t0 = resolve(link, S0, F_before)`. An unresolved link is never rewritten.
 - Let `expected` be `M(t0)` if `t0` moved, else `t0`, and `t1 = resolve(link, S1, F_after)`.
@@ -71,11 +71,12 @@ This covers both halves of a move: links into the moved files, and the moved not
 
 ### Applying rewrites
 
+- The note is read under the [containment precondition](index.md#path-operations) for reads; a note that fails it is reported in `failed` with `invalid_path`.
 - All rewrites of one note MUST be applied as one atomic write of that note and reindexed, exactly as `PUT` writes and reindexes a note, and serialized with other writes to it. Nothing but the rewritten linkpaths changes; line endings and every other byte are preserved.
 - The rewrite MUST be computed from the note's bytes as read while holding its lock, so no ob write to that note is lost. A rewrite replaces the note it read; it never claims a new path, so the no-replace destination rule of [Path operations](index.md#path-operations) does not apply. Like `PUT` and `PATCH`, it cannot exclude a writer outside ob (Obsidian Sync) that changes or removes the note in the instant between that read and the atomic write; that window is a known limit shared with every in-place write, not specific to moves.
 - A note that cannot be read or written, or that vanishes, is reported in `links.failed` with the error's `code` and left as it is; the remaining notes are still rewritten. A failed write removes only the temporary file it created itself, never the note, per the failure rule in [Path operations](index.md#path-operations).
 - Each note write is held to the [containment precondition](index.md#path-operations): the symlink check on the note's parent chain runs immediately before the temporary file is created, again immediately before it is renamed over the note, and before a failed write removes it. A note whose chain fails a check is reported in `failed` with `invalid_path` and not written.
-- `links.updated` lists every rewritten note once, by its post-move path, in path order, with the number of link occurrences rewritten in it.
+- `links.updated` lists every rewritten note once, by its post-move path, in path order, with the number of link occurrences rewritten in it and `indexed`, which is `false` when the note's text was written but its reindex failed. Such a note stays in `updated` — its links were rewritten — and also makes the move's top-level `indexed` `false`.
 
 #### Scenario: Bare-name wikilink follows a rename
 
