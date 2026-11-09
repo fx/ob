@@ -154,6 +154,31 @@ The indexer MUST address these via four cooperating mechanisms.
 - **THEN** the response `hits` is `[]`
 - **AND** the response is not an error
 
+### Tag listing
+
+> Specified by draft change [0021](../../changes/0021-list-tags.md); not yet implemented.
+
+`Indexer.tags(slug, opts)` reports the tags present in a vault's index and how many documents carry each. It backs `GET /v1/vaults/:slug/tags` and the MCP `list_tags` tool.
+
+- The tags reported MUST be exactly those stored on the vault's chunks — the inline tags the [chunker](#chunker) extracts, without the leading `#`, code excluded — so every reported tag is a value `search` accepts as `filter.tag`.
+- A tag's `count` MUST be the number of distinct document paths with at least one chunk carrying it, so it equals the number of distinct paths a `search` filtered on that tag can return.
+- Tags MUST be reported exactly as stored: case-sensitively, and without rolling nested tags up into their parents. A document tagged only `#project/alpha` counts toward `project/alpha` and not toward `project`; `project` appears only when some document carries `#project` itself.
+- With `opts.pathPrefix`, only documents whose path starts with it (literally, as in `search`'s `filter.pathPrefix`) are counted, and tags carried by no such document are not reported.
+- Items MUST be ordered by `count` descending, then by tag in code-point order. At most `opts.limit ?? 100` items are returned (1–1000), and `total` MUST be the number of distinct tags before the limit.
+- The listing reflects the index at the time of the call: while a vault is still `scanning`, it covers only what has been indexed so far.
+
+#### Scenario: Tags counted by distinct document
+
+- **GIVEN** an indexed vault where `a.md` carries `#todo` in two sections, `b.md` carries `#todo` and `#project/alpha`, and `c.md` carries `#project`
+- **WHEN** `tags("v")` is called
+- **THEN** `items` is `[{ tag: "todo", count: 2 }, { tag: "project", count: 1 }, { tag: "project/alpha", count: 1 }]` and `total` is 3
+
+#### Scenario: Tags under a path prefix
+
+- **GIVEN** the vault above, where only `b.md` lives under `work/`
+- **WHEN** `tags("v", { pathPrefix: "work/" })` is called
+- **THEN** `items` is `[{ tag: "project/alpha", count: 1 }, { tag: "todo", count: 1 }]`
+
 ### Public surface
 
 ```ts
@@ -192,12 +217,25 @@ interface Indexer {
   search(slug: string, query: string, opts?: SearchOptions): Promise<SearchHit[]>;
   reindex(slug: string, path: string): Promise<void>;
   drop(slug: string, path: string): Promise<void>;
+  tags(slug: string, opts?: { pathPrefix?: string; limit?: number }): Promise<TagListing>;
   stop(): Promise<void>;
+}
+interface TagListing {
+  items: { tag: string; count: number }[];
+  total: number;
 }
 ```
 
 - `search` MUST return at most `limit ?? 20` hits ordered by descending fused score (after MMR and threshold).
-- `reindex` and `drop` are imperative hooks called by REST writes/deletes — they let the API skip waiting for the chokidar debounce when the API itself was the writer.
+- `reindex` and `drop` are imperative hooks called by REST writes, deletes, moves, and copies — they let the API skip waiting for the chokidar debounce when the API itself was the writer.
+- A move is indexed as a drop of every Markdown path that left and a reindex of every Markdown path that arrived. Rows are not renamed in place: `embed_text` starts with the note's path, so a moved note's vectors and full-text tokens MUST be recomputed for its new path, and a note whose content is unchanged is still re-embedded after a move.
+
+#### Scenario: Moved note is re-embedded under its new path
+
+- **GIVEN** indexed `inbox/idea.md`
+- **WHEN** it is moved through the API to `projects/idea.md`
+- **THEN** before the move responds, the table has no rows for `inbox/idea.md`
+- **AND** the rows for `projects/idea.md` carry an `embed_text` starting with `projects/idea.md`, embedded from that text
 
 ## Design
 
@@ -257,3 +295,5 @@ fs unlink ───────────────────────�
 | 2026-05-03 | Initial spec created | — |
 | 2026-05-03 | Chunker: flat-list-section heuristic + `embed_text` composition. Schema adds `embed_text` column. Pipeline-version sidecar drives full re-embed on chunker change. | [Change 0007](../../changes/0007-indexer-relevance.md) |
 | 2026-05-03 | New "Search relevance" section: hybrid retrieval (vector + FTS via RRF), MMR diversification, score threshold. Indexer interface gains `mode`, `threshold`, `mmrLambda`, `maxPerPath`. | [Change 0008](../../changes/0008-search-relevance.md) |
+| 2026-11-09 | Moves are indexed as drop-old plus reindex-new, re-embedding moved notes because `embed_text` carries the path; `reindex` / `drop` are now also called by moves and copies. | [Change 0020](../../changes/0020-move-and-copy.md) |
+| 2026-11-09 | New "Tag listing" section and `Indexer.tags()`: stored inline tags with distinct-document counts, no parent roll-up, ordered by count then tag, optional path prefix. | [Change 0021](../../changes/0021-list-tags.md) |

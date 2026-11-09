@@ -2,13 +2,14 @@
 
 ## Overview
 
-The REST API exposes vault-scoped CRUD over arbitrary files (Markdown, images, PDFs, attachments — anything stored in the vault) and natural-language search over the indexed Markdown content of each vault. It runs in the same Bun process as the supervisor and indexer and shares their in-memory state. There is no authentication in v1 — deployment is private-network only.
+The REST API exposes vault-scoped CRUD over arbitrary files (Markdown, images, PDFs, attachments — anything stored in the vault), type-agnostic path operations (list, delete, move, copy) over files and folders, tag listing, exact-text grep, and natural-language search over the indexed Markdown content of each vault. It runs in the same Bun process as the supervisor and indexer and shares their in-memory state. There is no authentication in v1 — deployment is private-network only.
 
 ## Background
 
 - Built on [Hono](https://hono.dev/) for first-class Bun fit and minimal overhead.
 - REST is one of two **adapters** over the shared service core defined in [Architecture › Shared Service Core](../architecture/index.md#shared-service-core). It MUST contain no vault behavior of its own; every route is parse → call → respond. The other adapter is [MCP Server](../mcp-server/) and MUST behave identically against the same inputs.
 - Related specs: [Architecture](../architecture/), [Obsidian Sync](../obsidian-sync/), [Vault Indexer](../vault-indexer/).
+- Supplementary document: [Link rewriting](link-rewriting.md) — which internal links a move rewrites, how they are resolved, and how the rewritten text is formed. It is part of this spec.
 
 ## Requirements
 
@@ -16,7 +17,9 @@ The REST API exposes vault-scoped CRUD over arbitrary files (Markdown, images, P
 
 - The HTTP server MUST mount the API under `/v1`.
 - Vault-scoped routes MUST use the slug, not the human name: `/v1/vaults/:slug/...`.
-- Vault sub-resources are namespaced by segment (`files`, `search`, future: `sync`) so that `GET /v1/vaults/:slug` (vault metadata) and `GET /v1/vaults/:slug/files/*path` (a file inside the vault) never collide.
+- Vault sub-resources are namespaced by segment (`files`, `folders`, `paths`, `tags`, `grep`, `search`, future: `sync`) so that `GET /v1/vaults/:slug` (vault metadata) and `GET /v1/vaults/:slug/files/*path` (a file inside the vault) never collide.
+- Resource families split by what an operation applies to, mirroring the [MCP tool design rules](../mcp-server/index.md#tool-design-rules): `paths` carries every operation that applies to files and folders alike (list, delete, move, copy); `files` carries operations that only make sense for file content (read, write, patch, append); `folders` carries the one folder-only operation (create).
+- An operation that is not a plain CRUD verb on a resource is addressed as a `POST` to the resource path with a `:verb` suffix (`*path:append`, `*path:move`, `*path:copy`). The suffix is unambiguous because Obsidian does not allow `:` in file or folder names.
 - File paths MUST appear as wildcard segments: `/v1/vaults/:slug/files/*path` where `*path` is the relative path inside the vault, slash-separated, no leading slash. Any extension is allowed.
 - An unknown vault slug MUST return `404` with body `{ "error": { "code": "vault_not_found", "message": "..." } }`.
 
@@ -113,12 +116,7 @@ The REST API exposes vault-scoped CRUD over arbitrary files (Markdown, images, P
 
 For all routes below, `:slug` is the vault slug and `*path` is the file path inside the vault. Any file type is supported (Markdown, images, PDFs, attachments). Only `.md` / `.markdown` files are indexed for search; binaries are stored on disk and round-tripped through `ob sync` but not embedded in v1.
 
-#### `GET /v1/vaults/:slug/files`
-
-- Lists files. Query params: `prefix` (string, MUST match path prefix), `limit` (int, default 100, max 1000), `cursor` (opaque string).
-- MUST return `200 { items: [{ path, mtimeMs, size, sha256, contentType }], nextCursor: string | null }` where `contentType` is the detected MIME type by extension.
-- MUST stream from the on-disk vault directory and MUST include all file types (not just Markdown).
-- MUST omit any path containing a `/.obsidian/` or `/.trash/` segment, any dotfile, and any symlink (symlinks are detected by `Dirent` type and never followed).
+Listing and deleting files are [Path operations](#path-operations), shared with folders: there is no `GET /v1/vaults/:slug/files` list route and no `DELETE /v1/vaults/:slug/files/*path` route. Both were removed by [Change 0019](../../changes/0019-unified-list-and-delete.md) (draft — until it lands, the server still serves them with their previous behavior).
 
 #### `GET /v1/vaults/:slug/files/*path`
 
@@ -152,12 +150,6 @@ For all routes below, `:slug` is the vault slug and `*path` is the file path ins
 - The handler MUST `mkdir -p` the parent directory inside the vault, write the file atomically (temp file + rename).
 - For Markdown files the handler MUST then `await indexer.reindex(slug, path)` before responding. For non-Markdown files the handler MUST NOT call the indexer.
 - The handler MUST refuse to write outside the vault root (Path validation).
-
-#### `DELETE /v1/vaults/:slug/files/*path`
-
-- Deletes the file.
-- Response MUST be `204` on success, `404` if the file did not exist.
-- The handler MUST `unlink` the file. If the path was Markdown, the handler MUST also `await indexer.drop(slug, path)` before responding.
 
 #### `PATCH /v1/vaults/:slug/files/*path`
 
@@ -219,15 +211,7 @@ For all routes below, `:slug` is the vault slug and `*path` is the file path ins
 
 ### Folder CRUD
 
-Folders are a separate surface from files because `GET /v1/vaults/:slug/files` only emits `Dirent.isFile()` entries: a folder with no descendant files is invisible to the file API. Obsidian Sync preserves empty folders (verified against a live vault; no upstream toggle exists per [Sync settings](https://obsidian.md/help/sync/settings)), so the API MUST expose them too. `FolderEntry = { path, mtimeMs }` — folders carry no size, sha256, or contentType.
-
-#### `GET /v1/vaults/:slug/folders`
-
-- Lists folders. Query params: `prefix` (string, MUST match path prefix), `limit` (int, default 100, max 1000), `cursor` (opaque string) — same shape and semantics as the file list endpoint.
-- MUST return `200 { items: [{ path, mtimeMs }], nextCursor: string | null }` where `path` is the vault-relative folder path with no trailing slash.
-- MUST walk the on-disk vault directory and emit directory entries in pre-order lexicographic walk (parent before children) so cursor resumption advances into subtrees predictably.
-- MUST omit any folder containing a `/.obsidian/` or `/.trash/` segment, any dotfolder, and any symlink (same omission rules as `GET /v1/vaults/:slug/files`).
-- MUST NOT emit the vault root itself.
+Creating a folder is the one folder-only operation. Listing, deleting, moving, and copying folders are [Path operations](#path-operations), shared with files. Obsidian Sync preserves empty folders (no upstream toggle exists per [Sync settings](https://obsidian.md/help/sync/settings)), so the API exposes them; an empty folder is visible through `GET /v1/vaults/:slug/paths`.
 
 #### `PUT /v1/vaults/:slug/folders/*path`
 
@@ -236,24 +220,6 @@ Folders are a separate surface from files because `GET /v1/vaults/:slug/files` o
 - Response MUST be `200 { path, mtimeMs, created: boolean }`. `created` is `true` on first creation and `false` on idempotent no-op against an existing folder.
 - If the path already exists as a file (not a directory), the response MUST be `400` with `error.code = "invalid_path"`.
 
-#### `DELETE /v1/vaults/:slug/folders/*path`
-
-- Deletes the folder.
-- Optional query string `?recursive=true` opts into recursive removal of all descendants.
-- Without `recursive=true`, a non-empty folder MUST yield `409` with `error.code = "folder_not_empty"`. The folder MUST remain unchanged.
-- With `recursive=true`, the handler MUST collect every Markdown descendant first, call `await indexer.drop(slug, mdPath)` for each (best-effort; failures logged), then `fs.rm(abs, { recursive: true, force: false })`.
-- If the path does not exist, MUST return `404` with `error.code = "not_found"`.
-- If the path exists but is a file, MUST return `400` with `error.code = "invalid_path"` — callers should use `DELETE /files/*path` for files.
-- On success: `204` (no body).
-
-#### Scenario: Empty-folder visibility
-
-- **GIVEN** vault `v` containing only the empty folder `notes/scratchpad/`
-- **WHEN** the client calls `GET /v1/vaults/v/folders`
-- **AND** then calls `GET /v1/vaults/v/files`
-- **THEN** the folders response includes `notes/scratchpad`
-- **AND** the files response is `{ items: [], nextCursor: null }`
-
 #### Scenario: Idempotent create
 
 - **GIVEN** vault `v` with no `archive/2026/` folder
@@ -261,26 +227,271 @@ Folders are a separate surface from files because `GET /v1/vaults/:slug/files` o
 - **THEN** the response is `200` with `created: true`
 - **AND** a replay of the same `PUT` returns `200` with `created: false` and the same `mtimeMs`
 
-#### Scenario: Non-empty refused without recursive flag
+### Path operations
 
-- **GIVEN** vault `v` containing `social-graphs/people/peter-thiel/intro.md`
-- **WHEN** the client `DELETE`s `/v1/vaults/v/folders/social-graphs/people/peter-thiel`
+> Specified by draft changes [0019](../../changes/0019-unified-list-and-delete.md) (list, delete) and [0020](../../changes/0020-move-and-copy.md) (move, copy); not yet implemented.
+
+Operations that apply to files and folders alike live under one type-agnostic resource family, `/v1/vaults/:slug/paths`, with the semantics of the matching unix tool: list (`ls`), delete (`rm` / `rm -r`), move (`mv -T`), copy (`cp` / `cp -r -T`). `*path` names a file or a folder; the operation determines which it is from the filesystem, never from the request.
+
+Rules shared by every path operation:
+
+- Every path an operation addresses — the source and, for move and copy, the destination — MUST pass [Path validation](#path-validation), including the symlink check on the path and its whole parent chain. A failure on either path rejects the whole request with no change on disk.
+- A trailing `/` on a path MUST be tolerated and stripped; paths in responses are canonical (no leading or trailing `/`). The vault root itself is never a valid target (`400 invalid_path`), and the empty path does not match the `*path` routes.
+- Concurrent mutating calls that address the same file MUST be serialized against each other and against `PUT` / `PATCH` / `:append` on that file, and concurrent calls MUST NOT deadlock, whatever pair of paths each addresses. Serialization is per file: a write to a file inside a folder that is being moved, copied, or deleted is not serialized against the folder operation, and lands at whichever path it addressed.
+- Errors are checked before anything changes: a request rejected with a 4xx leaves the vault and the index exactly as they were.
+
+#### `GET /v1/vaults/:slug/paths`
+
+- Lists files and folders in one walk. Query params: `prefix` (string, ≤ 1024 bytes, matched literally against the leading bytes of each path), `limit` (int, 1–1000, default 100), `cursor` (opaque string), `type` (`file` | `folder`; omitted means both), `recursive` (`true` | `false`, default `true`). Any other parameter or value MUST yield `400 invalid_query`.
+- MUST return `200 { items: PathEntry[], nextCursor: string | null }` where
+
+  ```ts
+  type PathEntry =
+    | { type: "file"; path: string; mtimeMs: number; size: number; sha256: string; contentType: string }
+    | { type: "folder"; path: string; mtimeMs: number };
+  ```
+
+  `contentType` is the detected MIME type by extension and `sha256` the hash of the file bytes, exactly as the file read reports them. Folder entries carry no size, hash, or content type.
+- Entries MUST be ordered by comparing their paths segment by segment (split on `/`), each segment by raw code point, a path sorting before every path it is a proper segment-prefix of. This is pre-order: a folder is immediately followed by its descendants, so `a`, `a/x.md`, `a-b.md` is the order of a folder `a`, its file `x.md`, and a sibling file `a-b.md`.
+- `nextCursor` MUST be `null` on the last page. A cursor MUST resume strictly after the last entry of the page that produced it, in the order above, so paging visits every entry that exists for the whole paging sequence exactly once.
+- With `recursive=false`, only entries one level below the prefix's folder are returned: let `base` be `prefix` up to and including its last `/` (empty when it has none); an entry is returned iff it starts with `prefix` and the part after `base` contains no `/`. So `prefix=notes/` lists the direct children of `notes`, and an empty prefix lists the top level of the vault.
+- `type` filters before `limit` is applied: a page holds up to `limit` entries of the requested type.
+- MUST include every file type, MUST NOT emit the vault root, and MUST omit any entry whose path contains a hidden segment (a segment starting with `.`, which covers `.obsidian/` and `.trash/`) and any symlink. Symlinks are detected without being followed, and nothing below a hidden folder or a symlink is listed.
+- An entry that vanishes, or stops being a regular file or directory, while the walk is reading it MUST be skipped rather than failing the page.
+
+#### Scenario: Files and folders in one ordered listing
+
+- **GIVEN** vault `v` containing the folder `a/` with file `a/x.md`, the empty folder `a/empty/`, and the file `a-b.md`
+- **WHEN** the client calls `GET /v1/vaults/v/paths`
+- **THEN** `items` is, in order: folder `a`, folder `a/empty`, file `a/x.md`, file `a-b.md`
+- **AND** each file entry carries `size`, `sha256`, and `contentType`, and each folder entry only `type`, `path`, and `mtimeMs`
+
+#### Scenario: Pagination does not skip a sibling that sorts between a folder's descendants
+
+- **GIVEN** the vault from the previous scenario
+- **WHEN** the client pages with `limit=3` and follows `nextCursor`
+- **THEN** the first page ends at `a/x.md` and the second page is exactly `a-b.md` with `nextCursor: null`
+
+#### Scenario: Empty-folder visibility
+
+- **GIVEN** vault `v` containing only the empty folder `notes/scratchpad/`
+- **WHEN** the client calls `GET /v1/vaults/v/paths`
+- **THEN** `items` is folders `notes` and `notes/scratchpad`
+- **AND** `GET /v1/vaults/v/paths?type=file` returns `{ items: [], nextCursor: null }`
+
+#### Scenario: Non-recursive listing
+
+- **GIVEN** vault `v` containing `notes/a.md`, `notes/sub/b.md`, and `top.md`
+- **WHEN** the client calls `GET /v1/vaults/v/paths?prefix=notes/&recursive=false`
+- **THEN** `items` is file `notes/a.md` and folder `notes/sub`, and does not contain `notes/sub/b.md`
+
+#### `DELETE /v1/vaults/:slug/paths/*path`
+
+- Deletes a file or a folder. Optional query string `recursive` (`true` | `false`, default `false`); any other parameter or value MUST yield `400 invalid_query`.
+- A file MUST be removed whatever `recursive` says (`rm -r` on a file removes the file).
+- An empty folder MUST be removed. A non-empty folder without `recursive=true` MUST yield `409 folder_not_empty` and stay unchanged, including when a child appears between the emptiness check and the removal. With `recursive=true` the folder and everything under it MUST be removed.
+- The index entry of every removed Markdown file — the file itself, or every Markdown descendant of a removed folder — MUST be dropped only after the removal from disk succeeded, and before the response is sent. A drop failure MUST NOT fail the request (it is logged; the watcher reconciles); a removal failure leaves every index entry in place.
+- A path that does not exist MUST yield `404 not_found`. On success the response is `204` with no body.
+
+#### Scenario: Delete a file
+
+- **GIVEN** vault `v` containing the indexed note `notes/x.md`
+- **WHEN** the client `DELETE`s `/v1/vaults/v/paths/notes/x.md`
+- **THEN** the response is `204`, the file is gone, and the index has no rows for `notes/x.md`
+
+#### Scenario: Non-empty folder refused without recursive
+
+- **GIVEN** vault `v` containing `projects/alpha/intro.md`
+- **WHEN** the client `DELETE`s `/v1/vaults/v/paths/projects/alpha`
 - **THEN** the response is `409` with `error.code = "folder_not_empty"`
-- **AND** `social-graphs/people/peter-thiel/intro.md` is unchanged
+- **AND** `projects/alpha/intro.md` is unchanged and no index entry was dropped
 
 #### Scenario: Recursive delete drops Markdown index entries
 
 - **GIVEN** vault `v` containing `archive/2024/jan.md` and `archive/2024/cover.png`
-- **WHEN** the client `DELETE`s `/v1/vaults/v/folders/archive/2024?recursive=true`
-- **THEN** the response is `204`
-- **AND** the indexer recorded exactly one `drop` call for `archive/2024/jan.md` (zero for the binary)
-- **AND** the folder `archive/2024/` no longer exists on disk
+- **WHEN** the client `DELETE`s `/v1/vaults/v/paths/archive/2024?recursive=true`
+- **THEN** the response is `204` and `archive/2024/` no longer exists on disk
+- **AND** the indexer recorded exactly one `drop`, for `archive/2024/jan.md`, made after the folder was removed
+
+#### Scenario: Delete a missing path
+
+- **GIVEN** vault `v` with no `notes/missing.md`
+- **WHEN** the client `DELETE`s `/v1/vaults/v/paths/notes/missing.md`
+- **THEN** the response is `404` with `error.code = "not_found"`
+
+#### `POST /v1/vaults/:slug/paths/*path:move`
+
+- Moves (renames) a file or a folder to an exact destination path, like `mv -T`: the destination names the new path itself, never a folder to move into.
+- Request body MUST be `application/json` `{ destination: string, overwrite?: boolean, updateLinks?: boolean }`. `overwrite` defaults to `false`, `updateLinks` to `true`. Unknown keys MUST yield `400 invalid_input`.
+- The move MUST be a single atomic rename on disk: the source disappears and the destination appears in one step, and a folder moves with its whole subtree (hidden entries and symlinks inside it included — they travel with the folder, they are not separately addressed). Modification times are preserved (a moved note whose own links are then rewritten gets a new one). Missing parent folders of the destination MUST be created (`mkdir -p`).
+- With `overwrite: true` and both paths files, an existing destination file MUST be replaced atomically. A folder never replaces or merges into an existing path, and a file never replaces a folder, whatever `overwrite` says.
+- Before responding, the index entry of every Markdown path that the move removed MUST have been dropped (a drop failure is logged and the watcher reconciles), and every Markdown path that arrived MUST have been reindexed (a moved note is re-embedded under its new path — see [Vault Indexer › Public surface](../vault-indexer/index.md#public-surface)). `indexed` is `true` iff every one of those reindexes succeeded; a failed reindex is logged and the watcher reconciles.
+- With `updateLinks: true`, internal links in Markdown notes that pointed at a moved file MUST be rewritten to keep pointing at it, as [Link rewriting](link-rewriting.md) defines. Link rewriting happens after the move has succeeded. A note that cannot be rewritten MUST be reported in `links.failed` and left unchanged; it MUST NOT undo the move or any other note's rewrite, and the response is still `200`.
+- Response MUST be:
+
+  ```ts
+  200 {
+    path: string;              // the source path
+    destination: string;
+    type: "file" | "folder";
+    overwritten: boolean;      // true iff an existing destination file was replaced
+    indexed: boolean;
+    links: {
+      updated: { path: string; links: number }[];   // post-move paths, in path order; links = occurrences rewritten
+      failed: { path: string; code: string; message: string }[];
+    } | null;                  // null iff updateLinks was false
+  }
+  ```
+
+- Errors, all checked before anything changes:
+
+  | Condition | Status | `error.code` |
+  |---|---|---|
+  | Source does not exist | 404 | `not_found` |
+  | Destination equals the source, or a folder's destination lies inside it | 400 | `invalid_path` |
+  | A parent of the destination exists as a file | 400 | `invalid_path` |
+  | Destination exists and `overwrite` is not `true` | 409 | `already_exists` |
+  | Destination exists, `overwrite: true`, and either path is a folder | 409 | `already_exists` |
+
+#### Scenario: Rename a note and update links to it
+
+- **GIVEN** vault `v` containing `notes/old.md` and `daily/today.md` whose body contains `see [[old]]`
+- **WHEN** the client `POST`s `/v1/vaults/v/paths/notes/old.md:move` with `{ "destination": "notes/new.md" }`
+- **THEN** the response is `200` with `type: "file"`, `overwritten: false`, and `links.updated` = `[{ "path": "daily/today.md", "links": 1 }]`
+- **AND** `notes/new.md` exists with the old bytes and `notes/old.md` does not
+- **AND** `daily/today.md` now contains `see [[new]]`
+- **AND** the index has rows for `notes/new.md` and none for `notes/old.md`
+
+#### Scenario: Clobber refused without overwrite
+
+- **GIVEN** vault `v` containing `a.md` and `b.md`
+- **WHEN** the client `POST`s `/v1/vaults/v/paths/a.md:move` with `{ "destination": "b.md" }`
+- **THEN** the response is `409` with `error.code = "already_exists"`
+- **AND** both files are unchanged
+
+#### Scenario: Move a folder into a new parent
+
+- **GIVEN** vault `v` containing `inbox/2026/a.md` and `inbox/2026/img.png`, and no `archive/` folder
+- **WHEN** the client `POST`s `/v1/vaults/v/paths/inbox/2026:move` with `{ "destination": "archive/2026", "updateLinks": false }`
+- **THEN** the response is `200` with `type: "folder"` and `links: null`
+- **AND** `archive/2026/a.md` and `archive/2026/img.png` exist and `inbox/2026/` does not
+
+#### Scenario: Folder moved into itself
+
+- **GIVEN** vault `v` containing the folder `projects/`
+- **WHEN** the client `POST`s `/v1/vaults/v/paths/projects:move` with `{ "destination": "projects/old" }`
+- **THEN** the response is `400` with `error.code = "invalid_path"` and nothing changed
+
+#### `POST /v1/vaults/:slug/paths/*path:copy`
+
+- Copies a file, or with `recursive: true` a folder, to an exact destination path, like `cp -T` / `cp -r -T`.
+- Request body MUST be `application/json` `{ destination: string, overwrite?: boolean, recursive?: boolean }`, both flags defaulting to `false`. Unknown keys MUST yield `400 invalid_input`.
+- A file copy MUST write the source bytes to the destination atomically, creating missing parent folders. With `overwrite: true` an existing destination file MUST be replaced. `recursive` has no effect on a file.
+- A folder copy without `recursive: true` MUST yield `400 invalid_path`. With it, the destination MUST NOT exist (a folder copy never merges, whatever `overwrite` says) and MUST NOT lie inside the source. The copy contains every folder (empty ones included) and regular file that [`GET /paths`](#get-v1vaultsslugpaths) would list under the source; hidden entries and symlinks are not copied and are counted in `skipped`. The destination MUST appear complete or not at all: a concurrent reader never sees a partial copy, and a failed copy leaves no destination behind.
+- Copies get fresh modification times. Content is copied byte for byte; links are never rewritten, so a relative link inside a copied note may resolve differently from its new location.
+- Every Markdown file the copy wrote MUST be reindexed before responding; `indexed` is `true` iff all of those reindexes succeeded.
+- Response MUST be `200 { path, destination, type: "file" | "folder", overwritten: boolean, indexed: boolean, files: number, skipped: number }`, where `files` counts the files written.
+- Errors are those of `:move` (same conditions, statuses, and codes), plus the `recursive` rule above.
+
+#### Scenario: Copy a folder recursively
+
+- **GIVEN** vault `v` containing `templates/weekly.md`, `templates/empty/`, and `templates/.hidden`
+- **WHEN** the client `POST`s `/v1/vaults/v/paths/templates:copy` with `{ "destination": "templates-copy", "recursive": true }`
+- **THEN** the response is `200` with `type: "folder"`, `files: 1`, and `skipped: 1`
+- **AND** `templates-copy/weekly.md` and the empty folder `templates-copy/empty/` exist, `templates-copy/.hidden` does not, and the source is unchanged
+- **AND** the index has rows for `templates-copy/weekly.md`
+
+#### Scenario: Folder copy requires recursive
+
+- **GIVEN** vault `v` containing the folder `templates/`
+- **WHEN** the client `POST`s `/v1/vaults/v/paths/templates:copy` with `{ "destination": "t2" }`
+- **THEN** the response is `400` with `error.code = "invalid_path"` and `t2` does not exist
+
+### Tags
+
+> Specified by draft change [0021](../../changes/0021-list-tags.md); not yet implemented.
+
+#### `GET /v1/vaults/:slug/tags`
+
+- Lists the tags present in the vault's index with the number of documents carrying each. Query params: `prefix` (string, ≤ 1024 bytes; only documents whose path starts with it are counted), `limit` (int, 1–1000, default 100). Any other parameter or value MUST yield `400 invalid_query`.
+- Response `200 { items: { tag: string; count: number }[], total: number }`. Which tags are reported, how documents are counted, the order, and `total` are defined in [Vault Indexer › Tag listing](../vault-indexer/index.md#tag-listing); REST is a thin pass-through.
+
+### Grep
+
+> Specified by draft change [0022](../../changes/0022-grep.md); not yet implemented.
+
+#### `POST /v1/vaults/:slug/grep`
+
+- Searches the bytes on disk — not the index — for an exact substring or a regular expression, line by line, and returns where it matched. It complements `search`: `search` ranks Markdown by meaning; `grep` finds exact text in any text file.
+- Request body MUST be `application/json`:
+
+  ```ts
+  {
+    pattern: string;        // 1–1024 characters
+    regex?: boolean;        // default false: pattern is a literal substring
+    ignoreCase?: boolean;   // default false
+    prefix?: string;        // ≤ 1024 bytes; only paths starting with it are searched
+    limit?: number;         // max matches returned, 1–1000, default 100
+    context?: number;       // lines of context before and after each match, 0–5, default 0
+  }
+  ```
+
+  Unknown keys or out-of-range values MUST yield `400 invalid_input`. With `regex: true` the pattern uses ECMAScript regular-expression syntax in Unicode mode, with no user-supplied flags; a pattern that does not compile MUST yield `400 invalid_input`. `ignoreCase` applies Unicode case-insensitive matching in both modes.
+- Response MUST be:
+
+  ```ts
+  200 {
+    matches: {
+      path: string;
+      line: number;          // 1-based
+      column: number;        // 1-based, in Unicode code points, of the first match on the line
+      text: string;          // the line, without its terminator
+      before?: string[];     // present iff context > 0
+      after?: string[];      // present iff context > 0
+    }[];
+    truncated: boolean;
+    reason: "limit" | "bytes" | "time" | null;   // null iff truncated is false
+    filesScanned: number;
+    filesSkipped: number;
+  }
+  ```
+
+- Files searched: every file [`GET /paths`](#get-v1vaultsslugpaths) would list under `prefix` (so no hidden files and no symlinks) that is a text file by the same rule `PATCH` uses — Markdown and other text formats, never PDFs or other binaries — in that listing's order. A text file larger than 1 MiB, or containing a NUL byte, MUST be skipped and counted in `filesSkipped` rather than searched.
+- Files are decoded as UTF-8 (invalid sequences replaced) and split into lines on `\n`, a trailing `\r` being dropped. Matching is per line; a pattern never matches across a line break. A line that matches produces exactly one entry, however many times it matches. A pattern that matches the empty string matches every line.
+- `text` and each context line MUST be at most 1000 characters: a longer line is cut to a 1000-character window that contains the start of the first match. Context lines are taken from the same file, never across files, and overlapping contexts of nearby matches are not merged.
+- Every request is bounded. The search stops, returning what it found with `truncated: true`, when it has `limit` matches and more exist (`reason: "limit"`), when it has read 64 MiB of file content (`"bytes"`), or when it has run for 5 seconds (`"time"`). Because files and lines are searched in a fixed order, `matches` is always a prefix of the untruncated result.
+- A grep MUST NOT stall the server: other requests are served normally while it runs, including while a pathological regular expression is being evaluated, and such an evaluation is abandoned at the time limit.
+
+#### Scenario: Literal grep finds exact text with line numbers
+
+- **GIVEN** vault `v` containing `notes/a.md` whose third line is `TODO: call the plumber` and `img/logo.png`
+- **WHEN** the client `POST`s `/v1/vaults/v/grep` with `{ "pattern": "TODO:" }`
+- **THEN** the response is `200` with one match `{ path: "notes/a.md", line: 3, column: 1, text: "TODO: call the plumber" }`
+- **AND** `truncated` is `false` and `img/logo.png` was not searched
+
+#### Scenario: Regex special characters are literal by default
+
+- **GIVEN** vault `v` containing `a.md` with the line `cost (est.) $5`
+- **WHEN** the client greps `{ "pattern": "(est.) $5" }`
+- **THEN** the line is matched at column 6
+
+#### Scenario: Catastrophic regex is cut off without stalling the server
+
+- **GIVEN** vault `v` containing a text file with a 10 000-character line of `a` followed by `!`
+- **WHEN** the client greps `{ "pattern": "(a+)+$", "regex": true }`
+- **THEN** the response arrives within the time budget with `truncated: true` and `reason: "time"`
+- **AND** a `GET /healthz` sent while the grep runs is answered promptly
+
+#### Scenario: Invalid regex rejected
+
+- **WHEN** the client greps `{ "pattern": "([", "regex": true }`
+- **THEN** the response is `400` with `error.code = "invalid_input"`
 
 ### Path validation
 
 - A path MUST NOT contain `..` segments, MUST NOT start with `/`, MUST NOT contain a NUL byte, MUST NOT exceed 1024 bytes.
 - Resolution MUST be performed via `path.resolve(vaultRoot, path)` followed by a `startsWith(vaultRoot + sep)` check. Any failure MUST return `400 { error: { code: "invalid_path", ... } }`.
-- Any extension is permitted on read, write, and delete. Reserved/hidden segments (`/.obsidian/`, `/.trash/`, dotfiles at any depth) MUST return `400` with code `invalid_path` to keep callers from corrupting `ob`'s own state.
+- Any extension is permitted on read, write, delete, move, and copy. Reserved/hidden segments (`/.obsidian/`, `/.trash/`, dotfiles at any depth) MUST return `400` with code `invalid_path` to keep callers from corrupting `ob`'s own state.
 
 #### Scenario: Path traversal blocked
 
@@ -288,6 +499,13 @@ Folders are a separate surface from files because `GET /v1/vaults/:slug/files` o
 - **WHEN** the server handles it
 - **THEN** response is `400` with `error.code = "invalid_path"`
 - **AND** no file is created
+
+#### Scenario: Traversal in a move destination blocked
+
+- **GIVEN** vault `v` containing `notes/x.md`
+- **WHEN** the client `POST`s `/v1/vaults/v/paths/notes/x.md:move` with `{ "destination": "../outside.md" }`
+- **THEN** the response is `400` with `error.code = "invalid_path"`
+- **AND** `notes/x.md` is unchanged and nothing was written outside the vault root
 
 #### Scenario: Markdown round-trip with indexing
 
@@ -331,7 +549,7 @@ Folders are a separate surface from files because `GET /v1/vaults/:slug/files` o
 ### Error model
 
 - Every error response MUST be JSON `{ error: { code: string, message: string, details?: unknown } }`.
-- `code` MUST come from a closed set: `vault_not_found`, `not_found`, `invalid_input`, `invalid_path`, `invalid_body`, `invalid_query`, `unsupported_media_type`, `patch_no_match`, `patch_ambiguous`, `folder_not_empty`, `extraction_failed`, `embedder_failed`, `internal`. `invalid_input` is the canonical code for any Zod schema-validation failure and is shared with the MCP adapter; `invalid_body` and `invalid_query` are HTTP-specific codes for malformed request envelopes (e.g. unparseable JSON body or unknown query string); `folder_not_empty` is the 409 response from `DELETE /v1/vaults/:slug/folders/*path` without `?recursive=true` against a non-empty folder; `extraction_failed` is the 422 response when a PDF requested as text cannot be parsed (corrupt or password-protected).
+- `code` MUST come from a closed set: `vault_not_found`, `not_found`, `invalid_input`, `invalid_path`, `invalid_body`, `invalid_query`, `unsupported_media_type`, `patch_no_match`, `patch_ambiguous`, `folder_not_empty`, `already_exists`, `extraction_failed`, `embedder_failed`, `internal`. `invalid_input` is the canonical code for any Zod schema-validation failure and is shared with the MCP adapter; `invalid_body` and `invalid_query` are HTTP-specific codes for malformed request envelopes (e.g. unparseable JSON body or unknown query string); `folder_not_empty` is the 409 response from `DELETE /v1/vaults/:slug/paths/*path` without `?recursive=true` against a non-empty folder; `already_exists` is the 409 response when a move or copy would replace or merge into an existing path it is not allowed to (see [Path operations](#path-operations)); `extraction_failed` is the 422 response when a PDF requested as text cannot be parsed (corrupt or password-protected).
 - 5xx responses MUST log `error` and `requestId`. The response MUST include `requestId` in `details`.
 
 ### Request logging
@@ -379,11 +597,11 @@ function safeJoin(root: string, rel: string): string {
 
 - v1 has NO authentication and NO authorization. The image is for deployment on a private network or behind another auth-providing reverse proxy.
 - The API MUST NOT spawn additional `ob` invocations on writes. It writes to disk; the supervisor's running `ob sync --continuous` picks up the change.
-- Wikilink rewriting on rename/move is OUT OF SCOPE for v1. A `PUT` to a new path is treated as a new document; the caller is responsible for any link maintenance.
+- Internal links are maintained only by `:move` (see [Link rewriting](link-rewriting.md)). A `PUT` to a new path is a new document, a copy is a byte-for-byte copy, and a delete leaves links to the deleted path dangling, exactly as in Obsidian.
 
 ## Open Questions
 
-- **Move/rename endpoint.** Adding `POST /v1/vaults/:slug/files/*path:move` would be cleaner than client-side delete-then-put, but punting per user direction. **Default**: not in v1; revisit if a real workflow needs it.
+- **Grep pagination.** A truncated grep returns a deterministic prefix of the full result but no cursor; callers narrow with `prefix`. **Default**: no cursor until a workflow needs to page through more than 1000 matches.
 - **Bulk operations.** `POST /v1/vaults/:slug/files:bulk` for batched writes. **Default**: not in v1.
 - **Streaming `GET docs`.** For large vaults, server-sent events for `list` would help. **Default**: cursor pagination is sufficient for v1.
 
@@ -402,3 +620,7 @@ function safeJoin(root: string, rel: string): string {
 | 2026-07-01 | JSON read variant (`Accept: application/json`) now accepts `.pdf` and returns extracted text with `pdf: { pages, hasTextLayer }` metadata; other non-Markdown files still get `406`. New error code `extraction_failed` (422) added to the closed set. Plain GET byte semantics unchanged. | [Change 0013](../../changes/0013-pdf-text-extraction.md) |
 | 2026-08-21 | Health endpoints section rewritten: `/healthz` is pinned as a dependency-free liveness probe, and `/readyz` gains an explicit body contract (`{ ok, vaults, indexers }`, identical in shape on 200 and 503) plus the exact three-part 200 rule. The `vaults` entries inherit the supervisor's new `lastSyncActivityAt` and `watchdog` fields, which also surface unchanged through `GET /v1/vaults` and `GET /v1/vaults/:slug`. One status-code change: `indexers` must now carry an entry for every configured vault, synthesized as `starting` when the indexer has not registered it, so a vault missing from that array can no longer leave `/readyz` at 200 — it returns 503 until the indexer registers and reaches `ready`. No route additions and no change to `/healthz`. | [Change 0015](../../changes/0015-sync-stall-watchdog.md) |
 | 2026-10-15 | `/healthz` now reflects persistent sync failure: `503 {ok:false, unhealthy:[…]}` when any vault is `failed` or has `consecutiveFailures` at or above `OB_HEALTHZ_SYNC_FAILURE_THRESHOLD` (default 3, `0` disables). The 200 body is unchanged, `/readyz` is unchanged, and sync health is pinned as never gating request handling. Reverses 0015's "`/healthz` never varies with vault state". | [Change 0017](../../changes/0017-sync-liveness.md) |
+| 2026-11-09 | Path operations: new type-agnostic `/v1/vaults/:slug/paths` family. `GET /paths` lists files and folders in one walk with a `type` discriminator, a `type` filter, and `recursive`; its order is segment-wise (pre-order), which also fixes cursor resumption skipping a sibling such as `a-b.md` that sorts between a folder's descendants. `DELETE /paths/*path[?recursive=true]` deletes files and folders and drops index entries only after the removal succeeded. **Breaking:** `GET /files`, `DELETE /files/*path`, `GET /folders`, and `DELETE /folders/*path` are removed. | [Change 0019](../../changes/0019-unified-list-and-delete.md) |
+| 2026-11-09 | Path operations gain `:move` (atomic rename to an exact destination, no clobber without `overwrite`, internal links rewritten by default per the new [Link rewriting](link-rewriting.md) document, moved notes re-embedded) and `:copy` (files, and folders with `recursive`, appearing atomically). New error code `already_exists` (409). The "wikilink rewriting is out of scope" constraint and the move/rename open question are retired. | [Change 0020](../../changes/0020-move-and-copy.md) |
+| 2026-11-09 | New `GET /v1/vaults/:slug/tags`: tags in the index with distinct-document counts, a thin pass-through over the indexer's tag listing. | [Change 0021](../../changes/0021-list-tags.md) |
+| 2026-11-09 | New `POST /v1/vaults/:slug/grep`: literal or regex line search over text files on disk, with hard limits on pattern length, file size, bytes read, and time, a `truncated` flag, and a guarantee that a pathological regex cannot stall the server. | [Change 0022](../../changes/0022-grep.md) |
