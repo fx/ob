@@ -21,8 +21,8 @@ This change MUST satisfy the project's standing testing rules (see [Architecture
 - The 100% line + branch coverage gate on `src/` MUST hold (`bun run test:cov`). New code without tests is a defect. Codecov does not report on this repo; the in-CI coverage check is the gate.
 - The store method MUST be tested against a real LanceDB store in a `Bun.tmpdirSync()` directory, per the architecture spec — no mocked store.
 - Route tests MUST go through the real Hono app; MCP tests through the real registry.
-- A parity test under `test/parity/` MUST assert identical `list_tags` / `GET /tags` payloads and error `code`s for the same fixture vault.
-- `test/mcp/server.test.ts`'s exact `readOnlyHint` set MUST include `list_tags`.
+- A parity test under `test/parity/` MUST assert identical `list_tags` / `GET /tags` payloads, and identical error `code`s for every service-core failure (`vault_not_found`), for the same fixture vault. Input-validation failures are adapter-specific and are asserted per adapter, not for parity, matching the existing parity suite: REST reports a bad query string as `invalid_query`, an unparseable body as `invalid_body`, and a schema-invalid body as `invalid_input`, while MCP reports every schema failure as `invalid_input`. So a bad `limit` is `invalid_query` on REST and `invalid_input` on MCP, each asserted in its adapter's tests.
+- `test/mcp/server.test.ts`'s exact tool set and exact `readOnlyHint` set MUST each gain `list_tags` on top of the sets on the tree this change lands on (it does not depend on 0019, so that tree may still have `list_files`, `list_folders`, `delete_file`, and `delete_folder`).
 - Biome and `bunx tsc --noEmit` MUST pass; suppression comments MUST carry a same-comment justification. No `.skip` / `.only`.
 
 Skipping or weakening any of these rules to land the PR MUST be treated as a bug in the PR, not in the rule.
@@ -33,7 +33,7 @@ Skipping or weakening any of these rules to land the PR MUST be treated as a bug
 
 ### What this change owns
 
-- **Scoped sessions.** The scoped indexer wrapper in `src/mcp/scope.ts` MUST translate `tags()` the way it translates `search`: force a `pathPrefix` of `<scope>/` in a non-root scope, nest a caller-supplied prefix under it after validating it, and never pass the caller's prefix through unnested.
+- **Scoped sessions.** The scoped indexer wrapper in `src/mcp/scope.ts` MUST translate `tags()` the way it translates `search`: force a `pathPrefix` of `<scope>/` in a non-root scope, nest a caller-supplied prefix under it after validating it, and never pass the caller's prefix through unnested. An empty caller prefix (`prefix: ""`, which REST accepts) MUST be treated as absent, not handed to `assertSafeRelativePath`, which rejects the empty string; a test MUST cover `prefix: ""` in a root scope and a folder scope.
 - **Indexer surface.** `tags` is added to the `Indexer` interface and to every implementation and fake (`src/indexer/index.ts`, the scope wrapper, test fakes); an unknown vault surfaces `vault_not_found`, matching `search`.
 
 ## Design

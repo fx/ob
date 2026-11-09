@@ -24,7 +24,7 @@ The rules below are ob's own, modelled on Obsidian's behavior. Obsidian does not
 |---|---|---|
 | Wikilink | `[[T]]`, `[[T\|alias]]`, `[[T#Heading]]`, `[[T#^block-id]]`, `[[T#Heading\|alias]]` | `T`, trimmed |
 | Wikilink embed | `![[T]]`, `![[T\|300]]`, `![[T#Heading]]` | `T`, trimmed |
-| Markdown link or image | `[text](D)`, `![alt](D)`, `[text](<D> "title")` | `D` without its `#fragment`, percent-decoded |
+| Markdown link or image | `[text](D)`, `![alt](D)`, `[text](<D> "title")` | `D` after backslash-escape processing, without its `#fragment`, percent-decoded |
 
 - A wikilink whose linkpath is empty (`[[#Heading]]`, a link into the same note) is not a file link and is never rewritten.
 - A Markdown link is internal only when `D` has no URI scheme (`https:`, `mailto:`, `obsidian:`, …), does not start with `#`, and does not start with `//`. Reference-style links and autolinks are not recognized.
@@ -65,8 +65,8 @@ This covers both halves of a move: links into the moved files, and the moved not
   | Markdown link that resolved at step 2 | `T`'s vault-relative path, with a leading `/` iff the original had one |
   | Markdown link that resolved at step 3 | as for a bare-name wikilink |
 
-- The `.md` extension is written iff the original linkpath carried an extension or `T` does not end in `.md`. A `.markdown` target is always written with its extension.
-- In a Markdown link without angle brackets, spaces, `(` and `)` in the new linkpath are percent-encoded; inside angle brackets the linkpath is written as is.
+- The new linkpath carries `T`'s actual extension (`icon.png`, `report.pdf`, `note.markdown`), with one exception: a `.md` extension is omitted iff the original linkpath carried no extension and `T` ends in `.md`.
+- In a Markdown link the new linkpath is percent-encoded so that decoding it gives `T`'s path back: `%`, `#`, `\`, `<`, and `>` are always encoded (`%25`, `%23`, `%5C`, `%3C`, `%3E`), and without angle brackets so are spaces, `(`, and `)`. Inside angle brackets spaces, `(`, and `)` are written as is. Wikilinks are written unencoded.
 - Every rewritten link MUST resolve, from `S1` after the move, to `T`. A note in which some link cannot be given such a form is reported in `failed` and left unchanged.
 
 ### Applying rewrites
