@@ -76,6 +76,13 @@ The watcher follows the same split. It prunes directories while traversing — a
 
 - On startup (after `ob sync-setup` succeeds for a vault), the indexer MUST perform an initial scan of the vault directory.
 - The scan MUST visit only [indexable](#indexable-paths) paths.
+- Before a vault is reported ready, the indexer MUST reconcile its existing rows: every indexed path that fails `isIndexablePath` at that moment — including a path whose file is gone, and a path that is now a symlink, such as rows a pre-0020 watcher indexed through a symlink — has its rows dropped under the drop guard. This sweep runs on every start, so rows orphaned while ob was stopped are cleared too.
+
+#### Scenario: Persisted symlink-derived rows are dropped at startup
+
+- **GIVEN** a store holding rows for `notes/ref.md`, which on disk is a symlink to a Markdown file outside the vault (rows written by an earlier version whose watcher followed symlinks)
+- **WHEN** the indexer starts
+- **THEN** before the vault is reported ready, the rows for `notes/ref.md` are gone and no embedding call is made for it
 - The scan MUST compare each file's `mtime_ms` and `sha256` against the latest indexed row for that path. Files whose `sha256` matches MUST be skipped (no embedding call).
 - The scan MUST run with bounded concurrency (default 4 files in flight) to avoid swamping the embedder.
 - The scan MUST mark `/readyz` as ready for that vault only after the initial scan completes.
@@ -335,3 +342,4 @@ fs unlink ───────────────────────�
 | 2026-11-09 | Moves are indexed as drop-old plus reindex-new, re-embedding moved notes because `embed_text` carries the path; `reindex` / `drop` are now also called by moves and copies. | [Change 0020](../../changes/0020-move-and-copy.md) |
 | 2026-11-09 | New "Tag listing" section and `Indexer.tags()`: stored inline tags with distinct-document counts, no parent roll-up, ordered by count then tag, optional path prefix. | [Change 0021](../../changes/0021-list-tags.md) |
 | 2026-11-09 | New "Indexable paths" section: one `isIndexablePath` rule (Markdown, no hidden or `node_modules` segment, regular file not reached through a symlink) for the scan, the watcher (which stops following symlinks), the pipeline, and every direct reindex; `reindex` now rejects when the index could not be updated, so `indexed` reports failures. | [Change 0020](../../changes/0020-move-and-copy.md) |
+| 2026-11-09 | Startup reconciliation: before a vault is ready, rows whose path fails `isIndexablePath` (gone, symlinked, hidden, `node_modules`) are dropped, clearing rows indexed through symlinks by earlier versions and rows orphaned while ob was stopped. | [Change 0020](../../changes/0020-move-and-copy.md) |
