@@ -27,6 +27,8 @@ One predicate, `isIndexablePath`, decides what the index may hold, and the initi
 
 A path that fails the rule is never embedded or stored, whichever route it arrived by, and a reindex of such a path drops any rows it has rather than indexing it.
 
+The rule gates only what is *added* to the index. Drops are never gated by it, and never by whether a file currently exists at the path: a path that has just been moved away or deleted fails the filesystem half of the rule by definition, and dropping a path that has no rows is a no-op. So every drop — a deleted or moved-away file, a folder's prefix, an overwritten destination, a reindex of a path that is gone or not indexable — removes whatever rows the path has, unconditionally. The one guard any drop site may apply is ordering against a concurrent writer that has recreated the path, as a folder move's old-path drop does.
+
 #### Scenario: Symlinked note is never indexed
 
 - **GIVEN** a folder in the vault containing a symlink `ref.md` to a Markdown file outside the vault
@@ -251,7 +253,7 @@ interface TagListing {
 - `reindex` and `drop` are imperative hooks called by REST writes, deletes, moves, and copies — they let the API skip waiting for the chokidar debounce when the API itself was the writer.
 - `reindex` MUST resolve only when the path's rows reflect its current content (including the unchanged-`sha256` short-circuit, and including dropping the rows of a path that is gone or not indexable), and MUST reject when they could not be brought there — a read, chunk, embed, or store failure after its retries. The failure is still counted in `IndexerStatus.errors`. This is what lets every API response's `indexed` flag report a failed index update.
 - `dropPrefix` removes every row whose path starts with `prefix` (a literal prefix, as in `filter.pathPrefix`); a recursive folder delete calls it with the folder's path followed by `/`, so a note indexed into the folder after the delete collected its contents is dropped too.
-- A move is indexed as a drop of every indexed Markdown path that left and a reindex of every [indexable](#indexable-paths) path that arrived (hidden paths, `node_modules`, and symlinks travel with a moved folder but are not indexed). Rows are not renamed in place: `embed_text` starts with the note's path, so a moved note's vectors and full-text tokens MUST be recomputed for its new path, and a note whose content is unchanged is still re-embedded after a move.
+- A move is indexed as an unconditional drop of every path that left (rows exist only for paths that were indexable, so the drop needs no predicate) and a reindex of every [indexable](#indexable-paths) path that arrived (hidden paths, `node_modules`, and symlinks travel with a moved folder but are not indexed). Rows are not renamed in place: `embed_text` starts with the note's path, so a moved note's vectors and full-text tokens MUST be recomputed for its new path, and a note whose content is unchanged is still re-embedded after a move.
 
 #### Scenario: Moved note is re-embedded under its new path
 
