@@ -14,10 +14,29 @@ In v1 the indexer covers Markdown only (`.md` / `.markdown`). Binary files (imag
 
 ## Requirements
 
+### Indexable paths
+
+> The single rule below is introduced by draft change [0020](../../changes/0020-move-and-copy.md); until it lands the scanner and watcher apply today's predicates, which agree on segments and extensions but not on symlinks.
+
+One predicate, `isIndexablePath`, decides what the index may hold, and the initial scan, the watcher, the pipeline, and every direct `reindex` (writes, moves, copies, link rewrites) MUST all apply it, so no route into the index admits a path another route would refuse. A vault-relative path is indexable iff all of these hold:
+
+- its extension is `.md` or `.markdown`, case-insensitively;
+- no segment starts with `.` (which covers `.obsidian/`, `.trash/`, and dotfiles at any depth);
+- no segment is `node_modules`;
+- the entry is a regular file, and neither it nor any folder between it and the vault root is a symlink, checked without following links at the moment the file is read.
+
+A path that fails the rule is never embedded or stored, whichever route it arrived by, and a reindex of such a path drops any rows it has rather than indexing it.
+
+#### Scenario: Symlinked note is never indexed
+
+- **GIVEN** a folder in the vault containing a symlink `ref.md` to a Markdown file outside the vault
+- **WHEN** the watcher reports `ref.md` (for example after the folder is moved through the API), or a direct `reindex` is called for it
+- **THEN** no row for that path is written and the outside file's content is never embedded
+
 ### Watcher
 
 - For each configured vault, the indexer MUST watch `<DATA_DIR>/vaults/<slug>/` recursively with `chokidar` (or the Bun-native equivalent if it covers add/change/unlink semantics on Linux — to be confirmed in Change 0003).
-- The watcher MUST ignore: any path containing a `/.obsidian/` segment, any path containing a `/.trash/` segment, any path beginning with `.`, and any file whose extension is not `.md` or `.markdown`.
+- The watcher MUST ignore every path that is not [indexable](#indexable-paths), and MUST NOT follow symlinks while watching.
 - The watcher MUST coalesce events on the same path within a 250 ms debounce window.
 - The watcher MUST handle `add`, `change`, and `unlink` events. Renames MUST be observable as `unlink` followed by `add` (chokidar default).
 
@@ -42,6 +61,7 @@ In v1 the indexer covers Markdown only (`.md` / `.markdown`). Binary files (imag
 ### Initial scan
 
 - On startup (after `ob sync-setup` succeeds for a vault), the indexer MUST perform an initial scan of the vault directory.
+- The scan MUST visit only [indexable](#indexable-paths) paths.
 - The scan MUST compare each file's `mtime_ms` and `sha256` against the latest indexed row for that path. Files whose `sha256` matches MUST be skipped (no embedding call).
 - The scan MUST run with bounded concurrency (default 4 files in flight) to avoid swamping the embedder.
 - The scan MUST mark `/readyz` as ready for that vault only after the initial scan completes.
@@ -229,8 +249,9 @@ interface TagListing {
 
 - `search` MUST return at most `limit ?? 20` hits ordered by descending fused score (after MMR and threshold).
 - `reindex` and `drop` are imperative hooks called by REST writes, deletes, moves, and copies — they let the API skip waiting for the chokidar debounce when the API itself was the writer.
+- `reindex` MUST resolve only when the path's rows reflect its current content (including the unchanged-`sha256` short-circuit, and including dropping the rows of a path that is gone or not indexable), and MUST reject when they could not be brought there — a read, chunk, embed, or store failure after its retries. The failure is still counted in `IndexerStatus.errors`. This is what lets every API response's `indexed` flag report a failed index update.
 - `dropPrefix` removes every row whose path starts with `prefix` (a literal prefix, as in `filter.pathPrefix`); a recursive folder delete calls it with the folder's path followed by `/`, so a note indexed into the folder after the delete collected its contents is dropped too.
-- A move is indexed as a drop of every indexed Markdown path that left and a reindex of every Markdown path that arrived and that the watcher would index (hidden paths and symlinks travel with a moved folder but are not indexed). Rows are not renamed in place: `embed_text` starts with the note's path, so a moved note's vectors and full-text tokens MUST be recomputed for its new path, and a note whose content is unchanged is still re-embedded after a move.
+- A move is indexed as a drop of every indexed Markdown path that left and a reindex of every [indexable](#indexable-paths) path that arrived (hidden paths, `node_modules`, and symlinks travel with a moved folder but are not indexed). Rows are not renamed in place: `embed_text` starts with the note's path, so a moved note's vectors and full-text tokens MUST be recomputed for its new path, and a note whose content is unchanged is still re-embedded after a move.
 
 #### Scenario: Moved note is re-embedded under its new path
 
@@ -299,3 +320,4 @@ fs unlink ───────────────────────�
 | 2026-05-03 | New "Search relevance" section: hybrid retrieval (vector + FTS via RRF), MMR diversification, score threshold. Indexer interface gains `mode`, `threshold`, `mmrLambda`, `maxPerPath`. | [Change 0008](../../changes/0008-search-relevance.md) |
 | 2026-11-09 | Moves are indexed as drop-old plus reindex-new, re-embedding moved notes because `embed_text` carries the path; `reindex` / `drop` are now also called by moves and copies. | [Change 0020](../../changes/0020-move-and-copy.md) |
 | 2026-11-09 | New "Tag listing" section and `Indexer.tags()`: stored inline tags with distinct-document counts, no parent roll-up, ordered by count then tag, optional path prefix. | [Change 0021](../../changes/0021-list-tags.md) |
+| 2026-11-09 | New "Indexable paths" section: one `isIndexablePath` rule (Markdown, no hidden or `node_modules` segment, regular file not reached through a symlink) for the scan, the watcher (which stops following symlinks), the pipeline, and every direct reindex; `reindex` now rejects when the index could not be updated, so `indexed` reports failures. | [Change 0020](../../changes/0020-move-and-copy.md) |

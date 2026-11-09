@@ -67,7 +67,7 @@ This covers both halves of a move: links into the moved files, and the moved not
 
 - The new linkpath carries `T`'s actual extension (`icon.png`, `report.pdf`, `note.markdown`), with one exception: a `.md` extension is omitted iff the original linkpath carried no extension and `T` ends in `.md`.
 - In a Markdown link the new linkpath is percent-encoded so that decoding it gives `T`'s path back: `%`, `#`, `\`, `<`, and `>` are always encoded (`%25`, `%23`, `%5C`, `%3C`, `%3E`), and without angle brackets so are spaces, `(`, and `)`. Inside angle brackets spaces, `(`, and `)` are written as is. Wikilinks are written unencoded.
-- Every rewritten link MUST resolve, from `S1` after the move, to `T`. A note in which some link cannot be given such a form is reported in `failed` and left unchanged.
+- Every rewritten link MUST resolve, from `S1` after the move, to `T`. When the form the table gives does not, because another file shadows it, the first of these fallbacks that does resolve to `T` is used instead: the relative form (the relative path from `S1`'s folder to `T`, written `./…` when it does not start with `../`), then the vault-absolute form (`/`-prefixed for a Markdown link, the vault path for a wikilink). The extension and encoding rules above apply to the fallback too. Only a note in which some link has no form at all that resolves to `T` is reported in `failed`, and it is left unchanged.
 
 ### Applying rewrites
 
@@ -106,6 +106,12 @@ This covers both halves of a move: links into the moved files, and the moved not
 - **GIVEN** `assets/logo.png` and `notes/a.md` containing `![logo](/assets/logo.png)`
 - **WHEN** `assets/logo.png` is moved to `media/logo.png`
 - **THEN** `notes/a.md` contains `![logo](/media/logo.png)`, because a destination starting with `/` resolves at the vault-absolute step and keeps that style
+
+#### Scenario: Shadowed vault path falls back to a relative link
+
+- **GIVEN** `old/spec.md`, `docs/new/spec.md`, and `docs/n.md` containing `[spec](old/spec.md)`, which resolves at the vault-absolute step because `docs/old/spec.md` does not exist
+- **WHEN** `old/spec.md` is moved to `new/spec.md`
+- **THEN** the table's form `new/spec.md` would resolve relatively to `docs/new/spec.md`, so `docs/n.md` contains `[spec](../new/spec.md)`, the relative fallback, which resolves to `new/spec.md`
 
 #### Scenario: Attachment move updates embeds
 
