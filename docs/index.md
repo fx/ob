@@ -7,7 +7,7 @@
 | [architecture](specs/architecture/) | Single-process Bun server topology, runtime, config, container, and standing testing/lint conventions. | active |
 | [obsidian-sync](specs/obsidian-sync/) | Auth-token bootstrap and per-vault obsidian-headless child-process supervision. | active |
 | [vault-indexer](specs/vault-indexer/) | Chokidar watcher, Markdown chunker, embedding providers, and per-vault LanceDB store. | active |
-| [rest-api](specs/rest-api/) | Vault-scoped HTTP CRUD over arbitrary files plus natural-language search over Markdown. | active |
+| [rest-api](specs/rest-api/) | Vault-scoped HTTP CRUD over arbitrary files, file-and-folder path operations (list, delete, move, copy), tags, grep, and natural-language search over Markdown. | active |
 | [mcp-server](specs/mcp-server/) | MCP HTTP/SSE server exposing the same surface as REST as MCP tools and resources. | active |
 | [landing-site](specs/landing-site/) | Minimal static one-page landing site at ob.fx.gd, published to GitHub Pages. | active |
 
@@ -33,3 +33,7 @@
 | 0016 | [landing-site](changes/0016-landing-site.md) | [landing-site](specs/landing-site/) | complete | — |
 | 0017 | [sync-liveness](changes/0017-sync-liveness.md) | [obsidian-sync](specs/obsidian-sync/) | complete | 0015 |
 | 0018 | [mcp-read-only-annotations](changes/0018-mcp-read-only-annotations.md) | [mcp-server](specs/mcp-server/) | complete | 0005 |
+| 0019 | [unified-list-and-delete](changes/0019-unified-list-and-delete.md) | [rest-api](specs/rest-api/) | draft | 0012, 0014, 0018 |
+| 0020 | [move-and-copy](changes/0020-move-and-copy.md) | [rest-api](specs/rest-api/) | draft | 0019 |
+| 0021 | [list-tags](changes/0021-list-tags.md) | [vault-indexer](specs/vault-indexer/) | draft | 0008, 0014, 0018 |
+| 0022 | [grep](changes/0022-grep.md) | [rest-api](specs/rest-api/) | draft | 0014, 0018, 0019 |
