@@ -33,7 +33,7 @@ Skipping or weakening any of these rules to land the PR MUST be treated as a bug
 
 ### What this change owns
 
-- **Scoped sessions.** The scoped indexer wrapper in `src/mcp/scope.ts` MUST translate `tags()` the way it translates `search`: force a `pathPrefix` of `<scope>/` in a non-root scope, nest a caller-supplied prefix under it after validating it, and never pass the caller's prefix through unnested. An empty caller prefix (`prefix: ""`, which REST accepts) MUST be treated as absent, not handed to `assertSafeRelativePath`, which rejects the empty string; a test MUST cover `prefix: ""` in a root scope and a folder scope.
+- **Scoped sessions.** The scoped indexer wrapper in `src/mcp/scope.ts` MUST translate `tags()` the way it translates `search`: force a `pathPrefix` of `<scope>/` in a non-root scope, nest a caller-supplied prefix under it after validating it, and never pass the caller's prefix through unnested. An empty caller prefix (`prefix: ""`, which REST accepts) MUST be treated as absent, not handed to `assertSafeRelativePath`, which rejects the empty string; a test MUST cover `prefix: ""` in a root scope and a folder scope. Output needs no translation: `tags()` returns tag names and counts, never paths, so nothing can carry the scope prefix back (the wrapper rule — add the prefix on input, strip it and drop out-of-scope results on output — is stated in 0019).
 - **Indexer surface.** `tags` is added to the `Indexer` interface and to every implementation and fake (`src/indexer/index.ts`, the scope wrapper, test fakes); an unknown vault surfaces `vault_not_found`, matching `search`.
 
 ## Design

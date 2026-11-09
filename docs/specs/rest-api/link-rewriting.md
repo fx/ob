@@ -82,7 +82,7 @@ This covers both halves of a move: links into the moved files, and the moved not
 
 - **GIVEN** `notes/old.md` and `a.md` containing `[[old]] and [[old#Intro|the intro]]`
 - **WHEN** `notes/old.md` is moved to `notes/new.md`
-- **THEN** `a.md` contains `[[new]] and [[new#Intro|the intro]]` and is reported with `links: 2`
+- **THEN** `a.md` contains `[[new]] and [[new#Intro|the intro]]` and is reported in `links.updated` as `{ "path": "a.md", "links": 2, "indexed": true }`
 
 #### Scenario: Path-qualified wikilink follows a folder move
 

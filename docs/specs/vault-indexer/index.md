@@ -27,13 +27,19 @@ One predicate, `isIndexablePath`, decides what the index may hold, and the initi
 
 A path that fails the rule is never embedded or stored, whichever route it arrived by, and a reindex of such a path drops any rows it has rather than indexing it.
 
-The rule gates only what is *added* to the index. Drops are never gated by it — a path that has just been moved away or deleted fails its filesystem half by definition, and dropping a path that has no rows is a no-op — and are guarded only by existence at drop time:
+The rule gates only what is *added* to the index. Drops are never gated by it — a path that has just been moved away or deleted fails its filesystem half by definition, and dropping a path that has no rows is a no-op — and are guarded only by what exists at the path at drop time:
 
-- **Drop guard.** A removed path's rows are dropped only if nothing exists at that path when the drop runs. For ob's own operations the check and the drop happen under the path's write lock. A path that was recreated in the meantime keeps its rows: its writer reindexed it, or the watcher will. This applies to every removed path: a deleted file, each indexed path under a deleted folder, and each old path of a moved file or folder.
+- **Drop guard.** A removed path's rows are kept only if what exists at that path when the drop runs is indexable (`isIndexablePath` is true): a note recreated in the meantime, which its writer reindexed or the watcher will. In every other case — nothing there, or something non-indexable such as a symlink, a folder, or a file under a now-hidden name — the rows are dropped, because nothing will ever reindex them. For ob's own operations the check and the drop happen under the path's write lock. This applies to every removed path: a deleted file, each indexed path under a deleted folder, each old path of a moved file or folder, and every path the watcher reports as unlinked.
 - **Overwritten destination.** The one drop of a path that still exists: an `overwrite` move or copy replaced its content, and the drop of its old rows runs under the destination's lock immediately before that same path is reindexed.
 - **Reindex of a non-indexable or missing path.** It drops the path's rows, as stated above.
 
-The watcher follows the same split. It prunes directories while traversing — a hidden directory, a `node_modules` directory, and a symlinked directory are never descended into — by the segment and symlink parts of the rule, not by the file predicate, which would reject every directory. It applies `isIndexablePath` only to `add` and `change` events, and handles `unlink` by dropping the path's rows under the drop guard.
+The watcher follows the same split. It prunes directories while traversing — a hidden directory, a `node_modules` directory, and a symlinked directory are never descended into — by the segment and symlink parts of the rule, not by the file predicate, which would reject every directory. It applies `isIndexablePath` to `add` and `change` events: an indexable path is reindexed, and a non-indexable one has any rows it still holds dropped, rather than being ignored, so a note replaced by a symlink loses its rows whichever event reports the replacement. It handles `unlink` by dropping the path's rows under the drop guard.
+
+#### Scenario: Note replaced by a symlink loses its rows
+
+- **GIVEN** indexed `notes/a.md`
+- **WHEN** `notes/a.md` is replaced by a symlink of the same name (through a folder move that brings one in, or by an outside writer)
+- **THEN** the rows for `notes/a.md` are dropped — by the drop guard, or by the watcher's `add` / `change` handling of the now non-indexable path — and nothing is indexed through the link
 
 #### Scenario: Symlinked note is never indexed
 
@@ -44,7 +50,7 @@ The watcher follows the same split. It prunes directories while traversing — a
 ### Watcher
 
 - For each configured vault, the indexer MUST watch `<DATA_DIR>/vaults/<slug>/` recursively with `chokidar` (or the Bun-native equivalent if it covers add/change/unlink semantics on Linux — to be confirmed in Change 0003).
-- The watcher MUST prune and filter exactly as [Indexable paths](#indexable-paths) states — directories pruned by segment and symlink, `isIndexablePath` applied to `add` / `change`, `unlink` dropping under the drop guard — and MUST NOT follow symlinks while watching.
+- The watcher MUST prune and filter exactly as [Indexable paths](#indexable-paths) states — directories pruned by segment and symlink, `add` / `change` reindexing an indexable path and dropping a non-indexable one's rows, `unlink` dropping under the drop guard — and MUST NOT follow symlinks while watching.
 - The watcher MUST coalesce events on the same path within a 250 ms debounce window.
 - The watcher MUST handle `add`, `change`, and `unlink` events. Renames MUST be observable as `unlink` followed by `add` (chokidar default).
 
