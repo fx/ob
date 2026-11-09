@@ -72,6 +72,7 @@ This covers both halves of a move: links into the moved files, and the moved not
 ### Applying rewrites
 
 - All rewrites of one note MUST be applied as one atomic write of that note and reindexed, exactly as `PUT` writes and reindexes a note, and serialized with other writes to it. Nothing but the rewritten linkpaths changes; line endings and every other byte are preserved.
+- The rewrite MUST be computed from the note's bytes as read while holding its lock, so no ob write to that note is lost. A rewrite replaces the note it read; it never claims a new path, so the no-replace destination rule of [Path operations](index.md#path-operations) does not apply. Like `PUT` and `PATCH`, it cannot exclude a writer outside ob (Obsidian Sync) that changes or removes the note in the instant between that read and the atomic write; that window is a known limit shared with every in-place write, not specific to moves.
 - A note that cannot be read or written, or that vanishes, is reported in `links.failed` with the error's `code` and left as it is; the remaining notes are still rewritten.
 - `links.updated` lists every rewritten note once, by its post-move path, in path order, with the number of link occurrences rewritten in it.
 

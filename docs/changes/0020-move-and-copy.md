@@ -23,7 +23,9 @@ This change MUST satisfy the project's standing testing rules (see [Architecture
 - The link resolver and rewriter MUST have table-driven unit tests covering every row of the spec's recognized-link, resolution, and rewritten-text tables, and every Link rewriting scenario.
 - Route tests under `test/http/` MUST go through the real Hono app. Path-traversal cases MUST be tested on the source AND on the destination of both operations, each asserting the response code AND that nothing changed on disk or in the index.
 - Parity tests under `test/parity/` MUST drive `move` and `copy` through both adapters on the same fixture vault and assert identical payloads and error `code`s.
-- Concurrency tests MUST show that two moves `a → b` and `b → a` started together both settle (one wins, one fails cleanly) without deadlock, and that a move and a `PATCH` on the same file are serialized.
+- Concurrency tests MUST show that two moves `a → b` and `b → a` started together both settle without deadlock, and that a move and a `PATCH` on the same file are serialized.
+- Destination-race tests MUST cover every pair targeting one absent destination — file move + file move, file copy + file move, folder move + folder copy, file move + folder move — each asserting exactly one success, `already_exists` for the other, the loser's source intact, and no content lost.
+- Outside-writer tests MUST create the destination between the under-lock check and the publish, using an injected hook at that point, and assert: a file publish without `overwrite` returns `already_exists` and leaves the outside file intact; a folder publish onto a non-empty folder returns `already_exists`. The no-hard-link fallback MUST be tested by injecting `EPERM` from `link`.
 - Biome and `bunx tsc --noEmit` MUST pass; suppression comments MUST carry a same-comment justification. No `.skip` / `.only`.
 
 Skipping or weakening any of these rules to land the PR MUST be treated as a bug in the PR, not in the rule.
@@ -35,7 +37,8 @@ The move and copy contracts, their errors, and their scenarios are owned by [RES
 ### What this change owns
 
 - **New error code.** `already_exists` MUST be added to `ErrorCode` / `ERROR_CODES` in `src/errors.ts` as `AlreadyExistsError` (carrying the conflicting path), mapped to HTTP 409 in `src/http/errors.ts`, and covered by the closed-set test.
-- **Two-path locking.** A helper that takes the per-path lock for several keys at once MUST acquire them in one canonical order (sorted, de-duplicated) so no two operations can each hold a lock the other is waiting for. Link rewrites take each referring note's lock individually after the move's own locks are released.
+- **Two-path locking.** A helper that takes the per-path lock for several keys at once MUST acquire them in one canonical order (sorted, de-duplicated) so no two operations can each hold a lock the other is waiting for. Lock keys are the canonical paths (no trailing `/`), and a folder operation locks the folder's own path, so any two ob operations targeting the same destination — file or folder, move or copy — contend on the same key. Link rewrites take each referring note's lock individually after the move's own locks are released.
+- **Check under the lock, publish without replacing.** Every destination existence and type check MUST be (re)done while holding both locks, immediately before publishing; a check made before the locks are taken is advisory only. File publishes without `overwrite` MUST use a primitive that fails instead of replacing (hard link, below), so a file created at the destination by Obsidian Sync or any other outside writer is never clobbered.
 - **Scoped link context.** In a scoped MCP session the service core sees the scope root as the vault root, but link resolution must use vault-relative paths over the whole vault. The scoped deps wrapper (`src/mcp/scope.ts`) MUST therefore hand the move service the real vault root and the scope prefix for link resolution only, and the rewriter MUST refuse to write any note outside the scope. No tool result may carry the prefix (link text inside notes is content and is exempt, per the spec).
 
 ## Design
@@ -44,14 +47,19 @@ The move and copy contracts, their errors, and their scenarios are owned by [RES
 
 `movePath(deps, slug, path, { destination, overwrite, updateLinks })` in `src/vault/paths.ts`:
 
-1. Validate both paths (`safeJoin` + `assertNotSymlinkEscape`, trailing `/` stripped); reject `destination === path` and, for a folder, `destination` under `path/`.
-2. `lstat` both. Missing source → `not_found`. Existing destination → `already_exists` unless `overwrite` and both are files.
-3. If links are to be updated, snapshot the vault's visible file set (`F_before`) with the 0019 walk — before anything moves.
-4. Under the locks for the source file path and the destination path (for a folder, the folder paths themselves): `mkdir -p` the destination parent, `fs.rename(src, dst)`. `rename` is atomic on one filesystem and replaces a destination file atomically, which gives the spec's atomicity and overwrite behavior for free.
-5. Build `M` (old → new for every moved file: walk the destination subtree for a folder) and `F_after`.
-6. Index: `tryDrop` every Markdown old path (and nothing for the overwritten destination, whose path still holds a note and is reindexed below).
-7. Links: run the rewriter (below); it reindexes every note it writes.
-8. `tryReindex` every Markdown new path the rewriter did not already reindex, with the scanner's bounded concurrency (4). `indexed` is the conjunction.
+1. Validate both paths (`safeJoin` + `assertNotSymlinkEscape`, trailing `/` stripped); reject `destination === path` and, for a folder, `destination` under `path/`. These are lexical and need no lock.
+2. Take the locks for the source and destination keys (canonical order).
+3. Under the locks, `lstat` both. Missing source → `not_found`. Existing destination → `already_exists` unless `overwrite` and both are files. Nothing before this point decides the outcome.
+4. If links are to be updated, snapshot the vault's visible file set (`F_before`) with the 0019 walk, still under the locks and before anything moves.
+5. `mkdir -p` the destination parent, then publish, still under the locks:
+   - **File, no `overwrite`:** `fs.link(src, dst)` — atomic and fails with `EEXIST` if anything appeared at `dst`, which maps to `already_exists` with nothing changed — then `fs.unlink(src)`. The hard link keeps the inode, so bytes and modification time are preserved. If `unlink(src)` fails, `unlink(dst)` is attempted and the error is surfaced, so the move did not happen.
+   - **File, `overwrite: true`:** `fs.rename(src, dst)`, one atomic replace. If `dst` turned out to be a folder (`EISDIR`), map to `already_exists`.
+   - **Folder:** `fs.rename(src, dst)` onto the destination step 3 confirmed absent. `ENOTEMPTY` / `EEXIST` / `ENOTDIR` map to `already_exists`. The empty-directory window against outside writers is the spec's documented known limit; Node and Bun expose no `RENAME_NOREPLACE`.
+   - **No hard links.** On a filesystem that refuses hard links (`EPERM`, `ENOTSUP`, `EOPNOTSUPP`), the file publish falls back to `rename` after the under-lock check, logs a warning once per vault, and inherits the same outside-writer window as folders, now for a file. ob's own operations stay fully serialized by the locks. `EXDEV` cannot occur within one vault tree; if it does, it surfaces as `internal` with nothing changed.
+6. Build `M` (old → new for every moved file: walk the destination subtree for a folder) and `F_after`, then release the locks. The steps below run without them.
+7. Index: `tryDrop` every Markdown old path (and nothing for the overwritten destination, whose path still holds a note and is reindexed below).
+8. Links: run the rewriter (below); it reindexes every note it writes.
+9. `tryReindex` every Markdown new path the rewriter did not already reindex, with the scanner's bounded concurrency (4). `indexed` is the conjunction.
 
 ### Link rewriter
 
@@ -66,8 +74,9 @@ The move and copy contracts, their errors, and their scenarios are owned by [RES
 
 `copyPath(deps, slug, path, { destination, overwrite, recursive })`:
 
-- **File.** Under the source and destination locks, read the bytes and write them with the existing atomic write; reindex if Markdown.
-- **Folder.** Walk the source with the 0019 walk, recreate it under a hidden staging folder `.<destination-name>.copy.<uuid>` next to the destination (hidden names are invisible to `list`, the watcher, and the indexer), count the hidden entries and symlinks the walk skipped, then `fs.rename` the staging folder onto the destination. On any failure, remove the staging folder and rethrow, so no destination appears. Then reindex the copied Markdown files with concurrency 4.
+- **File.** Take the source and destination locks, then do the existence and type checks under them as for a move. Write the bytes to a temp sibling `<dst>.tmp.<uuid>` (the existing atomic-write naming), then publish: without `overwrite`, `fs.link(tmp, dst)` (`EEXIST` → `already_exists`) and `fs.unlink(tmp)`; with `overwrite`, `fs.rename(tmp, dst)`. The temp file is removed on every failure path. The no-hard-link fallback is the move's. Reindex if Markdown.
+- **Folder.** Walk the source with the 0019 walk and recreate it under a hidden staging folder `.<destination-name>.copy.<uuid>` next to the destination (hidden names are invisible to `list`, the watcher, and the indexer), counting the hidden entries and symlinks the walk skipped. Building the staging tree needs no destination lock. Then take the destination lock, re-check that the destination is absent, and `fs.rename` the staging folder onto it (`ENOTEMPTY` / `EEXIST` / `ENOTDIR` → `already_exists`), with the same documented empty-directory window as a folder move. On any failure, including a lost race, remove the staging folder and rethrow, so no destination appears. Then reindex the copied Markdown files with concurrency 4.
+- **Note rewrites** are not destination publishes: they replace the note they read under its lock, exactly as `patch_file` does, with the outside-writer window the [Link rewriting](../specs/rest-api/link-rewriting.md#applying-rewrites) spec records.
 
 ### Adapters
 
@@ -84,6 +93,9 @@ The move and copy contracts, their errors, and their scenarios are owned by [RES
   - **Why:** Agents retry and guess paths; a default that silently replaces a note destroys data with no undo. Merging folders has no single right answer for conflicting children.
 - **Decision:** `updateLinks` defaults to `true`.
   - **Why:** Matches Obsidian desktop's default, and is the only way a rename through ob does not silently break the vault for the person reading it in Obsidian.
+- **Decision:** Hard link plus unlink for a no-overwrite file publish, rather than `rename` after a check.
+  - **Why:** `rename` replaces an existing file without failing, so check-then-rename loses whatever appeared at the destination after the check — another ob call (closed by the lock) or Obsidian Sync (not closable by any lock). `link` is the only portable no-replace publish Node and Bun expose for files. The cost is an instant where the file is visible at both paths, which loses nothing.
+  - **Alternatives considered:** `copyFile` with `COPYFILE_EXCL` then unlink for moves — rejected: it copies the bytes and resets the inode and modification time. Checking under the lock alone — rejected: it closes the race between ob calls but not against outside writers.
 - **Decision:** Move first, then rewrite; per-note rewrite failures are reported, not rolled back.
   - **Why:** The rename is the operation asked for and is atomic; link rewrites touch many notes and cannot be made atomic as a group. Rolling the move back after some notes were rewritten would need its own rollback of those rewrites, which can fail too. Reporting exactly which notes failed lets the caller retry them with `patch_file`.
   - **Alternatives considered:** Pre-validate every rewrite before renaming. Rejected: it narrows but cannot close the window, because a note can become unwritable or change between check and write.
@@ -113,8 +125,9 @@ The move and copy contracts, their errors, and their scenarios are owned by [RES
   - [ ] Rewrite decision (`t0` / `expected` / `t1` / relative-step rule) and replacement text per style table, extension and percent-encoding rules, resolve-back check
   - [ ] Atomic per-note apply under the note's lock with change detection; `updated` / `failed` reporting
   - [ ] Table-driven tests for every spec table row and every Link rewriting scenario
-- [ ] **Move: `movePath` in `src/vault/paths.ts`** — validation and error matrix, atomic rename, `mkdir -p`, overwrite rules, `M` construction, drop old / reindex new, rewriter call; tests for every move scenario, overwrite of a Markdown destination, extension change (`a.md` → `a.txt`), moving a folder containing hidden files and symlinks, rename failure leaving everything unchanged
-- [ ] **Copy: `copyPath`** — file copy, staged folder copy with `skipped` count, cleanup on failure, reindex; tests for every copy scenario and a failure injected mid-copy
+- [ ] **Move: `movePath` in `src/vault/paths.ts`** — validation and error matrix, checks under the locks, no-replace `link` + `unlink` publish without `overwrite`, atomic `rename` with it, folder `rename` with errno mapping, no-hard-link fallback, `mkdir -p`, `M` construction, drop old / reindex new, rewriter call; tests for every move scenario, overwrite of a Markdown destination, extension change (`a.md` → `a.txt`), moving a folder containing hidden files and symlinks, rename failure leaving everything unchanged
+- [ ] **Copy: `copyPath`** — file copy via temp + no-replace `link` (or `rename` with `overwrite`), staged folder copy published under the destination lock after a re-check, `skipped` count, cleanup on every failure including a lost race, reindex; tests for every copy scenario and a failure injected mid-copy
+- [ ] **Destination races**: the concurrent-move scenario from the spec (two moves to one absent destination: exactly one succeeds, the other gets `already_exists`, no data lost), the full pair matrix, and the outside-writer and no-hard-link tests from the Testing Requirements
 - [ ] **Scoped sessions**: link context passed by `src/mcp/scope.ts`; tests that a scoped move resolves vault-wide, rewrites only in-scope notes, never writes outside the scope, and returns scope-relative paths only
 - [ ] **Schemas, HTTP routes, MCP tools** as in Design; route, tool, and parity tests; registry test updated with `move` and `copy` (not read-only)
 - [ ] **README** gains `move` / `copy` and the two routes

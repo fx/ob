@@ -239,6 +239,9 @@ Rules shared by every path operation:
 - A trailing `/` on a path MUST be tolerated and stripped; paths in responses are canonical (no leading or trailing `/`). The vault root itself is never a valid target (`400 invalid_path`), and the empty path does not match the `*path` routes.
 - Concurrent mutating calls that address the same file MUST be serialized against each other and against `PUT` / `PATCH` / `:append` on that file, and concurrent calls MUST NOT deadlock, whatever pair of paths each addresses. Serialization is per file: a write to a file inside a folder that is being moved, copied, or deleted is not serialized against the folder operation, and lands at whichever path it addressed.
 - Errors are checked before anything changes: a request rejected with a 4xx leaves the vault and the index exactly as they were.
+- **Destinations are claimed atomically.** For `:move` and `:copy`, the destination checks (exists, is a file or a folder) and publishing the destination MUST be one indivisible step with respect to every other ob operation: two concurrent calls that target the same destination, whatever mix of move and copy, file and folder, MUST end with exactly one success and `409 already_exists` for the other, with no data lost. A check made earlier, for example to answer quickly, never licenses the publish.
+- **No-replace publish for files.** Without `overwrite: true`, publishing a file MUST fail with `already_exists` rather than replace a file that appeared at the destination by any writer, including one outside ob such as Obsidian Sync. With `overwrite: true` (files only), the destination file is replaced by one atomic rename, so a reader sees the old content or the new, never neither.
+- **Known limit for folders.** A folder is published by renaming it onto a destination ob has just confirmed absent while holding its lock, and POSIX rename replaces an existing *empty* directory. So a writer outside ob that creates an empty folder at the destination in the instant between that check and the rename can have that empty folder replaced. A folder holding anything cannot be replaced (the rename fails and the call returns `already_exists`), so no file content can be lost this way.
 
 #### `GET /v1/vaults/:slug/paths`
 
@@ -323,7 +326,7 @@ Rules shared by every path operation:
 
 - Moves (renames) a file or a folder to an exact destination path, like `mv -T`: the destination names the new path itself, never a folder to move into.
 - Request body MUST be `application/json` `{ destination: string, overwrite?: boolean, updateLinks?: boolean }`. `overwrite` defaults to `false`, `updateLinks` to `true`. Unknown keys MUST yield `400 invalid_input`.
-- The move MUST be a single atomic rename on disk: the source disappears and the destination appears in one step, and a folder moves with its whole subtree (hidden entries and symlinks inside it included — they travel with the folder, they are not separately addressed). Modification times are preserved (a moved note whose own links are then rewritten gets a new one). Missing parent folders of the destination MUST be created (`mkdir -p`).
+- A folder move, and a file move with `overwrite: true`, MUST be a single atomic rename on disk: the source disappears and the destination appears in one step. A file move without `overwrite` publishes the destination with a no-replace link and then removes the source, so for an instant the file is visible at both paths, never at neither; if the process dies in between, both copies remain and nothing is lost. A folder moves with its whole subtree (hidden entries and symlinks inside it included — they travel with the folder, they are not separately addressed). Modification times are preserved (a moved note whose own links are then rewritten gets a new one). Missing parent folders of the destination MUST be created (`mkdir -p`).
 - With `overwrite: true` and both paths files, an existing destination file MUST be replaced atomically. A folder never replaces or merges into an existing path, and a file never replaces a folder, whatever `overwrite` says.
 - Before responding, the index entry of every Markdown path that the move removed MUST have been dropped (a drop failure is logged and the watcher reconciles), and every Markdown path that arrived MUST have been reindexed (a moved note is re-embedded under its new path — see [Vault Indexer › Public surface](../vault-indexer/index.md#public-surface)). `indexed` is `true` iff every one of those reindexes succeeded; a failed reindex is logged and the watcher reconciles.
 - With `updateLinks: true`, internal links in Markdown notes that pointed at a moved file MUST be rewritten to keep pointing at it, as [Link rewriting](link-rewriting.md) defines. Link rewriting happens after the move has succeeded. A note that cannot be rewritten MUST be reported in `links.failed` and left unchanged; it MUST NOT undo the move or any other note's rewrite, and the response is still `200`.
@@ -343,7 +346,7 @@ Rules shared by every path operation:
   }
   ```
 
-- Errors, all checked before anything changes:
+- Errors, all checked before anything changes, the destination checks atomically with the publish as [Path operations](#path-operations) requires:
 
   | Condition | Status | `error.code` |
   |---|---|---|
@@ -369,6 +372,19 @@ Rules shared by every path operation:
 - **THEN** the response is `409` with `error.code = "already_exists"`
 - **AND** both files are unchanged
 
+#### Scenario: Concurrent moves to the same destination
+
+- **GIVEN** vault `v` containing `a.md` and `b.md` with different content, and no `c.md`
+- **WHEN** the client sends `POST /v1/vaults/v/paths/a.md:move` and `POST /v1/vaults/v/paths/b.md:move`, both with `{ "destination": "c.md" }`, concurrently
+- **THEN** exactly one returns `200` and the other `409` with `error.code = "already_exists"`
+- **AND** `c.md` holds the winner's content and the loser's source file is unchanged at its original path
+
+#### Scenario: Move does not clobber a file written by an outside writer
+
+- **GIVEN** vault `v` containing `a.md`, and a writer outside ob that creates `c.md` after ob's destination check but before ob publishes
+- **WHEN** the move `a.md` → `c.md` without `overwrite` publishes
+- **THEN** it returns `409` with `error.code = "already_exists"`, the outside writer's `c.md` is intact, and `a.md` is unchanged
+
 #### Scenario: Move a folder into a new parent
 
 - **GIVEN** vault `v` containing `inbox/2026/a.md` and `inbox/2026/img.png`, and no `archive/` folder
@@ -386,7 +402,7 @@ Rules shared by every path operation:
 
 - Copies a file, or with `recursive: true` a folder, to an exact destination path, like `cp -T` / `cp -r -T`.
 - Request body MUST be `application/json` `{ destination: string, overwrite?: boolean, recursive?: boolean }`, both flags defaulting to `false`. Unknown keys MUST yield `400 invalid_input`.
-- A file copy MUST write the source bytes to the destination atomically, creating missing parent folders. With `overwrite: true` an existing destination file MUST be replaced. `recursive` has no effect on a file.
+- A file copy MUST write the source bytes to the destination atomically, creating missing parent folders: the destination appears complete or not at all, and without `overwrite` it is published with the same no-replace rule as a move. With `overwrite: true` an existing destination file MUST be replaced by one atomic rename. `recursive` has no effect on a file.
 - A folder copy without `recursive: true` MUST yield `400 invalid_path`. With it, the destination MUST NOT exist (a folder copy never merges, whatever `overwrite` says) and MUST NOT lie inside the source. The copy contains every folder (empty ones included) and regular file that [`GET /paths`](#get-v1vaultsslugpaths) would list under the source; hidden entries and symlinks are not copied and are counted in `skipped`. The destination MUST appear complete or not at all: a concurrent reader never sees a partial copy, and a failed copy leaves no destination behind.
 - Copies get fresh modification times. Content is copied byte for byte; links are never rewritten, so a relative link inside a copied note may resolve differently from its new location.
 - Every Markdown file the copy wrote MUST be reindexed before responding; `indexed` is `true` iff all of those reindexes succeeded.
