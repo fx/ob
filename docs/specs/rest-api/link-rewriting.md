@@ -33,10 +33,10 @@ The rules below are ob's own, modelled on Obsidian's behavior. Obsidian does not
 
 `resolve(link, S, F)` maps a recognized link in the note at vault-relative path `S` to one file of the vault file set `F`, or to nothing. Path comparison is case-insensitive, and when several files match a step only by case, the one matching case exactly wins. `match(P)` is the file whose path is `P`, else the file whose path is `P.md`.
 
-1. **Relative.** If the linkpath starts with `./` or `../`, or the link is a Markdown link whose destination does not start with `/`, let `R` be the linkpath joined to the folder of `S` and normalized. If `match(R)` exists, it is the result. A relative linkpath that climbs above the vault root resolves to nothing.
-2. **Vault-absolute.** Otherwise, if `match(L)` exists, where `L` is the linkpath with one leading `/` removed, it is the result.
-3. **By name.** Otherwise, the candidates are the files whose path ends with `/L` or `/L.md`. One candidate is the result. Among several, the result is the candidate in the same folder as `S`, else the one with the fewest path segments, else the first in path order.
-4. Otherwise the link is unresolved.
+1. **Relative.** If the linkpath starts with `./` or `../`, or the link is a Markdown link whose destination does not start with `/`, let `R` be the linkpath joined to the folder of `S` and normalized. If `match(R)` exists, it is the result; if it does not, resolution continues at step 2. A relative linkpath that climbs above the vault root resolves to nothing and does not continue.
+2. **Vault-absolute.** Reached when step 1 did not apply or found nothing. If `match(L)` exists, where `L` is the linkpath with one leading `/` removed, it is the result; otherwise resolution continues at step 3.
+3. **By name.** Reached when step 2 found nothing. The candidates are the files whose path ends with `/L` or `/L.md`. One candidate is the result. Among several, the result is the candidate in the same folder as `S`, else the one with the fewest path segments, else the first in path order.
+4. **Unresolved.** Reached when step 3 has no candidate: the link is unresolved.
 
 Resolution is a pure function of the link, the note's path, and the file set, and ob evaluates it against the vault before the move and again after it.
 
@@ -72,11 +72,11 @@ This covers both halves of a move: links into the moved files, and the moved not
 ### Applying rewrites
 
 - The note is read under the [containment precondition](index.md#path-operations) for reads; a note that fails it is reported in `failed` with `invalid_path`.
-- All rewrites of one note MUST be applied as one atomic write of that note and reindexed, exactly as `PUT` writes and reindexes a note, and serialized with other writes to it. Nothing but the rewritten linkpaths changes; line endings and every other byte are preserved.
+- All rewrites of one note MUST be applied as one atomic write of that note and reindexed (the reindex under the note's write lock), exactly as `PUT` writes and reindexes a note, and serialized with other writes to it. Nothing but the rewritten linkpaths changes; line endings and every other byte are preserved.
 - The rewrite MUST be computed from the note's bytes as read while holding its lock, so no ob write to that note is lost. A rewrite replaces the note it read; it never claims a new path, so the no-replace destination rule of [Path operations](index.md#path-operations) does not apply. Like `PUT` and `PATCH`, it cannot exclude a writer outside ob (Obsidian Sync) that changes or removes the note in the instant between that read and the atomic write; that window is a known limit shared with every in-place write, not specific to moves.
 - A note that cannot be read or written, or that vanishes, is reported in `links.failed` with the error's `code` and left as it is; the remaining notes are still rewritten. A failed write removes only the temporary file it created itself, never the note, per the failure rule in [Path operations](index.md#path-operations).
 - Each note write is held to the [containment precondition](index.md#path-operations): the symlink check on the note's parent chain runs immediately before the temporary file is created, again immediately before it is renamed over the note, and before a failed write removes it. A note whose chain fails a check is reported in `failed` with `invalid_path` and not written.
-- `links.updated` lists every rewritten note once, by its post-move path, in path order, with the number of link occurrences rewritten in it and `indexed`, which is `false` when the note's text was written but its reindex failed. Such a note stays in `updated` — its links were rewritten — and also makes the move's top-level `indexed` `false`.
+- `links.updated` lists every rewritten note once, by its post-move path, in path order, with the number of link occurrences rewritten in it and `indexed`, which is `true` iff the note is indexable and its reindex succeeded — `false` when it is not indexable (for example under `node_modules`) or its reindex failed. Such a note stays in `updated`, because its links were rewritten. Rewritten notes do not affect the move's top-level `indexed`, which covers the moved paths only.
 
 #### Scenario: Bare-name wikilink follows a rename
 
