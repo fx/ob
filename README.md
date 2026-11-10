@@ -24,7 +24,7 @@ provision on the server:
 Scoping confines a cooperating client and is not an access control; see
 [Scoped MCP sessions](#scoped-mcp-sessions) for the details and caveats.
 
-**Eleven MCP tools**, with the same names in every scope:
+**Twelve MCP tools**, with the same names in every scope:
 
 - Files and folders alike: `list` (`ls`), `delete` (`rm`, `rm -r` with
   `recursive: true`)
@@ -35,6 +35,12 @@ Scoping confines a cooperating client and is not an access control; see
   notes carry each, so an agent can reuse the vault's tag vocabulary; every
   listed tag works as `search`'s `filter.tag`. REST:
   `GET /v1/vaults/:slug/tags?prefix=&limit=`.
+- Exact text: `grep` — a literal substring (or an ECMAScript regex with
+  `regex: true`) matched line by line in the text files on disk, returning
+  path, line, column, and the line itself, optionally with context lines.
+  PDFs and binaries are not searched; results are capped at `limit` matches,
+  64 MiB read, and 5 seconds, and a capped response says `truncated: true`.
+  Use `search` to find notes by meaning. REST: `POST /v1/vaults/:slug/grep`.
 
 ## Run
 
@@ -255,8 +261,9 @@ is described in one of these documents:
   arbitrary files (`/v1/vaults/:slug/files/*path`), folder creation
   (`PUT /v1/vaults/:slug/folders/*path`), type-agnostic listing and deletion of
   files and folders (`GET /v1/vaults/:slug/paths`,
-  `DELETE /v1/vaults/:slug/paths/*path`), plus natural-language search over
-  Markdown and tag listing.
+  `DELETE /v1/vaults/:slug/paths/*path`), exact-text grep over text files
+  (`POST /v1/vaults/:slug/grep`), plus natural-language search over Markdown
+  and tag listing.
 - [MCP Server](docs/specs/mcp-server/index.md) — Streamable HTTP/SSE MCP
   server mirroring the REST surface as MCP tools and resources.
 
