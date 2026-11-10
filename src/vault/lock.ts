@@ -58,3 +58,30 @@ export async function withPathLock<T>(key: string, fn: () => Promise<T>): Promis
     if (queues.get(key) === tail) queues.delete(key);
   }
 }
+
+/**
+ * Take the per-path lock for every key at once, in ONE canonical order
+ * (de-duplicated, sorted), then run `fn`. Two operations that each need two
+ * paths — a move `a → b` and a move `b → a`, say — therefore always queue on
+ * the same first key instead of each holding the lock the other waits for.
+ * A key passed twice (`a.md` and `./a.md` resolve to one) is locked once.
+ */
+export async function withPathLocks<T>(keys: readonly string[], fn: () => Promise<T>): Promise<T> {
+  const ordered = [...new Set(keys)].sort();
+  const acquire = (i: number): Promise<T> =>
+    i === ordered.length ? fn() : withPathLock(ordered[i] as string, () => acquire(i + 1));
+  return acquire(0);
+}
+
+/**
+ * The per-vault move mutex. Every move holds it from before it takes its
+ * path locks until its link-rewrite phase has ended, so each move sees the
+ * tree the previous one left (a chained `a → b`, `b → c` never rewrites
+ * `[[a]]` to a `b` that is already gone). Nothing else takes it and it is
+ * always taken first, so it cannot deadlock with the path locks. The key
+ * starts with NUL, which no resolved path can, so it never collides with a
+ * path lock; it is per slug, so scoped and unscoped moves share it.
+ */
+export function withMoveMutex<T>(slug: string, fn: () => Promise<T>): Promise<T> {
+  return withPathLock(`\0move:${slug}`, fn);
+}

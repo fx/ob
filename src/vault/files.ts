@@ -47,6 +47,7 @@ import {
 import type { Indexer } from "../indexer/index.ts";
 import type { Logger } from "../log.ts";
 import { detectContentType, isMarkdownPath, isTextPath } from "./contentType.ts";
+import type { GuardSite } from "./guarded.ts";
 import { pathLockKey, withPathLock } from "./lock.ts";
 import { assertNotSymlinkEscape, safeJoin } from "./path.ts";
 
@@ -91,6 +92,22 @@ export interface VaultServiceDeps {
    * mocking `fs`. Production wiring never sets them.
    */
   readonly hooks?: PathOpHooks;
+  /**
+   * Link context for `movePath` in a scoped MCP session (`src/mcp/scope.ts`):
+   * the REAL vault root and the scope prefix, used ONLY to resolve links over
+   * the whole vault and to keep link rewriting inside the scope. Every other
+   * path still resolves against `vault(slug).root`, the scope root. Unscoped
+   * deps omit it, which means the vault root with an empty prefix.
+   */
+  readonly linkScope?: (slug: string) => LinkScope | null;
+}
+
+/** The whole-vault view a scoped move resolves links against. */
+export interface LinkScope {
+  /** Absolute on-disk path of the real vault root. */
+  readonly root: string;
+  /** Vault-relative scope prefix, no leading or trailing `/`; `""` for the vault root. */
+  readonly prefix: string;
 }
 
 /** Injection points inside `listPaths` / `deletePath`. Each receives the vault-relative path. */
@@ -103,6 +120,14 @@ export interface PathOpHooks {
   readonly beforeRemove?: (path: string) => Promise<void>;
   /** `deletePath`: immediately after a successful removal, before any index drop. */
   readonly afterRemove?: (path: string) => Promise<void>;
+  /**
+   * Move, copy, and the link rewriter: runs at each named step — inside
+   * `guarded`, BEFORE its containment check — with the absolute paths the
+   * step touches. A test acts as a concurrent or outside writer here, or
+   * throws to inject the step's own failure (an errno-coded error stands in
+   * for the filesystem call's).
+   */
+  readonly beforeStep?: (site: GuardSite, paths: readonly string[]) => Promise<void>;
 }
 
 export interface ReadFileResult {
@@ -176,27 +201,32 @@ export function resolveVault(deps: VaultServiceDeps, slug: string): VaultDescrip
 
 /**
  * Try-catch wrapper around `indexer.reindex`, called for every written path.
- * Returns the reindex's own `indexed` (`false` for a path that is not
- * indexable, whose rows the indexer dropped). A rejected reindex — the
- * index could not be brought to the file's content — is logged and reported
- * as `false`. Disk state has already been committed by the time we get
- * here; the chokidar watcher will reconcile asynchronously.
+ * `indexed` is the reindex's own result (`false` for a path that is not
+ * indexable, whose rows the indexer dropped); `ok` is `false` when the
+ * reindex rejected — the index could not be brought to the file's content —
+ * which is logged and also reported as not indexed. Disk state has already
+ * been committed by the time we get here; the chokidar watcher will
+ * reconcile asynchronously.
  */
-export async function tryReindex(
+export async function tryReindexResult(
   deps: VaultServiceDeps,
   slug: string,
   path: string,
-): Promise<boolean> {
+): Promise<{ ok: boolean; indexed: boolean }> {
   try {
-    return (await deps.indexer.reindex(slug, path)).indexed;
+    return { ok: true, indexed: (await deps.indexer.reindex(slug, path)).indexed };
   } catch (e) {
     deps.logger?.warn("indexer.reindex failed; chokidar will reconcile", {
       vault: slug,
       path,
       error: e instanceof Error ? e.message : String(e),
     });
-    return false;
+    return { ok: false, indexed: false };
   }
+}
+
+async function tryReindex(deps: VaultServiceDeps, slug: string, path: string): Promise<boolean> {
+  return (await tryReindexResult(deps, slug, path)).indexed;
 }
 
 export async function readFile(
