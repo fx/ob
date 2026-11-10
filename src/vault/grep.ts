@@ -262,7 +262,16 @@ export async function grep(
       // The budget ran out (or the caller left) while waiting for a slot.
       return timeResult([], 0, 0);
     }
-    return await run((rt.spawn ?? spawnGrepWorker)(), params, stop.signal, release);
+    let handle: GrepWorkerHandle;
+    try {
+      handle = (rt.spawn ?? spawnGrepWorker)();
+    } catch (e) {
+      // No worker exists to exit and release the slot, so release it here.
+      // The failure is the server's (`internal`), as for a worker that dies.
+      release();
+      throw e;
+    }
+    return await run(handle, params, stop.signal, release);
   } finally {
     cancelTimer();
     unsubscribe();
@@ -319,6 +328,12 @@ function run(
     unsubscribe = onAbort(stop, () =>
       settle(() => resolve(timeResult(matches, filesScanned, filesSkipped))),
     );
-    if (!settled) handle.start(params);
+    if (settled) return;
+    try {
+      handle.start(params);
+    } catch (e) {
+      // Terminating makes the worker exit, which releases its slot.
+      settle(() => reject(e));
+    }
   });
 }

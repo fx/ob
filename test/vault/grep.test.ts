@@ -891,6 +891,45 @@ describe("grep — concurrency and cancellation", () => {
     expect((fake.workers[0] as FakeWorker).held).toEqual([]);
   });
 
+  test("a worker factory that throws releases its slot, so later greps still run", async () => {
+    const { deps } = vault({ "a.md": "N\n" });
+    const slots = new Semaphore(2);
+    const broken = (): GrepWorkerHandle => {
+      throw new Error("cannot spawn");
+    };
+    for (let i = 0; i < 2; i++) {
+      await expect(grep(deps, "v", { pattern: "N" }, { slots, spawn: broken })).rejects.toThrow(
+        "cannot spawn",
+      );
+      expect(slots.available).toBe(2);
+    }
+    const r = await grep(deps, "v", { pattern: "N" }, { slots, spawn: inProcess().spawn });
+    expect(at(r.matches)).toEqual(["a.md:1:1"]);
+  });
+
+  test("a worker that fails to start is terminated and releases its slot", async () => {
+    const { deps } = vault({ "a.md": "N\n" });
+    const slots = new Semaphore(1);
+    const fake = inProcess();
+    const spawn = (): GrepWorkerHandle => {
+      const w = fake.spawn();
+      return {
+        ...w,
+        start: () => {
+          throw new Error("cannot start");
+        },
+      };
+    };
+    await expect(grep(deps, "v", { pattern: "N" }, { slots, spawn })).rejects.toThrow(
+      "cannot start",
+    );
+    expect((fake.workers[0] as FakeWorker).terminated).toBe(true);
+    await Bun.sleep(0);
+    expect(slots.available).toBe(1);
+    const r = await grep(deps, "v", { pattern: "N" }, { slots, spawn: inProcess().spawn });
+    expect(r.matches).toHaveLength(1);
+  });
+
   test("Semaphore: FIFO hand-off, idempotent release, abort removes only that waiter", async () => {
     const s = new Semaphore(1);
     const never = new AbortController().signal;
