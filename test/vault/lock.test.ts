@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { withPathLock } from "../../src/vault/lock.ts";
+import { pathLockKey, withPathLock } from "../../src/vault/lock.ts";
 
 describe("withPathLock", () => {
   test("serialises calls on the same key", async () => {
@@ -56,5 +56,22 @@ describe("withPathLock", () => {
     // Subsequent calls on the same key still run.
     const result = await withPathLock("err", async () => 42);
     expect(result).toBe(42);
+  });
+});
+
+describe("pathLockKey", () => {
+  test("aliases of one vault path share one key; different files do not", () => {
+    const key = pathLockKey("/data/vaults/v", "notes/x.md");
+    for (const alias of ["notes//x.md", "./notes/x.md", "notes/x.md/", "notes/./x.md"]) {
+      expect(pathLockKey("/data/vaults/v", alias)).toBe(key);
+    }
+    expect(pathLockKey("/data/vaults/v", "notes/y.md")).not.toBe(key);
+    expect(pathLockKey("/data/vaults/w", "notes/x.md")).not.toBe(key);
+  });
+
+  test("a scope-relative path keys the same as its vault-relative path", () => {
+    expect(pathLockKey("/data/vaults/v/agents/a", "x.md")).toBe(
+      pathLockKey("/data/vaults/v", "agents/a/x.md"),
+    );
   });
 });

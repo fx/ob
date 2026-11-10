@@ -33,7 +33,7 @@ import { DocNotFoundError, FolderNotEmptyError, InvalidPathError } from "../erro
 import { detectContentType } from "./contentType.ts";
 import { type VaultServiceDeps, resolveVault, sha256 } from "./files.ts";
 import { dropGuarded, dropUnlessIndexable, guardedRead } from "./guarded.ts";
-import { withPathLock } from "./lock.ts";
+import { pathLockKey, withPathLock } from "./lock.ts";
 import { assertNotSymlinkEscape, lstatContainedDirectory, safeJoin } from "./path.ts";
 
 export const DEFAULT_LIMIT = 100;
@@ -289,7 +289,7 @@ export async function deletePath(
   const rel = canonicalPath(path);
   const abs = safeJoin(v.root, rel);
   await assertNotSymlinkEscape(abs, v.root);
-  const removedFolder = await withPathLock(`${slug}:${rel}`, async (): Promise<boolean> => {
+  const removedFolder = await withPathLock(pathLockKey(v.root, rel), async (): Promise<boolean> => {
     let st: import("node:fs").Stats;
     try {
       st = await fs.lstat(abs);

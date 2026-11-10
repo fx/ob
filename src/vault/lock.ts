@@ -8,8 +8,8 @@
  * serialises every async section that touches the same key so the
  * read-then-write window is atomic with respect to other API calls.
  *
- * The lock is per (vault-slug, relative-path) so different files don't
- * block each other. Cross-process correctness is NOT in scope: `ob sync`
+ * The lock is per resolved absolute path (`pathLockKey`) so different files
+ * don't block each other. Cross-process correctness is NOT in scope: `ob sync`
  * runs as a sibling process and uses chokidar to reconcile, so two
  * processes writing the same file would already be a deployment-time bug.
  *
@@ -20,7 +20,21 @@
  * entries for files that are touched once and never again.
  */
 
+import { resolve } from "node:path";
+
 const queues = new Map<string, Promise<void>>();
+
+/**
+ * The one canonical lock key for a vault path: the absolute path it resolves
+ * to under `root` (the root the caller's `vault(slug)` descriptor carries).
+ * Every writer and every delete locks through this key, so aliases of one
+ * file — `notes//x.md`, `./notes/x.md`, `notes/x.md/`, and a scoped session's
+ * scope-relative path — all contend on the same lock. It only names the lock;
+ * containment validation stays with `safeJoin` / `assertNotSymlinkEscape`.
+ */
+export function pathLockKey(root: string, rel: string): string {
+  return resolve(root, rel);
+}
 
 export async function withPathLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const previous = queues.get(key) ?? Promise.resolve();

@@ -24,7 +24,7 @@ import {
   dropUnlessIndexable,
   guardedRead,
 } from "../../src/vault/guarded.ts";
-import { withPathLock } from "../../src/vault/lock.ts";
+import { pathLockKey, withPathLock } from "../../src/vault/lock.ts";
 import { makeVaultFixture } from "./helpers.ts";
 
 function tree(): string {
@@ -171,7 +171,7 @@ describe("drop guard", () => {
     const fx = makeVaultFixture();
     let release!: () => void;
     const held = withPathLock(
-      `${fx.slug}:x.md`,
+      pathLockKey(fx.root, "x.md"),
       () =>
         new Promise<void>((r) => {
           release = r;

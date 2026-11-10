@@ -22,8 +22,8 @@ import type { Stats } from "node:fs";
 import { constants, promises as fs } from "node:fs";
 import { join } from "node:path";
 import { DocNotFoundError, InvalidPathError } from "../errors.ts";
-import type { VaultServiceDeps } from "./files.ts";
-import { withPathLock } from "./lock.ts";
+import { type VaultServiceDeps, resolveVault } from "./files.ts";
+import { pathLockKey, withPathLock } from "./lock.ts";
 import { assertNotSymlinkEscape } from "./path.ts";
 
 /** Thrown by `guardedRead` when the file exceeds `maxBytes` (at `fstat` or while reading). */
@@ -136,11 +136,15 @@ export async function dropUnlessIndexable(
   }
 }
 
-/** The drop guard, taking `path`'s write lock for the check and the drop. Never throws. */
+/**
+ * The drop guard, taking `path`'s write lock for the check and the drop.
+ * Never throws for a configured vault.
+ */
 export async function dropGuarded(
   deps: VaultServiceDeps,
   slug: string,
   path: string,
 ): Promise<void> {
-  await withPathLock(`${slug}:${path}`, () => dropUnlessIndexable(deps, slug, path));
+  const key = pathLockKey(resolveVault(deps, slug).root, path);
+  await withPathLock(key, () => dropUnlessIndexable(deps, slug, path));
 }

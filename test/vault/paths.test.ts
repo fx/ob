@@ -19,7 +19,8 @@ import {
   InvalidPathError,
   VaultNotFoundError,
 } from "../../src/errors.ts";
-import type { PathOpHooks, VaultServiceDeps } from "../../src/vault/files.ts";
+import { type PathOpHooks, type VaultServiceDeps, writeFile } from "../../src/vault/files.ts";
+import { pathLockKey, withPathLock } from "../../src/vault/lock.ts";
 import {
   type PathEntry,
   canonicalPath,
@@ -826,5 +827,41 @@ describe("deletePath validation", () => {
   test("throws VaultNotFoundError for an unknown slug", async () => {
     const fx = makeVaultFixture();
     await expect(deletePath(fx.deps, "missing", "x.md")).rejects.toBeInstanceOf(VaultNotFoundError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lock keys
+// ---------------------------------------------------------------------------
+
+describe("canonical lock keys", () => {
+  test("a delete and a write through aliases of one file contend on one lock", async () => {
+    const fx = makeVaultFixture();
+    let release!: () => void;
+    const held = withPathLock(
+      pathLockKey(fx.root, "notes/x.md"),
+      () =>
+        new Promise<void>((r) => {
+          release = r;
+        }),
+    );
+    const settled: string[] = [];
+    const write = writeFile(fx.deps, fx.slug, "notes//x.md", {
+      kind: "markdown",
+      content: "# x",
+    }).then(() => void settled.push("write"));
+    const del = deletePath(fx.deps, fx.slug, "./notes/x.md/").then(
+      () => void settled.push("delete"),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    // Both wait on the one held lock: nothing written, nothing deleted.
+    expect(settled).toEqual([]);
+    expect(existsSync(join(fx.root, "notes/x.md"))).toBe(false);
+    release();
+    await Promise.all([held, write, del]);
+    // Queued in call order on the same key: the write lands, then the delete
+    // removes it (had they not serialized, the delete would be not_found).
+    expect(settled).toEqual(["write", "delete"]);
+    expect(existsSync(join(fx.root, "notes/x.md"))).toBe(false);
   });
 });

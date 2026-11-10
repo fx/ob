@@ -41,7 +41,7 @@ import {
 import type { Indexer } from "../indexer/index.ts";
 import type { Logger } from "../log.ts";
 import { detectContentType, isMarkdownPath, isTextPath } from "./contentType.ts";
-import { withPathLock } from "./lock.ts";
+import { pathLockKey, withPathLock } from "./lock.ts";
 import { assertNotSymlinkEscape, safeJoin } from "./path.ts";
 
 /** A configured vault — sufficient identity for the service core. */
@@ -272,7 +272,7 @@ export async function writeFile(
   }
   // Per-path lock: keeps a concurrent PATCH/APPEND on the same path from
   // racing the existed() probe + atomicWrite + reindex sequence.
-  return withPathLock(`${slug}:${path}`, async () => {
+  return withPathLock(pathLockKey(v.root, path), async () => {
     const bytes =
       body.kind === "markdown" ? serializeMarkdown(body.content, body.frontmatter) : body.bytes;
     const wasExisting = await existed(abs);
@@ -344,7 +344,7 @@ export async function patchFile(
   // both see the original and the second writer will silently overwrite
   // the first. Lock spans the read → applyEdits → atomicWrite → reindex
   // sequence end-to-end.
-  return withPathLock(`${slug}:${path}`, async () => {
+  return withPathLock(pathLockKey(v.root, path), async () => {
     let original: string;
     try {
       original = await fs.readFile(abs, "utf8");
@@ -392,7 +392,7 @@ export async function appendFile(
   // would otherwise read the same prefix and the second writer would
   // overwrite the first. The end-to-end lock guarantees five concurrent
   // appends produce 5x the appended bytes (no lost writes).
-  return withPathLock(`${slug}:${path}`, async () => {
+  return withPathLock(pathLockKey(v.root, path), async () => {
     let original: Buffer;
     try {
       original = await fs.readFile(abs);
