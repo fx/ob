@@ -14,10 +14,45 @@ In v1 the indexer covers Markdown only (`.md` / `.markdown`). Binary files (imag
 
 ## Requirements
 
+### Indexable paths
+
+> The `isIndexablePath` predicate and the drop guard below are introduced by draft change [0019](../../changes/0019-unified-list-and-delete.md), whose deletes use both. Draft change [0020](../../changes/0020-move-and-copy.md) adopts the predicate in the scan, the watcher, the pipeline, and every direct reindex, and adds the startup sweep; until 0020 lands those routes keep today's predicates, which agree on segments and extensions but not on symlinks.
+
+Indexability is always evaluated against the real vault root with the vault-relative path, never against a scoped root: a session scoped to `node_modules/pkg` sees `note.md`, but the path that is judged is `node_modules/pkg/note.md`, which is not indexable. The predicate is therefore reached through the indexer, which already deals in vault-relative paths, as `Indexer.isIndexable(slug, path)`; service code never calls it with its own (possibly scoped) root, and a scoped session's wrapper prefixes the path exactly as it does for `reindex` and `drop`.
+
+One predicate, `isIndexablePath`, decides what the index may hold, and the initial scan, the watcher, the pipeline, and every direct `reindex` (writes, moves, copies, link rewrites) MUST all apply it — inside `reindex`, not before it: every writer calls `reindex` for every path it writes, and `reindex` itself indexes the path or, if it is not indexable, drops its rows — so no route into the index admits a path another route would refuse. A vault-relative path is indexable iff all of these hold:
+
+- its extension is `.md` or `.markdown`, case-insensitively;
+- no segment starts with `.` (which covers `.obsidian/`, `.trash/`, and dotfiles at any depth);
+- no segment is `node_modules`;
+- the entry is a regular file, and neither it nor any folder between it and the vault root is a symlink, checked without following links at the moment the file is read.
+
+A path that fails the rule is never embedded or stored, whichever route it arrived by, and a reindex of such a path drops any rows it has rather than indexing it.
+
+The rule gates only what is *added* to the index. Drops are never gated by it — a path that has just been moved away or deleted fails its filesystem half by definition, and dropping a path that has no rows is a no-op — and are guarded only by whether an indexable note exists at the path at drop time:
+
+- **Drop guard.** A removed path's rows are kept only if what exists at that path when the drop runs is indexable (`isIndexablePath` is true): a note recreated in the meantime, whose rows are kept pending the writer's or the watcher's reindex (eventually consistent). In every other case — nothing there, or something non-indexable such as a symlink, a folder, or a file under a now-hidden name — the rows are dropped, because nothing will ever reindex them. For ob's own operations the check and the drop happen under the path's write lock. This applies to every removed path, and to no other drop: a deleted file, each indexed path under a deleted folder, each old path of a moved file or folder, and every path the watcher reports as unlinked.
+- **Overwritten destination — not subject to the drop guard.** The one drop of a path that still exists: an `overwrite` move or copy replaced its content, and the drop of its old rows is unconditional — it runs under the destination's lock immediately before that same path is reindexed, without checking what exists there, because what exists there is exactly the replacement being indexed.
+- **Reindex of a non-indexable or missing path.** It drops the path's rows, as stated above.
+
+The watcher follows the same split. It prunes directories while traversing — a hidden directory, a `node_modules` directory, and a symlinked directory are never descended into — by the segment and symlink parts of the rule, not by the file predicate, which would reject every directory. It applies `isIndexablePath` to `add` and `change` events: an indexable path is reindexed, and a non-indexable one has any rows it still holds dropped, rather than being ignored, so a note replaced by a symlink loses its rows whichever event reports the replacement. It handles `unlink` by dropping the path's rows under the drop guard.
+
+#### Scenario: Note replaced by a symlink loses its rows
+
+- **GIVEN** indexed `notes/a.md`
+- **WHEN** `notes/a.md` is replaced by a symlink of the same name (through a folder move that brings one in, or by an outside writer)
+- **THEN** the rows for `notes/a.md` are dropped — by the drop guard, or by the watcher's `add` / `change` handling of the now non-indexable path — and nothing is indexed through the link
+
+#### Scenario: Symlinked note is never indexed
+
+- **GIVEN** a folder in the vault containing a symlink `ref.md` to a Markdown file outside the vault
+- **WHEN** the watcher reports `ref.md` (for example after the folder is moved through the API), or a direct `reindex` is called for it
+- **THEN** no row for that path is written and the outside file's content is never embedded
+
 ### Watcher
 
 - For each configured vault, the indexer MUST watch `<DATA_DIR>/vaults/<slug>/` recursively with `chokidar` (or the Bun-native equivalent if it covers add/change/unlink semantics on Linux — to be confirmed in Change 0003).
-- The watcher MUST ignore: any path containing a `/.obsidian/` segment, any path containing a `/.trash/` segment, any path beginning with `.`, and any file whose extension is not `.md` or `.markdown`.
+- The watcher MUST prune and filter exactly as [Indexable paths](#indexable-paths) states — directories pruned by segment and symlink, `add` / `change` reindexing an indexable path and dropping a non-indexable one's rows, `unlink` dropping under the drop guard — and MUST NOT follow symlinks while watching.
 - The watcher MUST coalesce events on the same path within a 250 ms debounce window.
 - The watcher MUST handle `add`, `change`, and `unlink` events. Renames MUST be observable as `unlink` followed by `add` (chokidar default).
 
@@ -42,6 +77,14 @@ In v1 the indexer covers Markdown only (`.md` / `.markdown`). Binary files (imag
 ### Initial scan
 
 - On startup (after `ob sync-setup` succeeds for a vault), the indexer MUST perform an initial scan of the vault directory.
+- The scan MUST visit only [indexable](#indexable-paths) paths.
+- Before a vault is reported ready, the indexer MUST reconcile its existing rows: every indexed path that fails `isIndexablePath` at that moment — including a path whose file is gone, and a path that is now a symlink, such as rows a pre-0020 watcher indexed through a symlink — has its rows dropped under the drop guard. This sweep runs on every start, so rows orphaned while ob was stopped are cleared too.
+
+#### Scenario: Persisted symlink-derived rows are dropped at startup
+
+- **GIVEN** a store holding rows for `notes/ref.md`, which on disk is a symlink to a Markdown file outside the vault (rows written by an earlier version whose watcher followed symlinks)
+- **WHEN** the indexer starts
+- **THEN** before the vault is reported ready, the rows for `notes/ref.md` are gone and no embedding call is made for it
 - The scan MUST compare each file's `mtime_ms` and `sha256` against the latest indexed row for that path. Files whose `sha256` matches MUST be skipped (no embedding call).
 - The scan MUST run with bounded concurrency (default 4 files in flight) to avoid swamping the embedder.
 - The scan MUST mark `/readyz` as ready for that vault only after the initial scan completes.
@@ -154,6 +197,31 @@ The indexer MUST address these via four cooperating mechanisms.
 - **THEN** the response `hits` is `[]`
 - **AND** the response is not an error
 
+### Tag listing
+
+> Specified by draft change [0021](../../changes/0021-list-tags.md); not yet implemented.
+
+`Indexer.tags(slug, opts)` reports the tags present in a vault's index and how many documents carry each. It backs `GET /v1/vaults/:slug/tags` and the MCP `list_tags` tool.
+
+- The tags reported MUST be exactly those stored on the vault's chunks — the inline tags the [chunker](#chunker) extracts, without the leading `#`, code excluded — so every reported tag is a value `search` accepts as `filter.tag`.
+- A tag's `count` MUST be the number of distinct document paths with at least one chunk carrying it, so it equals the number of distinct paths a `search` filtered on that tag can return.
+- Tags MUST be reported exactly as stored: case-sensitively, and without rolling nested tags up into their parents. A document tagged only `#project/alpha` counts toward `project/alpha` and not toward `project`; `project` appears only when some document carries `#project` itself.
+- With `opts.pathPrefix`, only documents whose path starts with it (literally, as in `search`'s `filter.pathPrefix`) are counted, and tags carried by no such document are not reported.
+- Items MUST be ordered by `count` descending, then by tag in code-point order. At most `opts.limit ?? 100` items are returned (1–1000), and `total` MUST be the number of distinct tags before the limit.
+- The listing reflects the index at the time of the call: while a vault is still `scanning`, it covers only what has been indexed so far.
+
+#### Scenario: Tags counted by distinct document
+
+- **GIVEN** an indexed vault where `a.md` carries `#todo` in two sections, `b.md` carries `#todo` and `#project/alpha`, and `c.md` carries `#project`
+- **WHEN** `tags("v")` is called
+- **THEN** `items` is `[{ tag: "todo", count: 2 }, { tag: "project", count: 1 }, { tag: "project/alpha", count: 1 }]` and `total` is 3
+
+#### Scenario: Tags under a path prefix
+
+- **GIVEN** the vault above, where only `b.md` lives under `work/`
+- **WHEN** `tags("v", { pathPrefix: "work/" })` is called
+- **THEN** `items` is `[{ tag: "project/alpha", count: 1 }, { tag: "todo", count: 1 }]`
+
 ### Public surface
 
 ```ts
@@ -190,14 +258,31 @@ interface Indexer {
   status(slug: string): IndexerStatus | null;
   list(): IndexerStatus[];
   search(slug: string, query: string, opts?: SearchOptions): Promise<SearchHit[]>;
-  reindex(slug: string, path: string): Promise<void>;
+  reindex(slug: string, path: string): Promise<{ indexed: boolean }>;   // indexed: false = not indexable, rows dropped
   drop(slug: string, path: string): Promise<void>;
+  indexedPaths(slug: string, prefix: string): Promise<string[]>;   // distinct indexed paths starting with prefix
+  isIndexable(slug: string, path: string): Promise<boolean>;      // isIndexablePath on the real vault root
+  tags(slug: string, opts?: { pathPrefix?: string; limit?: number }): Promise<TagListing>;
   stop(): Promise<void>;
+}
+interface TagListing {
+  items: { tag: string; count: number }[];
+  total: number;
 }
 ```
 
 - `search` MUST return at most `limit ?? 20` hits ordered by descending fused score (after MMR and threshold).
-- `reindex` and `drop` are imperative hooks called by REST writes/deletes — they let the API skip waiting for the chokidar debounce when the API itself was the writer.
+- `reindex` and `drop` are imperative hooks called by REST writes, deletes, moves, and copies — they let the API skip waiting for the chokidar debounce when the API itself was the writer.
+- `reindex` MUST resolve only when the path's rows reflect its current content (including the unchanged-`sha256` short-circuit, and including dropping the rows of a path that is gone or not indexable), resolving `{ indexed: true }` when the path was indexed and `{ indexed: false }` when it is not indexable and its rows (if any) were dropped, and MUST reject when the rows could not be brought there — a read, chunk, embed, or store failure after its retries. The failure is still counted in `IndexerStatus.errors`. This is what lets every API response's `indexed` flag report a failed index update.
+- `indexedPaths` returns the distinct paths that have rows and start with `prefix` (a literal prefix, as in `filter.pathPrefix`). A recursive folder delete calls it with the folder's path followed by `/` after the removal and drops each returned path under the drop guard, so a note indexed into the folder after the delete collected its contents is dropped, while a path recreated as an indexable note after the removal keeps its rows (anything else recreated there loses them).
+- A move is indexed as a drop of every path that left — for a folder move, every indexed path under the old folder's prefix (`indexedPaths`), so rows under hidden entries or symlinks that travelled with the folder are not left behind — never gated by `isIndexablePath` (rows exist only for paths that were indexable) and subject only to the drop guard (an old path's rows are kept only if an indexable note exists there at drop time), and a reindex of every path that arrived and that the path walk lists. An [indexable](#indexable-paths) one is indexed. A non-indexable one, such as a file under `node_modules`, has its rows dropped. Hidden entries and symlinks travel with a moved folder but are not reindexed. Rows are not renamed in place: `embed_text` starts with the note's path, so a moved note's vectors and full-text tokens MUST be recomputed for its new path, and a note whose content is unchanged is still re-embedded after a move.
+
+#### Scenario: Moved note is re-embedded under its new path
+
+- **GIVEN** indexed `inbox/idea.md`
+- **WHEN** it is moved through the API to `projects/idea.md`
+- **THEN** before the move responds, the table has no rows for `inbox/idea.md`
+- **AND** the rows for `projects/idea.md` carry an `embed_text` starting with `projects/idea.md`, embedded from that text
 
 ## Design
 
@@ -257,3 +342,7 @@ fs unlink ───────────────────────�
 | 2026-05-03 | Initial spec created | — |
 | 2026-05-03 | Chunker: flat-list-section heuristic + `embed_text` composition. Schema adds `embed_text` column. Pipeline-version sidecar drives full re-embed on chunker change. | [Change 0007](../../changes/0007-indexer-relevance.md) |
 | 2026-05-03 | New "Search relevance" section: hybrid retrieval (vector + FTS via RRF), MMR diversification, score threshold. Indexer interface gains `mode`, `threshold`, `mmrLambda`, `maxPerPath`. | [Change 0008](../../changes/0008-search-relevance.md) |
+| 2026-11-09 | Moves are indexed as drop-old plus reindex-new, re-embedding moved notes because `embed_text` carries the path; `reindex` / `drop` are now also called by moves and copies. | [Change 0020](../../changes/0020-move-and-copy.md) |
+| 2026-11-09 | New "Tag listing" section and `Indexer.tags()`: stored inline tags with distinct-document counts, no parent roll-up, ordered by count then tag, optional path prefix. | [Change 0021](../../changes/0021-list-tags.md) |
+| 2026-11-09 | New "Indexable paths" section: one `isIndexablePath` rule (Markdown, no hidden or `node_modules` segment, regular file not reached through a symlink) and the drop guard, introduced with the deletes that use them, then adopted by the scan, the watcher (which stops following symlinks), the pipeline, and every direct reindex; `reindex` now rejects when the index could not be updated, so `indexed` reports failures. | [Change 0019](../../changes/0019-unified-list-and-delete.md), [Change 0020](../../changes/0020-move-and-copy.md) |
+| 2026-11-09 | Startup reconciliation: before a vault is ready, rows whose path fails `isIndexablePath` (gone, symlinked, hidden, `node_modules`) are dropped, clearing rows indexed through symlinks by earlier versions and rows orphaned while ob was stopped. | [Change 0020](../../changes/0020-move-and-copy.md) |

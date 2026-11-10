@@ -16,7 +16,7 @@ specs:
     status: active
   - name: rest-api
     path: specs/rest-api/
-    description: Vault-scoped HTTP CRUD over arbitrary files plus natural-language search over Markdown.
+    description: Vault-scoped HTTP CRUD over arbitrary files, file-and-folder path operations (list, delete, move, copy), tags, grep, and natural-language search over Markdown.
     status: active
   - name: mcp-server
     path: specs/mcp-server/
@@ -154,3 +154,31 @@ changes:
     spec: mcp-server
     status: complete
     depends_on: ["0005"]
+  - id: "0019"
+    name: unified-list-and-delete
+    path: changes/0019-unified-list-and-delete.md
+    description: Type-agnostic `list` / `delete` (REST /v1/vaults/:slug/paths) replace list_files, list_folders, delete_file, and delete_folder (breaking, no aliases); segment-ordered walk fixes cursor skipping; MCP tool design rule of one unix-verb tool per file-and-folder operation.
+    spec: rest-api
+    status: draft
+    depends_on: ["0012", "0014", "0018"]
+  - id: "0020"
+    name: move-and-copy
+    path: changes/0020-move-and-copy.md
+    description: "`move` and `copy` for files and folders (REST paths/*path:move and :copy): exact destination, no clobber without overwrite, Obsidian-style internal-link rewriting on move by default, moved notes re-embedded, atomic folder copy; new error code already_exists."
+    spec: rest-api
+    status: draft
+    depends_on: ["0019"]
+  - id: "0021"
+    name: list-tags
+    path: changes/0021-list-tags.md
+    description: Read-only `list_tags` (REST GET /v1/vaults/:slug/tags) listing indexed inline tags with distinct-document counts, no parent roll-up, scoped by path prefix.
+    spec: vault-indexer
+    status: draft
+    depends_on: ["0008", "0014", "0018"]
+  - id: "0022"
+    name: grep
+    path: changes/0022-grep.md
+    description: Read-only `grep` (REST POST /v1/vaults/:slug/grep) for literal or regex line search over text files on disk, with hard size/byte/time limits, a truncated flag, and worker-isolated regex evaluation against ReDoS.
+    spec: rest-api
+    status: draft
+    depends_on: ["0014", "0018", "0019"]

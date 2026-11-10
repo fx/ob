@@ -39,27 +39,50 @@ A session MAY be confined to one vault and one folder prefix, so a client (typic
 - The scope MUST be bound at `initialize` and stored with the session. A request whose URL scope differs from the scope stored for its `Mcp-Session-Id` MUST be rejected as an unknown session (HTTP `404`, `-32001`) and MUST NOT be executed.
 - In a scoped session the `vault` argument MUST become optional (defaulting to the scoped slug) and the advertised `inputSchema` MUST drop `"vault"` from `required`. A different slug MUST surface `vault_not_found`.
 - A scoped session's `initialize` result MUST carry an `instructions` string stating that all paths are relative to a scoped root, that `vault` may be omitted, and that nothing outside that root is reachable through the session. It MUST NOT describe the root as private — the server has no auth, and the same files stay reachable through the unscoped mount.
+- The path tools, `list_tags`, and `grep` follow the same confinement: `list`, `delete`, `copy`, and `grep` address and report only paths inside the scope; both paths of a `move` or `copy` are scope-relative, so neither can leave the scope; `list_tags` counts only documents inside the scope, with a `prefix` nested under it. Link rewriting after a `move` resolves links against the whole vault but rewrites only notes inside the scope, as [Link rewriting › Notes scanned](../rest-api/link-rewriting.md#notes-scanned) defines; rewritten link text is note content and, like all content, is not path-translated.
 - Vault-level counts reported by `vault_status` (`documents`, `chunks`, `pending`, `errors`) remain vault-wide in a scoped session; the tool description MUST say so.
 - Scoping is a **containment** mechanism for a cooperating client, NOT an authentication or authorization boundary — see [Constraints](#constraints).
 
+### Tool design rules
+
+These rules govern the current tool set and every tool added later.
+
+- **One tool per operation.** Each tool performs exactly one operation. The server MUST NOT expose a dispatcher tool that selects among several operations by argument (a single `file_op` with an `op` field, say): MCP clients grant permissions and honor `readOnlyHint` per tool, so a combined tool would force a read-only operation to carry a mutating one's permission.
+- **One tool for files and folders.** An operation that logically applies to both files and folders MUST be a single tool that works on either, never a per-type pair. It is named for the unix verb it mimics and follows that tool's semantics: `list` (`ls`), `delete` (`rm`, with `recursive` for `rm -r`), `move` (`mv -T`), `copy` (`cp -T`, with `recursive` for `cp -r`). Mutating path tools refuse to replace an existing path unless asked (`overwrite: true`), the safer default of `mv -n` / `cp -n`.
+- **Type-specific tools only for type-specific operations.** A tool is specific to files or to folders only when its operation is meaningless for the other type: `read_file`, `write_file`, `patch_file`, and `append_file` act on file content, and `create_folder` (`mkdir -p`) creates a folder.
+- **REST parity.** Each tool mirrors exactly one REST endpoint (see [REST API](../rest-api/)), and both call the same service-core function.
+
+#### Scenario: No per-type duplicate of a path tool
+
+- **GIVEN** a running server
+- **WHEN** the client calls `tools/list`
+- **THEN** it contains `list`, `delete`, `move`, and `copy`
+- **AND** it contains none of `list_files`, `list_folders`, `delete_file`, `delete_folder`
+
 ### Tool surface
 
-The server MUST register exactly these tools. Argument schemas are JSON Schema; every error result MUST set `isError: true` and contain a single text content block with the JSON `{ code, message }`. The read tools (`list_vaults`, `vault_status`, `list_files`, `read_file`, `list_folders`, `search`) MUST advertise `annotations: { readOnlyHint: true }` in `tools/list`, scoped sessions included, so clients can call them without treating them as mutating; no other tool sets it.
+> The path tools (`list`, `delete`, `move`, `copy`), `list_tags`, and `grep` are specified by draft changes [0019](../../changes/0019-unified-list-and-delete.md), [0020](../../changes/0020-move-and-copy.md), [0021](../../changes/0021-list-tags.md), and [0022](../../changes/0022-grep.md) and are not yet implemented; until 0019 lands the server still registers `list_files`, `list_folders`, `delete_file`, and `delete_folder`. The table below is the end state once all four have landed; each change adds its own tools, and the registered set in between is whatever the changes landed so far add up to.
+
+The server MUST register exactly these tools. Argument schemas are JSON Schema; every error result MUST set `isError: true` and contain a single text content block with the JSON `{ code, message }`. The read tools (`list_vaults`, `vault_status`, `list`, `read_file`, `search`, `list_tags`, `grep`) MUST advertise `annotations: { readOnlyHint: true }` in `tools/list`, scoped sessions included, so clients can call them without treating them as mutating; no other tool sets it.
 
 | Name | Input | Output | Mirrors |
 |---|---|---|---|
 | `list_vaults` | `{}` | `VaultSummary[]` | `GET /v1/vaults` |
 | `vault_status` | `{ vault: string }` | `VaultSummary` | `GET /v1/vaults/:slug` |
-| `list_files` | `{ vault, prefix?, limit?, cursor? }` | `{ items: FileEntry[], nextCursor }` | `GET /v1/vaults/:slug/files` |
+| `list` | `{ vault, prefix?, limit?, cursor?, type?, recursive? }` — `type` is `"file"` or `"folder"`; `recursive` defaults to `true` | `{ items: PathEntry[], nextCursor }` | `GET /v1/vaults/:slug/paths` |
 | `read_file` | `{ vault, path, format? }` — `format` is `"text"` (default) or `"binary"` | `{ path, contentType, content, encoding, frontmatter?, pdf?, mtimeMs, size, sha256 }` where `encoding` is `"utf-8"` for text files and extracted-PDF reads, `"base64"` for binary | `GET /v1/vaults/:slug/files/*path` |
 | `write_file` | `{ vault, path, content, encoding?, contentType?, frontmatter? }` — `encoding` defaults to `"utf-8"`; `frontmatter` is only valid when path is Markdown | `{ path, contentType, mtimeMs, size, sha256, created, indexed }` | `PUT /v1/vaults/:slug/files/*path` |
 | `patch_file` | `{ vault, path, edits: [{ old, new, replaceAll? }] }` — text files only | `{ path, contentType, mtimeMs, size, sha256, indexed, edits: number }` | `PATCH /v1/vaults/:slug/files/*path` |
 | `append_file` | `{ vault, path, content }` — text files only | `{ path, contentType, mtimeMs, size, sha256, indexed }` | `POST /v1/vaults/:slug/files/*path:append` |
-| `delete_file` | `{ vault, path }` | `{ deleted: boolean }` | `DELETE /v1/vaults/:slug/files/*path` |
-| `list_folders` | `{ vault, prefix?, limit?, cursor? }` | `{ items: FolderEntry[], nextCursor }` where `FolderEntry = { path, mtimeMs }` | `GET /v1/vaults/:slug/folders` |
 | `create_folder` | `{ vault, path }` — idempotent (mkdir -p) | `{ path, mtimeMs, created }` | `PUT /v1/vaults/:slug/folders/*path` |
-| `delete_folder` | `{ vault, path, recursive? }` — default `recursive: false` refuses non-empty folders | `{ deleted: boolean }` (always `true` on success; the 404-on-missing semantic preserves the field for type parity with `delete_file`) | `DELETE /v1/vaults/:slug/folders/*path` |
+| `delete` | `{ vault, path, recursive? }` — file or folder; `recursive` defaults to `false` | `{ deleted: true }` | `DELETE /v1/vaults/:slug/paths/*path` |
+| `move` | `{ vault, path, destination, overwrite?, updateLinks? }` — file or folder; `overwrite` defaults to `false`, `updateLinks` to `true` | the REST `:move` response body | `POST /v1/vaults/:slug/paths/*path:move` |
+| `copy` | `{ vault, path, destination, overwrite?, recursive? }` — file, or folder with `recursive: true`; both flags default to `false` | the REST `:copy` response body | `POST /v1/vaults/:slug/paths/*path:copy` |
 | `search` | `{ vault, query, limit?, filter?, mode?, threshold?, mmrLambda?, maxPerPath? }` | `{ hits: SearchHit[] }` | `POST /v1/vaults/:slug/search` |
+| `list_tags` | `{ vault, prefix?, limit? }` | `{ items: { tag, count }[], total }` | `GET /v1/vaults/:slug/tags` |
+| `grep` | `{ vault, pattern, regex?, ignoreCase?, prefix?, limit?, context? }` | the REST grep response body | `POST /v1/vaults/:slug/grep` |
+
+`PathEntry`, and the behavior, defaults, limits, and errors of `list`, `delete`, `move`, `copy`, and `grep`, are owned by [REST API › Path operations](../rest-api/index.md#path-operations), [Link rewriting](../rest-api/link-rewriting.md), and [REST API › Grep](../rest-api/index.md#grep); `list_tags` by [Vault Indexer › Tag listing](../vault-indexer/index.md#tag-listing). The tools take the same values as REST, as JSON booleans and numbers rather than query strings, and return the same payloads; `delete` returns `{ deleted: true }` where REST answers `204`.
 
 `read_file` behavior by file type and `format` (extraction semantics — page markers, whitespace normalization, `pdf` metadata object, `sha256`/`size` meaning — are defined once in [Change 0013](../../changes/0013-pdf-text-extraction.md) and the shared core; both adapters MUST reuse them):
 
@@ -71,7 +94,16 @@ The server MUST register exactly these tools. Argument schemas are JSON Schema; 
 
 `patch_file`'s tool description MUST tell the agent exactly when to prefer it over `write_file`: "Use `patch_file` whenever you would otherwise re-send the entire file with small changes. Each `old` must appear exactly once in the file, or pass `replaceAll: true`. Edits apply in order and the patch is atomic — any failed edit aborts the whole call." `append_file`'s description MUST direct callers to use it for daily-note / log / capture flows where no existing context is needed.
 
-`list_folders`'s description MUST state that it complements `list_files` and is the only way to see folders that contain no files (e.g. an empty leaf like `social-graphs/people/peter-thiel/`). `create_folder`'s description MUST state that it is idempotent (`mkdir -p` semantics) and that creating a folder whose path already exists as a file returns `invalid_path`. `delete_folder`'s description MUST state that the default refuses non-empty folders with `folder_not_empty` and that `recursive: true` is required to opt into recursive removal.
+`create_folder`'s description MUST state that it is idempotent (`mkdir -p` semantics) and that creating a folder whose path already exists as a file returns `invalid_path`.
+
+The path tools' descriptions MUST state that they work on files and folders alike, and:
+
+- `list` — that entries carry `type: "file" | "folder"`, that empty folders are listed, and what `type` and `recursive: false` do.
+- `delete` — that a non-empty folder is refused with `folder_not_empty` unless `recursive: true`, which removes everything under it.
+- `move` — that `destination` is the exact new path (not a folder to move into), that an existing destination is refused with `already_exists` unless `overwrite: true` (which never applies to folders), and that internal links pointing at the moved files are rewritten unless `updateLinks: false`, with the rewritten notes (each with its own `indexed`) and failed notes reported; that the top-level `indexed` covers the moved paths only (a moved note that was also rewritten counts among them; rewritten notes that did not move report only in their own entry) and is `true` only when at least one moved note was indexed and every index update of moved paths succeeded; and that in a scoped session only notes inside the scope are rewritten, so links from notes outside the scope to the moved files can break and are not reported.
+- `copy` — that a folder needs `recursive: true`, that an existing destination is refused unless `overwrite: true` (files only), that links are not rewritten, and that `indexed` is `true` only when at least one copied note was indexed and every index update succeeded.
+
+`list_tags`'s description MUST state that it lists inline tags from the search index with the number of documents carrying each, that nested tags are not rolled up into their parents, and that every listed tag can be passed to `search` as `filter.tag`. `grep`'s description MUST state that it matches exact text (or a regular expression with `regex: true`) line by line in text files on disk, that PDFs and binaries are not searched, that results are capped and flagged `truncated`, and that `search` is the tool for finding notes by meaning.
 
 `search` MUST document in its tool description that it ranks Markdown content only; binary files are not embedded in v1. The description MUST also state: default `mode: "hybrid"` blends vector and full-text retrieval and is the right choice for almost every query; pass `mode: "vector"` only for pure-semantics evaluation; pass `mode: "fts"` only for exact-phrase / proper-noun queries where you've confirmed semantics aren't needed. The other knobs (`threshold`, `mmrLambda`, `maxPerPath`) are tuning levers; the defaults are good.
 
@@ -161,13 +193,18 @@ src/mcp/
   tools/
     list_vaults.ts
     vault_status.ts
-    list_files.ts
+    list.ts
     read_file.ts
     write_file.ts
     patch_file.ts
     append_file.ts
-    delete_file.ts
+    create_folder.ts
+    delete.ts
+    move.ts
+    copy.ts
     search.ts
+    list_tags.ts
+    grep.ts
   resources.ts    # obvault:// URI handlers
   scope.ts        # URL scope parsing + scoped service-deps wrapper
 ```
@@ -227,3 +264,7 @@ All tool handlers MUST call into the same internal service modules used by REST 
 | 2026-07-01 | `read_file` gains `format?: "text" \| "binary"` (default `"text"`): PDFs now return extracted text with `pdf: { pages, hasTextLayer }` metadata by default; `format: "binary"` returns verbatim base64 for any file. New error code `extraction_failed` for unparseable PDFs. | [Change 0013](../../changes/0013-pdf-text-extraction.md) |
 | 2026-08-09 | Added Session scoping: `/mcp/:slug/:prefix{.+}` binds a session to one vault and folder prefix, and `/mcp/:slug` to a vault root, presented to the client as the vault root. Scoped sessions make `vault` optional, carry `instructions`, and reject session ids presented on a different scope. Containment only — not an auth boundary. | [Change 0014](../../changes/0014-mcp-folder-scoping.md) |
 | 2026-10-25 | The six read tools advertise `annotations.readOnlyHint: true` in `tools/list`. | [Change 0018](../../changes/0018-mcp-read-only-annotations.md) |
+| 2026-11-09 | New Tool design rules: one tool per operation (no dispatcher tool), and one unix-verb tool for any operation that applies to files and folders, for current and future tools. `list` and `delete` replace `list_files` / `list_folders` and `delete_file` / `delete_folder` (**breaking**: the four tools are removed, no aliases); `list` joins the `readOnlyHint` set in their place. | [Change 0019](../../changes/0019-unified-list-and-delete.md) |
+| 2026-11-09 | New `move` (links rewritten by default) and `copy` tools mirroring the REST `:move` / `:copy` routes, with scoped-session rules for both paths and for link rewriting. | [Change 0020](../../changes/0020-move-and-copy.md) |
+| 2026-11-09 | New read-only `list_tags` tool. | [Change 0021](../../changes/0021-list-tags.md) |
+| 2026-11-09 | New read-only `grep` tool. | [Change 0022](../../changes/0022-grep.md) |
