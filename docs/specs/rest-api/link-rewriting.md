@@ -31,11 +31,11 @@ The rules below are ob's own, modelled on Obsidian's behavior. Obsidian does not
 
 ### Resolution
 
-`resolve(link, S, F)` maps a recognized link in the note at vault-relative path `S` to one file of the vault file set `F`, or to nothing. Path comparison is case-insensitive, so a step can find several files that differ only in case. Wherever a step has more than one candidate, the **case tie-break** picks one: a candidate whose path matches the linkpath with exact case wins; if none or several do, the first of them in *path order* wins, where path order is the segment-by-segment code-point order `GET /v1/vaults/:slug/paths` lists in. `match(P)` takes the files whose path equals `P` case-insensitively, or, if there are none, those whose path equals `P.md` case-insensitively, and returns one of them by the case tie-break (or nothing).
+`resolve(link, S, F)` maps a recognized link in the note at vault-relative path `S` to one file of the vault file set `F`, or to nothing. Path comparison is case-insensitive, so a step can find several files that differ only in case. Wherever a step has more than one candidate, the **case tie-break** picks one. Each candidate was found against a *target form* of the linkpath: the linkpath itself, or the linkpath with the implicit `.md` appended when the candidate was found as `P.md` (in `match`) or as `/L.md` (in step 3). A candidate *matches in exact case* when its path (for step 3, its path's ending) equals its target form byte for byte. Exact-case candidates win; if none or several are, the first of them in *path order* wins, where path order is the segment-by-segment code-point order `GET /v1/vaults/:slug/paths` lists in. `match(P)` takes the files whose path equals `P` case-insensitively, or, if there are none, those whose path equals `P.md` case-insensitively, and returns one of them by the case tie-break (or nothing).
 
 1. **Relative.** (Case tie-break via `match`.) If the linkpath starts with `./` or `../`, or the link is a Markdown link whose destination does not start with `/`, let `R` be the linkpath joined to the folder of `S` and normalized. If `match(R)` exists, it is the result; if it does not, resolution continues at step 2. A relative linkpath that climbs above the vault root resolves to nothing and does not continue.
 2. **Vault-absolute.** (Case tie-break via `match`.) Reached when step 1 did not apply or found nothing. If `match(L)` exists, where `L` is the linkpath with one leading `/` removed, it is the result; otherwise resolution continues at step 3.
-3. **By name.** Reached when step 2 found nothing. The candidates are the files whose path ends with `/L` or `/L.md`. One candidate is the result. Among several, candidates whose path ends with the linkpath in exact case are preferred if there are any; then the result is the candidate in the same folder as `S`, else the one with the fewest path segments, else the first in path order. This is the case tie-break with the folder and segment preferences inserted before the path-order fallback.
+3. **By name.** Reached when step 2 found nothing. The candidates are the files whose path ends with `/L` or `/L.md`. One candidate is the result. Among several, candidates that match in exact case (their path ends with `/` plus their target form, `L` or `L.md`) are preferred if there are any; then the result is the candidate in the same folder as `S`, else the one with the fewest path segments, else the first in path order. This is the case tie-break with the folder and segment preferences inserted before the path-order fallback.
 4. **Unresolved.** Reached when step 3 has no candidate: the link is unresolved.
 
 Resolution is a pure function of the link, the note's path, and the file set, and ob evaluates it against the vault before the move and again after it.
@@ -116,8 +116,10 @@ This covers both halves of a move: links into the moved files, and the moved not
 
 #### Scenario: Case-only duplicates resolve deterministically
 
-- **GIVEN** `FOO.md` and `Foo.md` in the vault root, and `a.md` containing `[[foo]]` and `[[Foo]]`
-- **THEN** `[[Foo]]` resolves to `Foo.md` (exact case), and `[[foo]]`, which matches neither in exact case, resolves to `FOO.md`, first in path order (`O` sorts before `o`)
+- **GIVEN** `FOO.md` and `Foo.md` in the vault root, `dir/FOO.md` and `dir/Foo.md`, and `a.md` containing `[[foo]]`, `[[Foo]]`, and `[[dir/Foo]]`
+- **THEN** `[[Foo]]` resolves to `Foo.md`: it is found as `P.md`, so its target form is `Foo.md`, which `Foo.md` matches in exact case
+- **AND** `[[dir/Foo]]` resolves to `dir/Foo.md` the same way (target form `dir/Foo.md`), not to `dir/FOO.md` by path order
+- **AND** `[[foo]]`, whose target form `foo.md` neither file matches in exact case, resolves to `FOO.md`, first in path order (`O` sorts before `o`)
 - **WHEN** `FOO.md` is moved to `archive/FOO.md`
 - **THEN** `[[foo]]` would now resolve to `Foo.md`, so it is rewritten; the bare name `FOO` would resolve to `Foo.md` too, so `a.md` contains `[[archive/FOO]]`, while `[[Foo]]` is unchanged
 
