@@ -377,11 +377,13 @@ const hasExtension = (p: string): boolean => /\.[^./]+$/.test(p.slice(p.lastInde
  *
  * Every candidate form is checked the way it will be READ: written into a
  * copy of the link's own construct (`[[…]]` or `[…](…)`, alias, fragment
- * and all), parsed with `findLinks`, and accepted only when exactly that one
- * link comes back, its linkpath spans the whole replacement, and that
- * parsed linkpath resolves to `target`. A target name that the syntax
- * cannot carry — `#`, `|`, or `]]` in a wikilink — therefore never yields a
- * rewrite that would be read as a different link.
+ * and all), parsed with `findLinks`, and accepted only when exactly one
+ * re-parsed link of the same kind spans the whole replacement, no other
+ * re-parsed link overlaps it, and that link's parsed linkpath resolves to
+ * `target`. Links nested in a Markdown label (a linked image, a wikilink in
+ * the text) do not count against it. A target name that the syntax cannot
+ * carry — `#`, `|`, or `]]` in a wikilink, a `[[…]]` inside a Markdown
+ * destination — therefore never yields a rewrite read as a different link.
  */
 function newLinkpath(
   link: FoundLink,
@@ -399,13 +401,17 @@ function newLinkpath(
     const raw = link.kind === "md" ? encodeMd(bare, link.angle) : bare;
     const snippet =
       text.slice(link.constructStart, link.start) + raw + text.slice(link.end, link.constructEnd);
+    const end = offset + raw.length;
     const parsed = findLinks(snippet);
-    const only = parsed.length === 1 ? (parsed[0] as FoundLink) : null;
+    // Links nested in a label (a linked image, a wikilink in the text) are
+    // fine; what must hold is that exactly one link of this kind spans the
+    // replacement and no other link reaches into it.
+    const spanning = parsed.filter(
+      (l) => l.kind === link.kind && l.start === offset && l.end === end,
+    );
+    const only = spanning.length === 1 ? (spanning[0] as FoundLink) : null;
     const intact =
-      only !== null &&
-      only.kind === link.kind &&
-      only.start === offset &&
-      only.end === offset + raw.length;
+      only !== null && parsed.every((l) => l === only || l.end <= offset || l.start >= end);
     return intact && resolveLink(only, s1, after)?.path === target ? raw : null;
   };
   const relative = isRelativeSyntax(link.linkpath);

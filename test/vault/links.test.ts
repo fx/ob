@@ -422,4 +422,27 @@ describe("rewritten text", () => {
       "[x](d/new.md) ![y](/d/new.md)",
     );
   });
+
+  test("links nested in a Markdown label do not block rewriting the outer link", () => {
+    const files = ["old.md", "icon.png", "w.md", "n.md"];
+    expect(
+      rewrite(
+        files,
+        { "old.md": "d/new.md" },
+        "n.md",
+        "[![alt](icon.png)](old.md) [see [[w]]](old.md)",
+      ),
+    ).toBe("[![alt](icon.png)](d/new.md) [see [[w]]](d/new.md)");
+    // The nested image itself is rewritten too when it is what moved.
+    expect(
+      rewrite(files, { "icon.png": "img/icon.png" }, "n.md", "[![alt](icon.png)](old.md)"),
+    ).toBe("[![alt](img/icon.png)](old.md)");
+  });
+
+  test("an emitted destination that creates a second link inside it still fails", () => {
+    // `[t](x[[y]]z.md)` would also be read as the wikilink `[[y]]`.
+    const files = ["old.md", "y.md", "n.md"];
+    expect(rewrite(files, { "old.md": "x[[y]]z.md" }, "n.md", "[t](old.md)")).toBe("unresolvable");
+    expect(rewrite(files, { "old.md": "a]] [[b.md" }, "n.md", "[[old]]")).toBe("unresolvable");
+  });
 });
