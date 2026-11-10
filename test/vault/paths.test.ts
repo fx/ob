@@ -730,6 +730,37 @@ describe("deletePath on a folder", () => {
     }
   });
 
+  test("an ancestor swapped for a symlink before the emptiness probe is invalid_path", async () => {
+    const fx = makeVaultFixture();
+    mkdirSync(join(fx.root, "a", "e"), { recursive: true });
+    const outside = outsideDir();
+    put(outside, "e/keep.md", "OUTSIDE");
+    // Hold the folder's lock so the delete has validated its path and waits;
+    // swap the ancestor meanwhile, then let the delete run.
+    let release!: () => void;
+    const held = withPathLock(
+      pathLockKey(fx.root, "a/e"),
+      () =>
+        new Promise<void>((r) => {
+          release = r;
+        }),
+    );
+    const del = deletePath(fx.deps, fx.slug, "a/e").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    renameSync(join(fx.root, "a"), join(fx.root, "a-real"));
+    symlinkSync(outside, join(fx.root, "a"));
+    release();
+    await held;
+    const err = await del;
+    expect(err).toBeInstanceOf(InvalidPathError);
+    expect(err).not.toBeInstanceOf(FolderNotEmptyError);
+    expect(existsSync(join(outside, "e/keep.md"))).toBe(true);
+    expect(existsSync(join(fx.root, "a-real/e"))).toBe(true);
+  });
+
   test("a failed recursive removal leaves every index entry in place", async () => {
     const fx = makeVaultFixture();
     put(fx.root, "d/n.md");

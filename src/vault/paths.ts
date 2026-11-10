@@ -350,6 +350,8 @@ async function removeFolder(
   recursive: boolean,
 ): Promise<void> {
   if (!recursive) {
+    // The emptiness probe reads the folder, so it is checked like a removal.
+    await assertNotSymlinkEscape(abs, root);
     if ((await fs.readdir(abs)).length > 0) throw new FolderNotEmptyError(rel);
     await deps.hooks?.beforeRemove?.(rel);
     await assertNotSymlinkEscape(abs, root);
