@@ -392,6 +392,11 @@ export function scopeDeps(deps: McpRoutesDeps, scope: McpScope): McpRoutesDeps {
     ...deps,
     vault: (s) => (s === scope.slug ? { ...inner, root } : null),
     indexer,
+    // Link rewriting after a move resolves links over the WHOLE vault and
+    // rewrites only notes inside the scope; this is the one place the real
+    // vault root and the prefix reach the service core, and nothing it
+    // returns carries either.
+    linkScope: (s) => (s === scope.slug ? { root: inner.root, prefix: scope.prefix } : null),
   };
 }
 

@@ -942,12 +942,14 @@ describe("scoped vault visibility", () => {
     expect(scoped.tools.map((t) => t.name).sort()).toEqual(
       [
         "append_file",
+        "copy",
         "create_folder",
         "delete",
         "grep",
         "list",
         "list_tags",
         "list_vaults",
+        "move",
         "patch_file",
         "read_file",
         "search",

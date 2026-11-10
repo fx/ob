@@ -76,12 +76,14 @@ import {
 import { type ToolRegistry, buildMcpServer, createToolRegistry } from "./server.ts";
 import type { ToolDefinition } from "./tool.ts";
 import { appendFileTool } from "./tools/append_file.ts";
+import { copyTool } from "./tools/copy.ts";
 import { createFolderTool } from "./tools/create_folder.ts";
 import { deleteTool } from "./tools/delete.ts";
 import { grepTool } from "./tools/grep.ts";
 import { listTool } from "./tools/list.ts";
 import { listTagsTool } from "./tools/list_tags.ts";
 import { listVaultsTool } from "./tools/list_vaults.ts";
+import { moveTool } from "./tools/move.ts";
 import { patchFileTool } from "./tools/patch_file.ts";
 import { readFileTool } from "./tools/read_file.ts";
 import { searchTool } from "./tools/search.ts";
@@ -117,6 +119,8 @@ export function buildToolRegistry(deps: McpRoutesDeps): ToolRegistry {
   registry.register(appendFileTool(deps));
   registry.register(createFolderTool(deps));
   registry.register(deleteTool(deps));
+  registry.register(moveTool(deps));
+  registry.register(copyTool(deps));
   registry.register(searchTool(deps));
   registry.register(listTagsTool(deps));
   registry.register(grepTool(deps));
@@ -359,6 +363,8 @@ export function buildMcpRoutes(deps: McpRoutesDeps): Hono {
     add(appendFileTool(scoped));
     add(createFolderTool(scoped));
     add(deleteTool(scoped));
+    add(moveTool(scoped));
+    add(copyTool(scoped));
     add(searchTool(scoped));
     add(listTagsTool(scoped));
     add(grepTool(scoped));
