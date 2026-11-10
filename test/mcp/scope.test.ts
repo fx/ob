@@ -22,6 +22,7 @@ import type {
   TagListing,
   TagListingOptions,
 } from "../../src/indexer/index.ts";
+import { isIndexablePath } from "../../src/indexer/scanner.ts";
 import type { McpRoutesDeps } from "../../src/mcp/index.ts";
 import type { ResourceHandler } from "../../src/mcp/resources.ts";
 import {
@@ -54,13 +55,25 @@ interface IndexerCalls {
   readonly drop: { slug: string; path: string }[];
   readonly search: { slug: string; query: string; opts: SearchOptions | undefined }[];
   readonly tags: { slug: string; opts: TagListingOptions | undefined }[];
+  readonly indexedPaths: { slug: string; prefix: string }[];
+  readonly isIndexable: { slug: string; path: string }[];
   readonly status: string[];
   readonly list: number[];
   readonly stop: number[];
 }
 
 function emptyCalls(): IndexerCalls {
-  return { reindex: [], drop: [], search: [], tags: [], status: [], list: [], stop: [] };
+  return {
+    reindex: [],
+    drop: [],
+    search: [],
+    tags: [],
+    indexedPaths: [],
+    isIndexable: [],
+    status: [],
+    list: [],
+    stop: [],
+  };
 }
 
 function idxStatus(slug: string): IndexerStatus {
@@ -102,6 +115,8 @@ interface ScopeFixture {
   root(slug: string): string;
   setHits(hits: readonly SearchHit[]): void;
   setTags(listing: TagListing): void;
+  /** Vault-relative paths the fake index holds; `indexedPaths` filters them by prefix. */
+  setIndexed(paths: readonly string[]): void;
 }
 
 /**
@@ -116,6 +131,7 @@ function makeScopeFixture(slugs: readonly string[] = ["v"]): ScopeFixture {
   const calls = emptyCalls();
   let hits: readonly SearchHit[] = [];
   let tagListing: TagListing = { items: [], total: 0 };
+  let indexed: readonly string[] = [];
 
   const indexer: Indexer = {
     status: (s) => {
@@ -143,6 +159,15 @@ function makeScopeFixture(slugs: readonly string[] = ["v"]): ScopeFixture {
       calls.tags.push({ slug: s, opts });
       return tagListing;
     },
+    indexedPaths: async (s, prefix) => {
+      calls.indexedPaths.push({ slug: s, prefix });
+      return indexed.filter((p) => p.startsWith(prefix));
+    },
+    // The real predicate on the REAL vault root, as the real indexer does.
+    isIndexable: async (s, p) => {
+      calls.isIndexable.push({ slug: s, path: p });
+      return isIndexablePath(root(s), p);
+    },
   };
 
   const supervisor: Supervisor = {
@@ -169,6 +194,9 @@ function makeScopeFixture(slugs: readonly string[] = ["v"]): ScopeFixture {
     },
     setTags: (listing): void => {
       tagListing = listing;
+    },
+    setIndexed: (p): void => {
+      indexed = p;
     },
   };
 }
@@ -824,6 +852,44 @@ describe("scopeDeps indexer", () => {
     await scoped.indexer.drop("v", "memory.md");
     expect(fx.calls.reindex).toEqual([{ slug: "v", path: "memory.md" }]);
     expect(fx.calls.drop).toEqual([{ slug: "v", path: "memory.md" }]);
+  });
+
+  test("isIndexable is asked about the vault-relative path", async () => {
+    const fx = makeScopeFixture();
+    mkdirSync(join(fx.root("v"), "agents", "a"), { recursive: true });
+    writeFileSync(join(fx.root("v"), "agents", "a", "note.md"), "x");
+    const scoped = scopeDeps(fx.deps, AGENTS_A);
+    expect(await scoped.indexer.isIndexable("v", "note.md")).toBe(true);
+    expect(fx.calls.isIndexable).toEqual([{ slug: "v", path: "agents/a/note.md" }]);
+  });
+
+  test("indexedPaths prefixes the input and strips and filters the output", async () => {
+    const fx = makeScopeFixture();
+    // `agents/ab/…` shares the scope's bytes but is outside it; a fake index
+    // that over-reports must still never leak it.
+    fx.setIndexed(["agents/a/f/x.md", "agents/a/f/y/z.md", "agents/ab/f/x.md", "top.md"]);
+    const scoped = scopeDeps(
+      {
+        ...fx.deps,
+        indexer: {
+          ...fx.deps.indexer,
+          indexedPaths: async () => fx.deps.indexer.indexedPaths("v", ""),
+        },
+      },
+      AGENTS_A,
+    );
+    expect(await scoped.indexer.indexedPaths("v", "f/")).toEqual(["f/x.md", "f/y/z.md"]);
+    const direct = scopeDeps(fx.deps, AGENTS_A);
+    expect(await direct.indexer.indexedPaths("v", "f/")).toEqual(["f/x.md", "f/y/z.md"]);
+    expect(fx.calls.indexedPaths.at(-1)).toEqual({ slug: "v", prefix: "agents/a/f/" });
+  });
+
+  test("the vault-root scope passes indexedPaths through unchanged", async () => {
+    const fx = makeScopeFixture();
+    fx.setIndexed(["f/x.md", "g/y.md"]);
+    const scoped = scopeDeps(fx.deps, ROOT_SCOPE);
+    expect(await scoped.indexer.indexedPaths("v", "f/")).toEqual(["f/x.md"]);
+    expect(fx.calls.indexedPaths).toEqual([{ slug: "v", prefix: "f/" }]);
   });
 
   test("forces filter.pathPrefix WITH a trailing slash", async () => {

@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type ScannerFile,
+  isIndexablePath,
   isMarkdownFile,
   scanVault,
   shouldIgnorePath,
@@ -44,6 +45,56 @@ describe("isMarkdownFile", () => {
     ["foo", false],
   ])("%s → %s", (p, ok) => {
     expect(isMarkdownFile(p)).toBe(ok);
+  });
+});
+
+describe("isIndexablePath", () => {
+  // One real tree for the whole table: the filesystem half of the predicate
+  // is judged with `lstat`, never following a link.
+  const root = tmpRoot();
+  const outside = tmpRoot();
+  writeMd(outside, "target.md");
+  for (const rel of [
+    "a.md",
+    "UPPER.MD",
+    "long.Markdown",
+    "notes/deep/n.md",
+    "notes/plain.txt",
+    "node_modules/pkg/n.md",
+    "sub/node_modules/n.md",
+    "real/inside.md",
+    "file.md",
+  ]) {
+    writeMd(root, rel);
+  }
+  mkdirSync(join(root, "folder.md"));
+  symlinkSync(join(outside, "target.md"), join(root, "link.md"));
+  symlinkSync(join(root, "real"), join(root, "linked"));
+  mkdirSync(join(root, ".obsidian"));
+  writeMd(root, ".obsidian/x.md");
+  writeMd(root, "notes/.hidden.md");
+
+  test.each([
+    ["a.md", true],
+    ["UPPER.MD", true],
+    ["long.Markdown", true],
+    ["notes/deep/n.md", true],
+    ["./a.md", true],
+    ["notes/plain.txt", false],
+    [".obsidian/x.md", false],
+    ["notes/.hidden.md", false],
+    ["node_modules/pkg/n.md", false],
+    ["sub/node_modules/n.md", false],
+    ["link.md", false],
+    ["linked/inside.md", false],
+    ["folder.md", false],
+    ["missing.md", false],
+    ["file.md/child.md", false],
+    ["../escape.md", false],
+    ["/abs.md", false],
+    ["", false],
+  ])("%s → %s", async (rel, expected) => {
+    expect(await isIndexablePath(root, rel)).toBe(expected);
   });
 });
 

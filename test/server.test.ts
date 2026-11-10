@@ -46,6 +46,8 @@ function fakeIndexer(
     reindex: async () => undefined,
     drop: async () => undefined,
     tags: async () => ({ items: [], total: 0 }),
+    indexedPaths: async () => [],
+    isIndexable: async () => false,
     stop,
   };
 }
@@ -925,6 +927,8 @@ describe("main", () => {
       reindex: async () => undefined,
       drop: async () => undefined,
       tags: async () => ({ items: [], total: 0 }),
+      indexedPaths: async () => [],
+      isIndexable: async () => false,
       stop: () => new Promise<void>(() => undefined),
     };
     let exitCode: number | undefined;

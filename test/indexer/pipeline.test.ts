@@ -129,6 +129,7 @@ describe("buildPipeline", () => {
       chunkCount: async () => 0,
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
+      indexedPaths: async () => [],
       close: () => undefined,
     };
     const pipe = buildPipeline(
@@ -167,6 +168,7 @@ describe("buildPipeline", () => {
       chunkCount: realStore.chunkCount.bind(realStore),
       fingerprint: realStore.fingerprint.bind(realStore),
       fingerprints: realStore.fingerprints.bind(realStore),
+      indexedPaths: async () => [],
       close: () => realStore.close(),
     };
     const pipe = buildPipeline(
@@ -220,6 +222,7 @@ describe("buildPipeline", () => {
       chunkCount: async () => 0,
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
+      indexedPaths: async () => [],
       close: () => undefined,
     };
     const pipe = buildPipeline(
@@ -334,6 +337,7 @@ describe("buildPipeline", () => {
       chunkCount: async () => 0,
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
+      indexedPaths: async () => [],
       close: () => undefined,
     };
     const pipe = buildPipeline(
@@ -366,6 +370,7 @@ describe("buildPipeline", () => {
       chunkCount: async () => 0,
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
+      indexedPaths: async () => [],
       close: () => undefined,
     };
     const pipe = buildPipeline(
@@ -395,6 +400,7 @@ describe("buildPipeline", () => {
         throw new Error("fp boom");
       },
       fingerprints: async () => new Map(),
+      indexedPaths: async () => [],
       close: () => undefined,
     };
     const pipe = buildPipeline({
@@ -428,6 +434,7 @@ describe("buildPipeline", () => {
       },
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
+      indexedPaths: async () => [],
       close: () => undefined,
     };
     const pipe = buildPipeline({
@@ -483,6 +490,7 @@ describe("buildPipeline", () => {
       chunkCount: async () => 0,
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
+      indexedPaths: async () => [],
       close: () => undefined,
     };
     const pipe = buildPipeline({
@@ -729,6 +737,7 @@ describe("per-path serialisation (LDKd)", () => {
       chunkCount: realStore.chunkCount.bind(realStore),
       fingerprint: realStore.fingerprint.bind(realStore),
       fingerprints: realStore.fingerprints.bind(realStore),
+      indexedPaths: async () => [],
       close: () => realStore.close(),
     };
     const pipe = buildPipeline(
@@ -805,6 +814,7 @@ describe("per-path serialisation (LDKd)", () => {
       chunkCount: async () => 0,
       fingerprint: async () => ({ mtimeMs: 5000, sha256: "newer" }),
       fingerprints: async () => new Map(),
+      indexedPaths: async () => [],
       close: () => undefined,
     };
     const pipe = buildPipeline({
@@ -885,6 +895,7 @@ describe("hydrateCounters (LDKZ)", () => {
       fingerprints: async () => {
         throw new Error("disk on fire");
       },
+      indexedPaths: async () => [],
       close: () => undefined,
     };
     const pipe = buildPipeline({
@@ -914,6 +925,7 @@ describe("markStopped (LDKr)", () => {
       chunkCount: async () => 0,
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
+      indexedPaths: async () => [],
       close: () => undefined,
     };
     const pipe = buildPipeline({
@@ -945,6 +957,7 @@ describe("markStopped (LDKr)", () => {
       chunkCount: async () => 0,
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
+      indexedPaths: async () => [],
       close: () => undefined,
     };
     let resolveRead!: (v: string) => void;
@@ -1017,6 +1030,7 @@ describe("markStopped (LDKr)", () => {
       chunkCount: async () => 0,
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
+      indexedPaths: async () => [],
       close: () => undefined,
     };
     const pipe = buildPipeline({

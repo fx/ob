@@ -16,6 +16,12 @@
  *     watcher debounce when the API itself is the writer. Both validate
  *     `path` via `assertSafeRelativePath` (rejects `..`, hidden segments,
  *     leading `/`, NUL bytes, etc.) before touching the filesystem.
+ *   - `indexedPaths(slug, prefix)` — the distinct indexed paths under a
+ *     literal prefix, so a recursive folder delete can drop every row under
+ *     the folder, including rows for notes it never saw on disk.
+ *   - `isIndexable(slug, path)` — `isIndexablePath` evaluated on the REAL
+ *     vault root, the drop guard's question. Service code never evaluates the
+ *     predicate against its own (possibly scoped) root.
  *   - `stop()` — idempotent; flips a stopped flag, drains in-flight
  *     pipeline work, then closes watchers + stores. The whole sequence is
  *     bounded by `STOP_TIMEOUT_MS` so a hung scan can't strand shutdown.
@@ -42,7 +48,7 @@ import {
   applyMmr,
   applyThreshold,
 } from "./rank.ts";
-import { scanVault } from "./scanner.ts";
+import { isIndexablePath, scanVault } from "./scanner.ts";
 import {
   type SearchHit,
   type SearchMode,
@@ -107,6 +113,10 @@ export interface Indexer {
    * into `vault_not_found`.
    */
   tags(slug: string, opts?: TagListingOptions): Promise<TagListing>;
+  /** Distinct indexed paths starting with the literal `prefix`; `[]` for an unknown vault. */
+  indexedPaths(slug: string, prefix: string): Promise<string[]>;
+  /** `isIndexablePath` on the real vault root; `false` for an unknown vault. */
+  isIndexable(slug: string, path: string): Promise<boolean>;
   stop(): Promise<void>;
 }
 
@@ -418,6 +428,15 @@ export async function startIndexer(cfg: Config, deps: IndexerDeps): Promise<Inde
       const items = Array.from(counts, ([tag, count]) => ({ tag, count }));
       items.sort((a, b) => b.count - a.count || compareCodePoints(a.tag, b.tag));
       return { items: items.slice(0, opts.limit ?? DEFAULT_TAG_LIMIT), total: items.length };
+    },
+    async indexedPaths(slug: string, prefix: string): Promise<string[]> {
+      const rt = runtimes.get(slug);
+      if (rt === undefined) return [];
+      return rt.store.indexedPaths(prefix);
+    },
+    async isIndexable(slug: string, path: string): Promise<boolean> {
+      if (!runtimes.has(slug)) return false;
+      return isIndexablePath(join(cfg.dataDir, "vaults", slug), path);
     },
     stop(): Promise<void> {
       if (stopPromise !== undefined) return stopPromise;

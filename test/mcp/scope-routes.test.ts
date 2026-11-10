@@ -143,6 +143,8 @@ async function makeScopeFixture(
       calls.tags.push({ slug: s, opts });
       return real.tags(s, opts);
     },
+    indexedPaths: (s, p) => real.indexedPaths(s, p),
+    isIndexable: (s, p) => real.isIndexable(s, p),
   };
 
   const app = buildHttpApp({
@@ -1106,6 +1108,8 @@ describe("per-scope surface memo", () => {
       reindex: async () => undefined,
       drop: async () => undefined,
       tags: async () => ({ items: [], total: 0 }),
+      indexedPaths: async () => [],
+      isIndexable: async () => false,
       stop: async () => undefined,
     };
     const deps: McpRoutesDeps = {
