@@ -144,6 +144,18 @@ describe("guardedRead", () => {
     expect(err).toBeInstanceOf(OversizeReadError);
   });
 
+  test("maxBytes: onRead reports at most the cap plus the one sentinel byte", async () => {
+    const root = tree();
+    const fetched: number[] = [];
+    await guardedRead(root, "a/x.md", {
+      maxBytes: 8,
+      afterStat: async () => appendFileSync(join(root, "a", "x.md"), "x".repeat(100)),
+      onRead: (n) => fetched.push(n),
+    }).catch(() => undefined);
+    await guardedRead(root, "a/x.md", { maxBytes: 1000, onRead: (n) => fetched.push(n) });
+    expect(fetched).toEqual([9, 105]);
+  });
+
   test("maxBytes: growth that stays within the cap is returned, never beyond it", async () => {
     const root = tree();
     const r = await guardedRead(root, "a/x.md", {
