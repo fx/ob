@@ -81,7 +81,7 @@ describe("GrepResponse", () => {
     const r = {
       matches: [m, { ...m, before: [], after: ["y"] }],
       truncated: true,
-      reason: "limit",
+      reason: "limit" as const,
       filesScanned: 1,
       filesSkipped: 0,
     };
