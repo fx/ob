@@ -10,104 +10,8 @@ import {
   UnsupportedMediaTypeError,
   VaultNotFoundError,
 } from "../../src/errors.ts";
-import {
-  appendFile,
-  deleteFile,
-  listFiles,
-  patchFile,
-  readFile,
-  writeFile,
-} from "../../src/vault/files.ts";
+import { appendFile, patchFile, readFile, writeFile } from "../../src/vault/files.ts";
 import { makeVaultFixture } from "./helpers.ts";
-
-describe("listFiles", () => {
-  test("walks the vault root, skipping hidden / .obsidian / .trash", async () => {
-    const fx = makeVaultFixture();
-    writeFileSync(join(fx.root, "a.md"), "a");
-    writeFileSync(join(fx.root, "b.txt"), "b");
-    await fs.mkdir(join(fx.root, "notes"), { recursive: true });
-    await fs.mkdir(join(fx.root, ".obsidian"), { recursive: true });
-    await fs.mkdir(join(fx.root, ".trash"), { recursive: true });
-    writeFileSync(join(fx.root, "notes", "x.md"), "# x");
-    writeFileSync(join(fx.root, ".obsidian", "workspace.json"), "{}");
-    writeFileSync(join(fx.root, ".trash", "old.md"), "old");
-    writeFileSync(join(fx.root, ".DS_Store"), "junk");
-
-    const result = await listFiles(fx.deps, fx.slug);
-    const paths = result.items.map((i) => i.path).sort();
-    expect(paths).toEqual(["a.md", "b.txt", "notes/x.md"]);
-    expect(result.nextCursor).toBe(null);
-  });
-
-  test("filters by prefix", async () => {
-    const fx = makeVaultFixture();
-    writeFileSync(join(fx.root, "a.md"), "1");
-    writeFileSync(join(fx.root, "b.md"), "2");
-    await fs.mkdir(join(fx.root, "notes"), { recursive: true });
-    writeFileSync(join(fx.root, "notes", "x.md"), "3");
-
-    const result = await listFiles(fx.deps, fx.slug, { prefix: "notes/" });
-    expect(result.items.map((i) => i.path)).toEqual(["notes/x.md"]);
-  });
-
-  test("paginates via cursor", async () => {
-    const fx = makeVaultFixture();
-    for (const n of ["a", "b", "c", "d"]) {
-      writeFileSync(join(fx.root, `${n}.md`), n);
-    }
-    const first = await listFiles(fx.deps, fx.slug, { limit: 2 });
-    expect(first.items.map((i) => i.path)).toEqual(["a.md", "b.md"]);
-    expect(first.nextCursor).not.toBeNull();
-    const cursor = first.nextCursor as string;
-    const second = await listFiles(fx.deps, fx.slug, { limit: 2, cursor });
-    expect(second.items.map((i) => i.path)).toEqual(["c.md", "d.md"]);
-    expect(second.nextCursor).toBeNull();
-  });
-
-  test("non-string cursor decodes via base64 round-trip", async () => {
-    const fx = makeVaultFixture();
-    writeFileSync(join(fx.root, "a.md"), "x");
-    writeFileSync(join(fx.root, "b.md"), "y");
-    // Decoded cursor "a.md" — page 2 should yield "b.md" only.
-    const cursor = Buffer.from("a.md", "utf8").toString("base64");
-    const result = await listFiles(fx.deps, fx.slug, { cursor });
-    expect(result.items.map((i) => i.path)).toEqual(["b.md"]);
-  });
-
-  test("treats an empty cursor like none", async () => {
-    const fx = makeVaultFixture();
-    writeFileSync(join(fx.root, "a.md"), "x");
-    const result = await listFiles(fx.deps, fx.slug, { cursor: "" });
-    expect(result.items.length).toBe(1);
-  });
-
-  test("returns empty when the root does not exist", async () => {
-    const fx = makeVaultFixture();
-    await fs.rm(fx.root, { recursive: true });
-    const result = await listFiles(fx.deps, fx.slug);
-    expect(result.items).toEqual([]);
-    expect(result.nextCursor).toBeNull();
-  });
-
-  test("throws VaultNotFoundError for unknown slug", async () => {
-    const fx = makeVaultFixture();
-    await expect(listFiles(fx.deps, "missing")).rejects.toBeInstanceOf(VaultNotFoundError);
-  });
-
-  test("non-ENOENT readdir error propagates", async () => {
-    const fx = makeVaultFixture();
-    // Create a regular file at the root to provoke ENOTDIR on readdir.
-    await fs.rm(fx.root, { recursive: true });
-    writeFileSync(fx.root, "not-a-dir");
-    let err: unknown;
-    try {
-      await listFiles(fx.deps, fx.slug);
-    } catch (e) {
-      err = e;
-    }
-    expect(err).toBeInstanceOf(Error);
-  });
-});
 
 describe("readFile", () => {
   test("returns bytes + sha + mtime + contentType", async () => {
@@ -457,48 +361,6 @@ describe("appendFile", () => {
   });
 });
 
-describe("deleteFile", () => {
-  test("204 on success; reindexer drop hook called for Markdown", async () => {
-    const fx = makeVaultFixture();
-    writeFileSync(join(fx.root, "x.md"), "# x");
-    await deleteFile(fx.deps, fx.slug, "x.md");
-    expect(fx.calls.drop).toEqual([{ slug: fx.slug, path: "x.md" }]);
-  });
-
-  test("404 if absent", async () => {
-    const fx = makeVaultFixture();
-    await expect(deleteFile(fx.deps, fx.slug, "missing.md")).rejects.toBeInstanceOf(
-      DocNotFoundError,
-    );
-  });
-
-  test("does not call indexer.drop for binary paths", async () => {
-    const fx = makeVaultFixture();
-    writeFileSync(join(fx.root, "x.png"), new Uint8Array([1]));
-    await deleteFile(fx.deps, fx.slug, "x.png");
-    expect(fx.calls.drop).toEqual([]);
-  });
-
-  test("non-ENOENT unlink error propagates", async () => {
-    const fx = makeVaultFixture();
-    // Create a directory; unlink will fail with EISDIR.
-    await fs.mkdir(join(fx.root, "isadir.md"), { recursive: true });
-    let err: unknown;
-    try {
-      await deleteFile(fx.deps, fx.slug, "isadir.md");
-    } catch (e) {
-      err = e;
-    }
-    expect(err).toBeInstanceOf(Error);
-    expect(err).not.toBeInstanceOf(DocNotFoundError);
-  });
-
-  test("VaultNotFoundError on unknown slug", async () => {
-    const fx = makeVaultFixture();
-    await expect(deleteFile(fx.deps, "missing", "x.md")).rejects.toBeInstanceOf(VaultNotFoundError);
-  });
-});
-
 describe("indexer failure is non-fatal post-disk", () => {
   test("write: reindex throw still returns 200 with indexed: false", async () => {
     const fx = makeVaultFixture();
@@ -532,31 +394,6 @@ describe("indexer failure is non-fatal post-disk", () => {
     expect(readFileSync(join(fx.root, "x.md"), "utf8")).toBe("abcdef");
   });
 
-  test("delete: drop throw still completes the unlink", async () => {
-    const fx = makeVaultFixture();
-    writeFileSync(join(fx.root, "x.md"), "# x");
-    fx.failNextDrop(new Error("indexer down"));
-    await deleteFile(fx.deps, fx.slug, "x.md");
-    // unlink happened despite the drop failure.
-    let stat: import("node:fs").Stats | null = null;
-    try {
-      stat = await fs.stat(join(fx.root, "x.md"));
-    } catch {
-      stat = null;
-    }
-    expect(stat).toBeNull();
-  });
-
-  test("delete drops BEFORE unlink (call order)", async () => {
-    const fx = makeVaultFixture();
-    writeFileSync(join(fx.root, "x.md"), "# x");
-    await deleteFile(fx.deps, fx.slug, "x.md");
-    // Both observed; drop must precede the eventual unlink. The fixture
-    // doesn't track unlinks explicitly, so we assert drop fired exactly
-    // once and the file is gone.
-    expect(fx.calls.drop).toEqual([{ slug: fx.slug, path: "x.md" }]);
-  });
-
   test("write: indexer warning is logged with vault + path + error", async () => {
     const fx = makeVaultFixture();
     fx.failNextReindex(new Error("kaboom"));
@@ -573,20 +410,6 @@ describe("indexer failure is non-fatal post-disk", () => {
     await writeFile(fx.deps, fx.slug, "z.md", { kind: "markdown", content: "x" });
     const warn = fx.logCalls.warn.find((c) => c.msg.startsWith("indexer.reindex"));
     expect(warn?.fields?.error).toBe("string-error");
-  });
-
-  test("delete: drop warning logs vault + path + error (Error and non-Error)", async () => {
-    const fx = makeVaultFixture();
-    writeFileSync(join(fx.root, "a.md"), "a");
-    fx.failNextDrop(new Error("dropfail"));
-    await deleteFile(fx.deps, fx.slug, "a.md");
-    expect(fx.logCalls.warn.find((c) => c.fields?.error === "dropfail")).toBeDefined();
-
-    writeFileSync(join(fx.root, "b.md"), "b");
-    // biome-ignore lint/suspicious/noExplicitAny: deliberate non-Error rejection to exercise coercion.
-    fx.failNextDrop("string-drop" as any);
-    await deleteFile(fx.deps, fx.slug, "b.md");
-    expect(fx.logCalls.warn.find((c) => c.fields?.error === "string-drop")).toBeDefined();
   });
 });
 
@@ -624,95 +447,12 @@ describe("symlink-escape rejection", () => {
     ).rejects.toBeInstanceOf(InvalidPathError);
   });
 
-  test("deleteFile rejects a symlinked target", async () => {
-    const fx = makeVaultFixture();
-    writeFileSync(join(fx.root, "real.md"), "abc");
-    symlinkSync(join(fx.root, "real.md"), join(fx.root, "shadow.md"));
-    await expect(deleteFile(fx.deps, fx.slug, "shadow.md")).rejects.toBeInstanceOf(
-      InvalidPathError,
-    );
-  });
-
-  test("listFiles silently skips symlink entries", async () => {
-    const fx = makeVaultFixture();
-    writeFileSync(join(fx.root, "real.md"), "x");
-    symlinkSync(join(fx.root, "real.md"), join(fx.root, "shadow.md"));
-    const result = await listFiles(fx.deps, fx.slug);
-    expect(result.items.map((i) => i.path)).toEqual(["real.md"]);
-  });
-
   test("symlink-escape check is a no-op for paths that don't exist", async () => {
     // Creating a brand-new file under a clean tree must succeed even
     // though `lstat` returns ENOENT for the leaf.
     const fx = makeVaultFixture();
     await writeFile(fx.deps, fx.slug, "fresh/path.md", { kind: "markdown", content: "x" });
     expect(readFileSync(join(fx.root, "fresh/path.md"), "utf8")).toBe("x");
-  });
-});
-
-describe("listFiles concurrency / ordering", () => {
-  test("skips files that vanish mid-page (ENOENT on per-entry stat/read)", async () => {
-    // Patch `fs.promises.stat` to throw ENOENT for a specific path while
-    // the listing is in flight. We restore the original on every exit
-    // path (success / throw) via a try/finally.
-    const fx = makeVaultFixture();
-    writeFileSync(join(fx.root, "a.md"), "a");
-    writeFileSync(join(fx.root, "ghost.md"), "g");
-    writeFileSync(join(fx.root, "z.md"), "z");
-    const realStat = fs.stat;
-    const ghostAbs = join(fx.root, "ghost.md");
-    const stub = ((p: string, ...rest: unknown[]) => {
-      if (p === ghostAbs) {
-        const err = new Error("ENOENT (stubbed)") as NodeJS.ErrnoException;
-        err.code = "ENOENT";
-        throw err;
-      }
-      // biome-ignore lint/suspicious/noExplicitAny: forwarding rest args to the original fs.stat overloads.
-      return realStat(p as any, ...(rest as []));
-    }) as typeof fs.stat;
-    (fs as unknown as { stat: typeof fs.stat }).stat = stub;
-    try {
-      const result = await listFiles(fx.deps, fx.slug);
-      expect(result.items.map((i) => i.path)).toEqual(["a.md", "z.md"]);
-    } finally {
-      (fs as unknown as { stat: typeof fs.stat }).stat = realStat;
-    }
-  });
-
-  test("non-ENOENT errors during listing still propagate", async () => {
-    const fx = makeVaultFixture();
-    writeFileSync(join(fx.root, "boom.md"), "b");
-    const realStat = fs.stat;
-    const stub = ((p: string, ...rest: unknown[]) => {
-      if (p === join(fx.root, "boom.md")) {
-        throw new Error("EACCES (stubbed)");
-      }
-      // biome-ignore lint/suspicious/noExplicitAny: forwarding rest args to the original fs.stat overloads.
-      return realStat(p as any, ...(rest as []));
-    }) as typeof fs.stat;
-    (fs as unknown as { stat: typeof fs.stat }).stat = stub;
-    try {
-      await expect(listFiles(fx.deps, fx.slug)).rejects.toThrow("EACCES");
-    } finally {
-      (fs as unknown as { stat: typeof fs.stat }).stat = realStat;
-    }
-  });
-
-  test("paginates correctly with mixed-case names (codepoint sort + strict-greater cursor)", async () => {
-    const fx = makeVaultFixture();
-    writeFileSync(join(fx.root, "A.md"), "1");
-    writeFileSync(join(fx.root, "Z.md"), "3");
-    writeFileSync(join(fx.root, "a.md"), "2");
-    // Codepoint order: A (0x41) < Z (0x5A) < a (0x61).
-    const first = await listFiles(fx.deps, fx.slug, { limit: 2 });
-    expect(first.items.map((i) => i.path)).toEqual(["A.md", "Z.md"]);
-    expect(first.nextCursor).not.toBeNull();
-    const second = await listFiles(fx.deps, fx.slug, {
-      limit: 2,
-      cursor: first.nextCursor as string,
-    });
-    expect(second.items.map((i) => i.path)).toEqual(["a.md"]);
-    expect(second.nextCursor).toBeNull();
   });
 });
 

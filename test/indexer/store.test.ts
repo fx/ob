@@ -134,6 +134,35 @@ describe("openVaultStore", () => {
     store.close();
   });
 
+  test("indexedPaths returns distinct paths under a literal prefix, never a sibling folder", async () => {
+    const dir = tmpDir("store-indexed-paths");
+    const store = await openVaultStore({ dataDir: dir, slug: "v", dim: 4 });
+    await store.upsert("folder/a.md", [
+      row({ path: "folder/a.md" }),
+      row({ path: "folder/a.md", chunkIndex: 1 }),
+    ]);
+    await store.upsert("folder/sub/b.md", [row({ path: "folder/sub/b.md" })]);
+    await store.upsert("folder-x/c.md", [row({ path: "folder-x/c.md" })]);
+    await store.upsert("folder.md", [row({ path: "folder.md" })]);
+    // Distinct (two chunks, one path) and sorted.
+    expect(await store.indexedPaths("folder/")).toEqual(["folder/a.md", "folder/sub/b.md"]);
+    expect(await store.indexedPaths("nothing/")).toEqual([]);
+    expect((await store.indexedPaths("")).length).toBe(4);
+    store.close();
+  });
+
+  test("indexedPaths treats SQL wildcard and quote characters literally", async () => {
+    const dir = tmpDir("store-indexed-paths-wild");
+    const store = await openVaultStore({ dataDir: dir, slug: "v", dim: 4 });
+    for (const p of ["a_b/x.md", "aXb/y.md", "c%d/x.md", "cZZd/y.md", "it's/x.md", "its/y.md"]) {
+      await store.upsert(p, [row({ path: p })]);
+    }
+    expect(await store.indexedPaths("a_b/")).toEqual(["a_b/x.md"]);
+    expect(await store.indexedPaths("c%d/")).toEqual(["c%d/x.md"]);
+    expect(await store.indexedPaths("it's/")).toEqual(["it's/x.md"]);
+    store.close();
+  });
+
   test("upsert is atomic — search never observes a missing path", async () => {
     // Regression for LDKp/LDnv: the previous delete+add sequence had a
     // window where a search between the two commits saw zero rows for the

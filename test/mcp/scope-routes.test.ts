@@ -143,6 +143,8 @@ async function makeScopeFixture(
       calls.tags.push({ slug: s, opts });
       return real.tags(s, opts);
     },
+    indexedPaths: (s, p) => real.indexedPaths(s, p),
+    isIndexable: (s, p) => real.isIndexable(s, p),
   };
 
   const app = buildHttpApp({
@@ -518,7 +520,7 @@ describe("scoped containment", () => {
     write(fx.root("v"), "agents/a/note.md", "a");
     write(fx.root("v"), "agents/b/note.md", "b");
     const sid = await openSession(fx.app, "/mcp/v/agents/a");
-    const r = await callTool(fx.app, "/mcp/v/agents/a", sid, "list_files", {});
+    const r = await callTool(fx.app, "/mcp/v/agents/a", sid, "list", {});
     expect(r.isError).toBe(false);
     const page = r.parsed as { items: FileItem[]; nextCursor: string | null };
     expect(page.items.map((i) => i.path)).toEqual(["note.md"]);
@@ -545,7 +547,7 @@ describe("scoped containment", () => {
     fx.reset();
 
     const sid = await openSession(fx.app, "/mcp/v/agents/a");
-    const listed = await callTool(fx.app, "/mcp/v/agents/a", sid, "list_files", {});
+    const listed = await callTool(fx.app, "/mcp/v/agents/a", sid, "list", {});
     const page = listed.parsed as { items: FileItem[] };
     expect(page.items.map((i) => i.path)).toEqual(["note.md"]);
 
@@ -666,7 +668,7 @@ describe("scoped containment", () => {
     // Binding alone must not materialize the folder.
     expect(existsSync(join(fx.root("v"), "agents", "new"))).toBe(false);
 
-    const listed = await callTool(fx.app, "/mcp/v/agents/new", sid, "list_files", {});
+    const listed = await callTool(fx.app, "/mcp/v/agents/new", sid, "list", {});
     expect(listed.isError).toBe(false);
     expect(listed.parsed).toEqual({ items: [], nextCursor: null });
     expect(existsSync(join(fx.root("v"), "agents", "new"))).toBe(false);
@@ -686,7 +688,7 @@ describe("scoped containment", () => {
     mkdirSync(scopeRoot, { recursive: true });
     const sid = await openSession(fx.app, "/mcp/v/agents/a");
     // Works while the root is a real directory.
-    const before = await callTool(fx.app, "/mcp/v/agents/a", sid, "list_files", {});
+    const before = await callTool(fx.app, "/mcp/v/agents/a", sid, "list", {});
     expect(before.isError).toBe(false);
 
     rmSync(scopeRoot, { recursive: true });
@@ -699,7 +701,7 @@ describe("scoped containment", () => {
     expect(JSON.stringify(read.parsed)).not.toContain("root:");
 
     // `resources/list` walks the root itself, so it is guarded too.
-    const listed = await callTool(fx.app, "/mcp/v/agents/a", sid, "list_files", {});
+    const listed = await callTool(fx.app, "/mcp/v/agents/a", sid, "list", {});
     expect(listed.isError).toBe(true);
     expect(asError(listed.parsed).code).toBe("invalid_path");
     const resErr = await post(
@@ -710,6 +712,81 @@ describe("scoped containment", () => {
     );
     const resBody = (await resErr.json()) as { error?: { code: number } };
     expect(resBody.error?.code).toBe(-32002);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path tools (`list`, `delete`) in a scoped session
+// ---------------------------------------------------------------------------
+
+describe("scoped list and delete", () => {
+  test("list sees only the scope, with scope-relative paths and cursors", async () => {
+    const fx = await makeScopeFixture("sc-list");
+    cleanup.push(fx.stop);
+    write(fx.root("v"), "agents/a/one.md", "1");
+    write(fx.root("v"), "agents/a/sub/two.md", "2");
+    write(fx.root("v"), "agents/ab/three.md", "outside");
+    write(fx.root("v"), "top.md", "outside");
+    const sid = await openSession(fx.app, "/mcp/v/agents/a");
+
+    // `prefix: ""` is the whole scope — no scoped prefix translation exists.
+    const all = await callTool(fx.app, "/mcp/v/agents/a", sid, "list", { prefix: "" });
+    expect(all.isError).toBe(false);
+    const allPage = all.parsed as { items: { type: string; path: string }[] };
+    expect(allPage.items.map((i) => `${i.type}:${i.path}`)).toEqual([
+      "file:one.md",
+      "folder:sub",
+      "file:sub/two.md",
+    ]);
+
+    // The prefix is matched literally against scope-relative paths.
+    const sub = await callTool(fx.app, "/mcp/v/agents/a", sid, "list", { prefix: "sub/" });
+    expect((sub.parsed as { items: FileItem[] }).items.map((i) => i.path)).toEqual(["sub/two.md"]);
+
+    // Cursors are scope-relative too: decoding one never reveals the prefix.
+    const p1 = await callTool(fx.app, "/mcp/v/agents/a", sid, "list", { limit: 1 });
+    const page1 = p1.parsed as { items: FileItem[]; nextCursor: string };
+    expect(page1.items.map((i) => i.path)).toEqual(["one.md"]);
+    expect(Buffer.from(page1.nextCursor, "base64").toString("utf8")).toBe("one.md");
+    const p2 = await callTool(fx.app, "/mcp/v/agents/a", sid, "list", {
+      limit: 5,
+      cursor: page1.nextCursor,
+    });
+    expect((p2.parsed as { items: FileItem[] }).items.map((i) => i.path)).toEqual([
+      "sub",
+      "sub/two.md",
+    ]);
+  });
+
+  test("delete touches only the scope and drops the scoped vault paths", async () => {
+    const fx = await makeScopeFixture("sc-del");
+    cleanup.push(fx.stop);
+    write(fx.root("v"), "agents/a/sub/two.md", "# two");
+    write(fx.root("v"), "sub/two.md", "# outside, same relative path");
+    await fx.index("v", "agents/a/sub/two.md");
+    await fx.index("v", "sub/two.md");
+    fx.reset();
+    const sid = await openSession(fx.app, "/mcp/v/agents/a");
+
+    const refused = await callTool(fx.app, "/mcp/v/agents/a", sid, "delete", { path: "sub" });
+    expect(asError(refused.parsed).code).toBe("folder_not_empty");
+
+    const escaping = await callTool(fx.app, "/mcp/v/agents/a", sid, "delete", {
+      path: "../b",
+      recursive: true,
+    });
+    expect(asError(escaping.parsed).code).toBe("invalid_path");
+
+    const del = await callTool(fx.app, "/mcp/v/agents/a", sid, "delete", {
+      path: "sub",
+      recursive: true,
+    });
+    expect(del.isError).toBe(false);
+    expect(del.parsed).toEqual({ deleted: true });
+    expect(existsSync(join(fx.root("v"), "agents/a/sub"))).toBe(false);
+    expect(readFileSync(join(fx.root("v"), "sub/two.md"), "utf8")).toContain("outside");
+    // The real indexer was asked to drop the vault path, never the outside one.
+    expect(fx.calls.drop).toEqual([{ slug: "v", path: "agents/a/sub/two.md" }]);
   });
 });
 
@@ -793,14 +870,29 @@ describe("scoped vault visibility", () => {
     const hinted = scoped.tools.filter((t) => t.annotations?.readOnlyHint !== undefined);
     expect(hinted.every((t) => t.annotations?.readOnlyHint === true)).toBe(true);
     expect(hinted.map((t) => t.name).sort()).toEqual([
-      "list_files",
-      "list_folders",
+      "list",
       "list_tags",
       "list_vaults",
       "read_file",
       "search",
       "vault_status",
     ]);
+    // The exact registered set, scoped exactly as unscoped (asserted above).
+    expect(scoped.tools.map((t) => t.name).sort()).toEqual(
+      [
+        "append_file",
+        "create_folder",
+        "delete",
+        "list",
+        "list_tags",
+        "list_vaults",
+        "patch_file",
+        "read_file",
+        "search",
+        "vault_status",
+        "write_file",
+      ].sort(),
+    );
 
     for (const [i, tool] of scoped.tools.entries()) {
       const base = plain.tools[i] as ToolInfo;
@@ -952,7 +1044,7 @@ describe("session scope binding", () => {
       headers: { "mcp-session-id": sid },
     });
     expect([200, 204]).toContain(del.status);
-    const after = await callTool(fx.app, "/mcp/v/agents/a", sid, "list_files", {});
+    const after = await callTool(fx.app, "/mcp/v/agents/a", sid, "list", {});
     expect(after.status).toBe(404);
   });
 });
@@ -1040,8 +1132,11 @@ describe("vault-root scope", () => {
     const rootSid = await openSession(fx.app, "/mcp/v");
     const plainSid = await openSession(fx.app, "/mcp");
 
-    const scopedList = await callTool(fx.app, "/mcp/v", rootSid, "list_files", {});
-    const plainList = await callTool(fx.app, "/mcp", plainSid, "list_files", { vault: "v" });
+    const scopedList = await callTool(fx.app, "/mcp/v", rootSid, "list", { type: "file" });
+    const plainList = await callTool(fx.app, "/mcp", plainSid, "list", {
+      vault: "v",
+      type: "file",
+    });
     expect(scopedList.parsed).toEqual(plainList.parsed);
     expect((scopedList.parsed as { items: FileItem[] }).items.map((i) => i.path).sort()).toEqual([
       "agents/a/note.md",
@@ -1106,6 +1201,8 @@ describe("per-scope surface memo", () => {
       reindex: async () => undefined,
       drop: async () => undefined,
       tags: async () => ({ items: [], total: 0 }),
+      indexedPaths: async () => [],
+      isIndexable: async () => false,
       stop: async () => undefined,
     };
     const deps: McpRoutesDeps = {

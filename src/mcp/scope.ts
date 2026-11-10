@@ -239,7 +239,7 @@ export function guardToolDefinition(
 
 /**
  * Run `check()` before delegating to BOTH `list` and `read`. `list` needs the
- * guard as much as `read` does: `listFiles` walks the root itself, so an
+ * guard as much as `read` does: `listPaths` walks the root itself, so an
  * unguarded `resources/list` would enumerate a swapped-in symlink target.
  *
  * A containment rejection surfaces as the module's canonical `not_found`
@@ -352,8 +352,21 @@ export function scopeDeps(deps: McpRoutesDeps, scope: McpScope): McpRoutesDeps {
     status: (s) => deps.indexer.status(s),
     list: () => deps.indexer.list(),
     stop: () => deps.indexer.stop(),
+    // Every method that takes a path adds the scope prefix; every method that
+    // returns paths strips it and discards anything outside the scope.
     reindex: (s, p) => deps.indexer.reindex(s, under(p)),
     drop: (s, p) => deps.indexer.drop(s, under(p)),
+    // Judged on the VAULT-relative path: a session scoped to
+    // `node_modules/pkg` sees `note.md`, but `node_modules/pkg/note.md` is
+    // what is (not) indexable.
+    isIndexable: (s, p) => deps.indexer.isIndexable(s, under(p)),
+    indexedPaths: async (s, prefix): Promise<string[]> => {
+      const paths = await deps.indexer.indexedPaths(s, under(prefix));
+      return paths.flatMap((p) => {
+        const rel = strip(p);
+        return rel === null ? [] : [rel];
+      });
+    },
     search: async (s, q, opts): Promise<SearchHit[]> => {
       const hits = await deps.indexer.search(s, q, withScopedFilter(opts, scope));
       // flatMap, not map+filter: `strip` returns `string | null`, and

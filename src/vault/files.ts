@@ -8,7 +8,7 @@
  * unchanged — every behavioral test for the surface lands in `test/vault/`.
  *
  * Atomic writes use `<target>.tmp.<uuid>` + `fs.promises.rename`. Patch /
- * append / read / delete refuse to touch hidden segments and `..` paths via
+ * append / read refuse to touch hidden segments and `..` paths via
  * `safeJoin`. Every use site additionally calls `assertNotSymlinkEscape` so
  * a symlink planted inside the vault tree can't redirect a read or write
  * outside the root. The Markdown-with-frontmatter wrapper lives in the HTTP
@@ -23,15 +23,13 @@
  * after a successful write would lie about the disk state and prompt
  * retries that duplicate appended content.
  *
- * For DELETE we run `indexer.drop` FIRST — also best-effort, also logged on
- * failure — and only then unlink. The chokidar `unlink` event will trigger
- * a second drop via the pipeline if the first one was lost, so the index is
- * eventually consistent even when the API-side drop call fails.
+ * Listing and deleting are type-agnostic path operations shared with folders;
+ * they live in `src/vault/paths.ts`.
  */
 
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import {
   DocNotFoundError,
   InvalidBodyError,
@@ -43,7 +41,7 @@ import {
 import type { Indexer } from "../indexer/index.ts";
 import type { Logger } from "../log.ts";
 import { detectContentType, isMarkdownPath, isTextPath } from "./contentType.ts";
-import { withPathLock } from "./lock.ts";
+import { pathLockKey, withPathLock } from "./lock.ts";
 import { assertNotSymlinkEscape, safeJoin } from "./path.ts";
 
 /** A configured vault — sufficient identity for the service core. */
@@ -61,8 +59,11 @@ export interface VaultDescriptor {
 export interface VaultServiceDeps {
   /** Resolve a slug to its descriptor (including absolute root). */
   vault(slug: string): VaultDescriptor | null;
-  /** Indexer surface for `reindex`/`drop`, `search`, and `tags`. */
-  readonly indexer: Pick<Indexer, "reindex" | "drop" | "search" | "tags">;
+  /** Indexer surface the service core calls. */
+  readonly indexer: Pick<
+    Indexer,
+    "reindex" | "drop" | "search" | "tags" | "indexedPaths" | "isIndexable"
+  >;
   /** Inject `Date.now`-equivalent for deterministic tests. */
   readonly now?: () => number;
   /** Override `crypto.randomUUID` for deterministic tmp-file names in tests. */
@@ -72,27 +73,24 @@ export interface VaultServiceDeps {
    * Tests inject a capture; production wiring passes the server logger.
    */
   readonly logger?: Logger;
+  /**
+   * Test seams for the path operations in `src/vault/paths.ts`, so tests can
+   * act as a concurrent writer at an exact point of an operation without
+   * mocking `fs`. Production wiring never sets them.
+   */
+  readonly hooks?: PathOpHooks;
 }
 
-interface FileMeta {
-  readonly path: string;
-  readonly mtimeMs: number;
-  readonly size: number;
-  readonly sha256: string;
-  readonly contentType: string;
-}
-
-export interface FileEntry extends FileMeta {}
-
-export interface ListFilesOptions {
-  readonly prefix?: string;
-  readonly limit?: number;
-  readonly cursor?: string;
-}
-
-export interface ListFilesResult {
-  readonly items: FileEntry[];
-  readonly nextCursor: string | null;
+/** Injection points inside `listPaths` / `deletePath`. Each receives the vault-relative path. */
+export interface PathOpHooks {
+  /** `listPaths`: after a folder passed its containment check, immediately before it is read. */
+  readonly beforeReadDir?: (path: string) => Promise<void>;
+  /** `listPaths`: after a file entry was walked, immediately before its guarded read. */
+  readonly beforeListRead?: (path: string) => Promise<void>;
+  /** `deletePath`: under the path's lock, after the type check, immediately before the removal. */
+  readonly beforeRemove?: (path: string) => Promise<void>;
+  /** `deletePath`: immediately after a successful removal, before any index drop. */
+  readonly afterRemove?: (path: string) => Promise<void>;
 }
 
 export interface ReadFileResult {
@@ -145,10 +143,7 @@ export interface PatchFileResult extends WriteFileResult {
   readonly edits: number;
 }
 
-export const DEFAULT_LIMIT = 100;
-export const MAX_LIMIT = 1000;
-
-function sha256(bytes: Uint8Array): string {
+export function sha256(bytes: Uint8Array): string {
   // `createHash().update()` accepts `Uint8Array` directly. Callers hand us
   // either `Uint8Array` or a `Buffer` (which extends `Uint8Array` at
   // runtime); to keep TS happy under @types/bun's narrow `BinaryLike` we
@@ -160,19 +155,6 @@ export function resolveVault(deps: VaultServiceDeps, slug: string): VaultDescrip
   const v = deps.vault(slug);
   if (v === null) throw new VaultNotFoundError(slug);
   return v;
-}
-
-export function decodeCursor(cursor: string | undefined): string | undefined {
-  if (cursor === undefined || cursor === "") return undefined;
-  // We use base64 of the last-seen path so callers can't construct a cursor
-  // that bypasses our prefix check. `Buffer.from(_, "base64")` is total —
-  // it never throws, garbage just decodes to garbage that won't match any
-  // path. The cursor is not a security boundary.
-  return Buffer.from(cursor, "base64").toString("utf8");
-}
-
-export function encodeCursor(path: string): string {
-  return Buffer.from(path, "utf8").toString("base64");
 }
 
 /**
@@ -193,112 +175,6 @@ async function tryReindex(deps: VaultServiceDeps, slug: string, path: string): P
     });
     return false;
   }
-}
-
-/**
- * Best-effort wrapper around `indexer.drop`. Logs a warning on failure but
- * never throws — the eventual chokidar `unlink` event will retry the drop
- * via the pipeline.
- */
-export async function tryDrop(deps: VaultServiceDeps, slug: string, path: string): Promise<void> {
-  try {
-    await deps.indexer.drop(slug, path);
-  } catch (e) {
-    deps.logger?.warn("indexer.drop failed; chokidar will reconcile", {
-      vault: slug,
-      path,
-      error: e instanceof Error ? e.message : String(e),
-    });
-  }
-}
-
-/**
- * Walk the vault root recursively, yielding vault-relative paths in
- * lexicographic order. Skips the same hidden / `.obsidian/` / `.trash/`
- * segments that `safeJoin` rejects, so callers can never list a path they
- * would later be unable to read. Symlinks are skipped outright (`Dirent`
- * type is examined, not followed) — they would be rejected by
- * `assertNotSymlinkEscape` at use time anyway.
- */
-export async function* walkVault(root: string, sub = ""): AsyncIterable<string> {
-  const dir = sub === "" ? root : join(root, sub);
-  let entries: import("node:fs").Dirent[];
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch (e) {
-    // Vault root might not exist on a fresh install — treat as empty.
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw e;
-  }
-  // Sort once per directory by raw codepoint so the global walk order is
-  // stable across platforms AND matches the strict-greater-than `>`
-  // comparison the cursor uses below. `localeCompare` would treat `A` and
-  // `a` as equivalent depending on locale, which would let the cursor
-  // skip or repeat entries when paginating across mixed-case names.
-  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  for (const ent of entries) {
-    if (ent.name.startsWith(".")) continue; // hidden / .obsidian / .trash
-    if (ent.isSymbolicLink()) continue; // refuse symlinks (rejected at use time too)
-    const rel = sub === "" ? ent.name : `${sub}/${ent.name}`;
-    if (ent.isDirectory()) {
-      yield* walkVault(root, rel);
-    } else if (ent.isFile()) {
-      yield rel;
-    }
-  }
-}
-
-export async function listFiles(
-  deps: VaultServiceDeps,
-  slug: string,
-  opts: ListFilesOptions = {},
-): Promise<ListFilesResult> {
-  const v = resolveVault(deps, slug);
-  const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
-  const cursor = decodeCursor(opts.cursor);
-  const prefix = opts.prefix ?? "";
-
-  const items: FileEntry[] = [];
-  let nextCursor: string | null = null;
-  let lastPath: string | null = null;
-
-  for await (const rel of walkVault(v.root)) {
-    // Strict `>` (not `<=`) so the cursor advances past the boundary entry
-    // exactly once. Sort uses the same raw-codepoint ordering — see
-    // `walkVault` comment.
-    if (cursor !== undefined && !(rel > cursor)) continue;
-    if (prefix !== "" && !rel.startsWith(prefix)) continue;
-    if (items.length >= limit) {
-      nextCursor = lastPath === null ? null : encodeCursor(lastPath);
-      return { items, nextCursor };
-    }
-    const abs = join(v.root, rel);
-    // The vault directory is live (chokidar may be racing the listing
-    // with `ob sync` writes/deletes). If a file vanishes between readdir
-    // and stat/read, skip it instead of failing the whole page.
-    let stat: import("node:fs").Stats;
-    let bytes: Buffer;
-    try {
-      stat = await fs.stat(abs);
-      bytes = await fs.readFile(abs);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw e;
-    }
-    // `fs.readFile` returns `Buffer` (Node) but we hash via Uint8Array view
-    // for tighter typing under @types/bun's BinaryLike.
-    const view = new Uint8Array(bytes.byteLength);
-    view.set(bytes);
-    items.push({
-      path: rel,
-      mtimeMs: stat.mtimeMs,
-      size: stat.size,
-      sha256: sha256(view),
-      contentType: detectContentType(rel),
-    });
-    lastPath = rel;
-  }
-  return { items, nextCursor };
 }
 
 export async function readFile(
@@ -398,7 +274,7 @@ export async function writeFile(
   }
   // Per-path lock: keeps a concurrent PATCH/APPEND on the same path from
   // racing the existed() probe + atomicWrite + reindex sequence.
-  return withPathLock(`${slug}:${path}`, async () => {
+  return withPathLock(pathLockKey(v.root, path), async () => {
     const bytes =
       body.kind === "markdown" ? serializeMarkdown(body.content, body.frontmatter) : body.bytes;
     const wasExisting = await existed(abs);
@@ -470,7 +346,7 @@ export async function patchFile(
   // both see the original and the second writer will silently overwrite
   // the first. Lock spans the read → applyEdits → atomicWrite → reindex
   // sequence end-to-end.
-  return withPathLock(`${slug}:${path}`, async () => {
+  return withPathLock(pathLockKey(v.root, path), async () => {
     let original: string;
     try {
       original = await fs.readFile(abs, "utf8");
@@ -518,7 +394,7 @@ export async function appendFile(
   // would otherwise read the same prefix and the second writer would
   // overwrite the first. The end-to-end lock guarantees five concurrent
   // appends produce 5x the appended bytes (no lost writes).
-  return withPathLock(`${slug}:${path}`, async () => {
+  return withPathLock(pathLockKey(v.root, path), async () => {
     let original: Buffer;
     try {
       original = await fs.readFile(abs);
@@ -546,36 +422,5 @@ export async function appendFile(
       contentType: detectContentType(path),
       indexed,
     };
-  });
-}
-
-export async function deleteFile(
-  deps: VaultServiceDeps,
-  slug: string,
-  path: string,
-): Promise<void> {
-  const v = resolveVault(deps, slug);
-  const abs = safeJoin(v.root, path);
-  await assertNotSymlinkEscape(abs, v.root);
-  // Lock the path so a concurrent PATCH can't read mid-delete.
-  return withPathLock(`${slug}:${path}`, async () => {
-    // Probe existence before doing anything else so we get a 404 BEFORE
-    // attempting drop+unlink. Otherwise a missing file would still trigger
-    // a doomed drop call and a confusing log line.
-    if (!(await existed(abs))) throw new DocNotFoundError(path);
-    // Drop FIRST (best-effort) so that if the unlink succeeds the index is
-    // already in the right state. If drop fails, log and continue — the
-    // chokidar `unlink` event will retry the drop via the pipeline.
-    if (isMarkdownPath(path)) {
-      await tryDrop(deps, slug, path);
-    }
-    try {
-      await fs.unlink(abs);
-    } catch (e) {
-      // ENOENT here means a concurrent deleter raced us between the
-      // existed() probe and unlink; treat as a successful delete.
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw e;
-    }
   });
 }

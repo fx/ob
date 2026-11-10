@@ -17,8 +17,9 @@
 
 import { createHash } from "node:crypto";
 import { type Dirent, readdirSync } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { lstat, readFile, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
+import { assertSafeRelativePath } from "../errors.ts";
 
 const MARKDOWN_RE = /\.(?:md|markdown)$/i;
 
@@ -38,6 +39,45 @@ export function shouldIgnorePath(relPath: string): boolean {
 
 export function isMarkdownFile(relPath: string): boolean {
   return MARKDOWN_RE.test(relPath);
+}
+
+/**
+ * The one indexable-path rule (Vault Indexer › Indexable paths): `rel` is a
+ * vault-relative path, judged against the REAL vault root `root` — never a
+ * scoped root, which is why service code reaches this only through
+ * `Indexer.isIndexable`.
+ *
+ * Lexical half: a safe relative path (no `..`, no leading `/`, no NUL) with a
+ * `.md` / `.markdown` extension in any case and no hidden or `node_modules`
+ * segment — the same `shouldIgnorePath` + `isMarkdownFile` pair the scanner
+ * already applies. Filesystem half: an `lstat` of every component from the
+ * first segment down to the leaf, never following a link — each parent must
+ * be a real directory, the leaf a regular file, and none of them a symlink.
+ *
+ * Any filesystem failure (the path vanished, a parent is a file, EACCES) is
+ * "not indexable": the drop guard that calls this then drops the rows, which
+ * is the direction that can never leave content indexed that is not there.
+ */
+export async function isIndexablePath(root: string, rel: string): Promise<boolean> {
+  try {
+    assertSafeRelativePath(rel);
+  } catch {
+    return false;
+  }
+  if (shouldIgnorePath(rel) || !isMarkdownFile(rel)) return false;
+  const segments = rel.split("/").filter((seg) => seg !== "" && seg !== ".");
+  let current = root;
+  try {
+    for (let i = 0; i < segments.length; i++) {
+      current = join(current, segments[i] as string);
+      const st = await lstat(current);
+      const isLeaf = i === segments.length - 1;
+      if (isLeaf ? !st.isFile() : !st.isDirectory()) return false;
+    }
+  } catch {
+    return false;
+  }
+  return true;
 }
 
 export interface ScannerFile {

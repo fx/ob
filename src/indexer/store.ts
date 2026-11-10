@@ -138,6 +138,12 @@ export interface VaultStore {
   /** Remove all chunks for `path`. No-op if no such rows exist. */
   drop(path: string): Promise<void>;
   /**
+   * Distinct paths that have rows and start with `prefix`, sorted. `prefix`
+   * is a LITERAL prefix (the `starts_with` operator `search` filters with):
+   * `_`, `%`, and `'` in it are ordinary characters.
+   */
+  indexedPaths(prefix: string): Promise<string[]>;
+  /**
    * Vector-search by an already-embedded query vector. Filtering by
    * `pathPrefix` (literal prefix; SQL `LIKE` wildcards in the input are
    * treated as ordinary characters) and `tag` (array contains) is pushed
@@ -571,6 +577,17 @@ export async function openVaultStore(opts: OpenVaultStoreOptions): Promise<Vault
     },
     async drop(path: string): Promise<void> {
       await table.delete(`path = ${sqlString(path)}`);
+    },
+    async indexedPaths(prefix: string): Promise<string[]> {
+      // LanceDB has no `SELECT DISTINCT`; project `path` only and dedupe in
+      // TS, exactly as `documentCount` does. `starts_with` is literal (see
+      // `search`), and `sqlString` keeps the value inside its string literal.
+      const rows = (await table
+        .query()
+        .where(`starts_with(path, ${sqlString(prefix)})`)
+        .select(["path"])
+        .toArray()) as { path: string }[];
+      return Array.from(new Set(rows.map((r) => r.path))).sort();
     },
     async search(queryVector: Float32Array, searchOpts?: SearchOpts): Promise<SearchHit[]> {
       const limit = searchOpts?.limit ?? 20;

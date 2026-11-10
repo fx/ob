@@ -54,7 +54,7 @@ export function safeJoin(root: string, rel: string): string {
   // A path made only of `.` segments (e.g. `.` or `./.`) survives
   // `assertSafeRelativePath` (single-dot segments are legal mid-path) but
   // resolves to the vault root itself. The root is never a valid operation
-  // target — addressing it would let `deleteFolder(root, { recursive })` wipe
+  // target — addressing it would let `deletePath(root, { recursive })` wipe
   // the whole vault. Reject it here so every service-core op is protected.
   if (abs === resolve(root)) {
     throw new InvalidPathError(rel, "resolves to the vault root");
@@ -120,4 +120,34 @@ export async function assertNotSymlinkEscape(absPath: string, root: string): Pro
     }
     current = dirname(current);
   }
+}
+
+/**
+ * The containment check a directory walk runs immediately before it reads a
+ * directory: `lstat` every level from `absDir` up to (not including) `root`,
+ * never following a link. Returns the directory's own `lstat` when every level
+ * exists, none is a symbolic link, and each is a real directory; otherwise
+ * (a symlink anywhere on the chain, a level that is a file, a level that is
+ * gone, or any other `lstat` failure) `null`, and the caller skips the
+ * directory and everything below it. One chain walk per directory — never per
+ * entry — so the walk's listing metadata comes from this same `lstat`.
+ */
+export async function lstatContainedDirectory(
+  absDir: string,
+  root: string,
+): Promise<import("node:fs").Stats | null> {
+  const absRoot = resolve(root);
+  let leaf: import("node:fs").Stats | null = null;
+  try {
+    for (let current = resolve(absDir); current !== absRoot; current = dirname(current)) {
+      // A path that is not under `root` at all never reaches `absRoot`.
+      if (current.length < absRoot.length) return null;
+      const st = await fs.lstat(current);
+      if (st.isSymbolicLink() || !st.isDirectory()) return null;
+      leaf ??= st;
+    }
+  } catch {
+    return null;
+  }
+  return leaf;
 }

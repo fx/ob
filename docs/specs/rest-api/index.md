@@ -116,7 +116,7 @@ The REST API exposes vault-scoped CRUD over arbitrary files (Markdown, images, P
 
 For all routes below, `:slug` is the vault slug and `*path` is the file path inside the vault. Any file type is supported (Markdown, images, PDFs, attachments). Only [indexable](../vault-indexer/index.md#indexable-paths) Markdown files (`.md` / `.markdown`, outside hidden and `node_modules` folders, not reached through a symlink) are indexed for search; binaries are stored on disk and round-tripped through `ob sync` but not embedded in v1.
 
-Listing and deleting files are [Path operations](#path-operations), shared with folders: there is no `GET /v1/vaults/:slug/files` list route and no `DELETE /v1/vaults/:slug/files/*path` route. Both were removed by [Change 0019](../../changes/0019-unified-list-and-delete.md) (draft — until it lands, the server still serves them with their previous behavior).
+Listing and deleting files are [Path operations](#path-operations), shared with folders: there is no `GET /v1/vaults/:slug/files` list route and no `DELETE /v1/vaults/:slug/files/*path` route. Both were removed by [Change 0019](../../changes/0019-unified-list-and-delete.md).
 
 #### `GET /v1/vaults/:slug/files/*path`
 
@@ -230,7 +230,7 @@ Creating a folder is the one folder-only operation. Listing, deleting, moving, a
 
 ### Path operations
 
-> Specified by draft changes [0019](../../changes/0019-unified-list-and-delete.md) (list, delete) and [0020](../../changes/0020-move-and-copy.md) (move, copy); not yet implemented.
+> Move and copy are specified by draft change [0020](../../changes/0020-move-and-copy.md) and not yet implemented; list and delete landed with [0019](../../changes/0019-unified-list-and-delete.md).
 
 Operations that apply to files and folders alike live under one type-agnostic resource family, `/v1/vaults/:slug/paths`, with the semantics of the matching unix tool: list (`ls`), delete (`rm` / `rm -r`), move (`mv -T`), copy (`cp` / `cp -r -T`). `*path` names a file or a folder; the operation determines which it is from the filesystem, never from the request.
 

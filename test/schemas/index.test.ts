@@ -1,8 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   AppendBody,
-  ListFilesQuery,
-  ListFilesResponse,
   PatchEdit,
   PatchFileBody,
   PatchFileResponse,
@@ -17,38 +15,6 @@ import {
   VaultsListResponse,
   WriteFileResponse,
 } from "../../src/schemas/index.ts";
-
-describe("ListFilesQuery", () => {
-  test("accepts a normal query and applies the default limit", () => {
-    const r = ListFilesQuery.parse({});
-    expect(r.limit).toBe(100);
-  });
-  test("rejects non-numeric limit", () => {
-    expect(() => ListFilesQuery.parse({ limit: "abc" })).toThrow();
-  });
-  test("rejects limits over 1000", () => {
-    expect(() => ListFilesQuery.parse({ limit: 9999 })).toThrow();
-  });
-  test("accepts cursor + prefix", () => {
-    const r = ListFilesQuery.parse({ prefix: "notes/", cursor: "abc" });
-    expect(r.prefix).toBe("notes/");
-    expect(r.cursor).toBe("abc");
-  });
-  test("rejects unknown query keys via strict()", () => {
-    expect(() => ListFilesQuery.parse({ junk: "x" })).toThrow();
-  });
-});
-
-describe("ListFilesResponse", () => {
-  test("validates a simple response", () => {
-    expect(() =>
-      ListFilesResponse.parse({
-        items: [{ path: "a.md", mtimeMs: 1, size: 1, sha256: "x", contentType: "text/markdown" }],
-        nextCursor: null,
-      }),
-    ).not.toThrow();
-  });
-});
 
 describe("ReadFileMarkdownResponse", () => {
   test("requires content + frontmatter object", () => {

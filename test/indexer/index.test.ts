@@ -319,6 +319,27 @@ describe("startIndexer round-trip", () => {
     expect((await indexer.search("v", "doomed", { limit: 1 })).length).toBe(0);
   }, 20_000);
 
+  test("indexedPaths lists indexed paths under a prefix; isIndexable judges the real vault root", async () => {
+    const dataDir = tmpDataDir("ip");
+    const cfg = makeConfig({ dataDir });
+    const root = join(dataDir, "vaults", "v");
+    mkdirSync(join(root, "folder"), { recursive: true });
+    mkdirSync(join(root, "folder-x"), { recursive: true });
+    mkdirSync(join(root, "node_modules"), { recursive: true });
+    writeFileSync(join(root, "folder", "a.md"), "# A\n\na");
+    writeFileSync(join(root, "folder-x", "b.md"), "# B\n\nb");
+    writeFileSync(join(root, "node_modules", "c.md"), "# C\n\nc");
+    const indexer = await startIndexer(cfg, { logger: silent(), embedder: buildHashEmbedder(4) });
+    cleanup.push(async () => indexer.stop());
+    await waitFor(() => indexer.status("v")?.state === "ready");
+    expect(await indexer.indexedPaths("v", "folder/")).toEqual(["folder/a.md"]);
+    expect(await indexer.indexedPaths("missing", "")).toEqual([]);
+    expect(await indexer.isIndexable("v", "folder/a.md")).toBe(true);
+    expect(await indexer.isIndexable("v", "node_modules/c.md")).toBe(false);
+    expect(await indexer.isIndexable("v", "folder/none.md")).toBe(false);
+    expect(await indexer.isIndexable("missing", "folder/a.md")).toBe(false);
+  }, 20_000);
+
   test("stop is idempotent", async () => {
     const dataDir = tmpDataDir("stop");
     const cfg = makeConfig({ dataDir });
@@ -668,6 +689,7 @@ describe("startIndexer round-trip", () => {
             chunkCount: async () => 0,
             fingerprint: async () => undefined,
             fingerprints: async () => new Map(),
+            indexedPaths: async () => [],
             close: () => {
               firstStoreClosed = true;
             },
@@ -717,6 +739,7 @@ describe("startIndexer round-trip", () => {
         chunkCount: async () => 0,
         fingerprint: async () => undefined,
         fingerprints: async () => new Map(),
+        indexedPaths: async () => [],
         close: () => {
           if (which === "first") firstStoreClosed = true;
         },

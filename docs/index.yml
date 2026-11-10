@@ -159,7 +159,7 @@ changes:
     path: changes/0019-unified-list-and-delete.md
     description: Type-agnostic `list` / `delete` (REST /v1/vaults/:slug/paths) replace list_files, list_folders, delete_file, and delete_folder (breaking, no aliases); segment-ordered walk fixes cursor skipping; MCP tool design rule of one unix-verb tool per file-and-folder operation.
     spec: rest-api
-    status: draft
+    status: complete
     depends_on: ["0012", "0014", "0018"]
   - id: "0020"
     name: move-and-copy

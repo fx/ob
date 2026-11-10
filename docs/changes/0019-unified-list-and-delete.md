@@ -5,7 +5,7 @@
 Replace the per-type list and delete operations with one type-agnostic operation each: REST `GET /v1/vaults/:slug/paths` and `DELETE /v1/vaults/:slug/paths/*path`, MCP `list` and `delete`. Remove `list_files`, `list_folders`, `delete_file`, `delete_folder` and their REST routes. Implements [REST API › Path operations](../specs/rest-api/index.md#path-operations) (list and delete) and the [MCP Tool design rules](../specs/mcp-server/index.md#tool-design-rules).
 
 **Spec:** [REST API](../specs/rest-api/), [MCP Server](../specs/mcp-server/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0012, 0014, 0018
 
 ## Motivation
@@ -45,6 +45,7 @@ Skipping or weakening any of these rules to land the PR MUST be treated as a bug
 - **Indexable predicate and drop guard.** Deletes are the first users of [Vault Indexer › Indexable paths](../specs/vault-indexer/index.md#indexable-paths), so this change introduces both pieces it relies on. First, `isIndexablePath(root, rel)`, exported from `src/indexer/scanner.ts`: the lexical part reuses today's `shouldIgnorePath` + `isMarkdownFile`, and the filesystem part is an `lstat` chain check (regular file, no symlink on it or its parents). It is evaluated only on the real vault root with the vault-relative path, through a new `Indexer.isIndexable(slug, path)`; the scoped wrapper in `src/mcp/scope.ts` prefixes the path as it does for `drop`, so a session scoped to `node_modules/pkg` is judged on `node_modules/pkg/note.md`. Second, one `dropGuarded(deps, slug, path)` helper in `src/vault/` that, holding the path's write lock, drops the path's rows unless `deps.indexer.isIndexable(slug, path)` is true for what exists there now. It never calls `isIndexablePath` with `vault(slug).root`, which in a scoped session is the scope root. This change wires the predicate only into the delete-side drop guard. Adopting it in the scanner, the watcher, the pipeline, and direct reindexes is [0020](0020-move-and-copy.md)'s, as is the startup sweep.
 - **Listing reads.** `list` reads each file to hash it through the shared `guardedRead(root, path, { maxBytes? })` helper (parent-chain check, `O_NOFOLLOW` open, `fstat` on the opened descriptor for a regular file and, when `maxBytes` is given, its size; the read itself fetches at most `maxBytes + 1` bytes, the extra sentinel byte only detecting growth, so a file that grows while being read is caught as oversize and reported as such, and the caller never receives more than `maxBytes` of content; per the spec's [containment precondition](../specs/rest-api/index.md#path-operations) for reads); an entry that fails it is skipped like a vanished one.
 - **README.** The README's tool list and REST route list MUST be updated to the new names in the same PR.
+- **Canonical lock key.** The one lock-key helper, `pathLockKey(root, path)` in `src/vault/lock.ts` (the absolute path the vault path resolves to), landed here, pulled forward from [0020](0020-move-and-copy.md), and is used by `deletePath`, the drop guard, and the existing `writeFile`, `patchFile`, and `appendFile`, so aliases of one file (`notes//x.md`, `./notes/x.md`) contend on one lock.
 
 ## Design
 
@@ -82,29 +83,29 @@ A new service-core module `src/vault/paths.ts` holds the type-agnostic operation
 
 ## Tasks
 
-- [ ] **Service core: `src/vault/paths.ts`**
-  - [ ] `comparePaths` (segment-wise code-point order) and the cursor helpers using it
-  - [ ] `walkVaultEntries` (pre-order, hidden/symlink skip, depth-bounded for `recursive: false`)
-  - [ ] `listPaths(deps, slug, { prefix, limit, cursor, type, recursive })` with ENOENT / type-change skipping
-  - [ ] `deletePath(deps, slug, path, { recursive })` — file: unlink then drop; folder: `rmdir` / `folder_not_empty` / recursive `fs.rm` → `indexedPaths` → guarded drops
-  - [ ] Tests in `test/vault/paths.test.ts`: every list and delete scenario in the spec, the `a/` vs `a-b.md` pagination regression, `type` filter with `limit`, `recursive: false` at root and under a prefix, hidden and symlink omission, racing removal during a walk, drop-after-remove ordering, removal failure leaving the index untouched, `rm -r` on a file
-- [ ] **Remove the per-type operations**
-  - [ ] Delete `listFiles` / `deleteFile` from `src/vault/files.ts` and `listFolders` / `deleteFolder` from `src/vault/folders.ts` (keep `createFolder`); move `src/mcp/resources.ts` onto `listPaths` as specified above
-  - [ ] Delete `src/mcp/tools/list_files.ts`, `list_folders.ts`, `delete_file.ts`, `delete_folder.ts` and their tests, and `test/parity/list_files.test.ts` / `delete_file.test.ts`
-  - [ ] Unmount the four REST routes; add tests asserting each now returns the JSON 404
-  - [ ] Commit with `!` and a `BREAKING CHANGE:` footer naming removed tools/routes and their replacements
-- [ ] **Indexable predicate and drop guard**: `isIndexablePath` in `src/indexer/scanner.ts`, `Indexer.isIndexable` (with scoped prefix translation), and `dropGuarded` in `src/vault/` calling it, used by file and recursive delete; a table-driven predicate test (extensions in any case, hidden and `node_modules` segments, a symlinked leaf, a symlinked parent, a folder, a missing path); drop-guard tests where the deleted path is recreated as an indexable note (rows kept), as a symlink (rows dropped), and left absent (rows dropped); and a scoped test with a session scoped to `node_modules/pkg` where a recreated `note.md` is judged non-indexable (rows dropped)
-- [ ] **Indexed paths under a prefix**: `VaultStore.indexedPaths`, `Indexer.indexedPaths`, symmetric scoped translation (prefix added on input, stripped and out-of-scope results discarded on output); real-LanceDB tests including SQL-wildcard characters in the prefix and a sibling `folder-x/` that must not be returned
-- [ ] **`guardedRead`** in `src/vault/guarded.ts` (with the optional `maxBytes` cap, checked on the descriptor and enforced by a bounded read; a test grows a file past the cap between `fstat` and the read), used by `list`'s hashing (no cap); a test swapping a listed file's parent for a symlink between the walk and the read (entry skipped, nothing read outside)
-- [ ] **Resources**: `src/mcp/resources.ts` on `listPaths({ type: "file" })` with the tests named above
-- [ ] **Schemas: `src/schemas/paths.ts`** (re-exported from `src/schemas/index.ts`) with tests in `test/schemas/paths.test.ts`
-- [ ] **HTTP: `src/http/routes/paths.ts`** — `GET /v1/vaults/:slug/paths`, `DELETE /v1/vaults/:slug/paths/:path{.+}`; tests in `test/http/paths.test.ts` including the traversal matrix
-- [ ] **MCP: `src/mcp/tools/list.ts`, `delete.ts`** registered in `src/mcp/index.ts`; descriptions per the spec; `list` read-only; tests in `test/mcp/tools/`
-- [ ] **Parity: `test/parity/list.test.ts`, `test/parity/delete.test.ts`**
-- [ ] **Registry assertions** in `test/mcp/server.test.ts`: the exact tool set and exact `readOnlyHint` set as of this change (listed under Testing Requirements), unscoped and scoped
-- [ ] **Scoped sessions**: tests that `list` and `delete` in a `/mcp/:slug/:prefix` session see and touch only the scope, with scope-relative paths and cursors. `list`'s `prefix` needs no scoped translation: the scoped deps substitute the scope root, so the prefix is matched literally against scope-relative paths, and `prefix: ""` lists the whole scope; a test covers it
-- [ ] **README** tool and route lists updated
-- [ ] **Tracking**: tick this list, set Status to complete, sync `docs/index.yml` / `docs/index.md`
+- [x] **Service core: `src/vault/paths.ts`**
+  - [x] `comparePaths` (segment-wise code-point order) and the cursor helpers using it
+  - [x] `walkVaultEntries` (pre-order, hidden/symlink skip, depth-bounded for `recursive: false`)
+  - [x] `listPaths(deps, slug, { prefix, limit, cursor, type, recursive })` with ENOENT / type-change skipping
+  - [x] `deletePath(deps, slug, path, { recursive })` — file: unlink then drop; folder: `rmdir` / `folder_not_empty` / recursive `fs.rm` → `indexedPaths` → guarded drops
+  - [x] Tests in `test/vault/paths.test.ts`: every list and delete scenario in the spec, the `a/` vs `a-b.md` pagination regression, `type` filter with `limit`, `recursive: false` at root and under a prefix, hidden and symlink omission, racing removal during a walk, drop-after-remove ordering, removal failure leaving the index untouched, `rm -r` on a file
+- [x] **Remove the per-type operations**
+  - [x] Delete `listFiles` / `deleteFile` from `src/vault/files.ts` and `listFolders` / `deleteFolder` from `src/vault/folders.ts` (keep `createFolder`); move `src/mcp/resources.ts` onto `listPaths` as specified above
+  - [x] Delete `src/mcp/tools/list_files.ts`, `list_folders.ts`, `delete_file.ts`, `delete_folder.ts` and their tests, and `test/parity/list_files.test.ts` / `delete_file.test.ts`
+  - [x] Unmount the four REST routes; add tests asserting each now returns the JSON 404
+  - [x] Commit with `!` and a `BREAKING CHANGE:` footer naming removed tools/routes and their replacements
+- [x] **Indexable predicate and drop guard**: `isIndexablePath` in `src/indexer/scanner.ts`, `Indexer.isIndexable` (with scoped prefix translation), and `dropGuarded` in `src/vault/` calling it, used by file and recursive delete; a table-driven predicate test (extensions in any case, hidden and `node_modules` segments, a symlinked leaf, a symlinked parent, a folder, a missing path); drop-guard tests where the deleted path is recreated as an indexable note (rows kept), as a symlink (rows dropped), and left absent (rows dropped); and a scoped test with a session scoped to `node_modules/pkg` where a recreated `note.md` is judged non-indexable (rows dropped)
+- [x] **Indexed paths under a prefix**: `VaultStore.indexedPaths`, `Indexer.indexedPaths`, symmetric scoped translation (prefix added on input, stripped and out-of-scope results discarded on output); real-LanceDB tests including SQL-wildcard characters in the prefix and a sibling `folder-x/` that must not be returned
+- [x] **`guardedRead`** in `src/vault/guarded.ts` (with the optional `maxBytes` cap, checked on the descriptor and enforced by a bounded read; a test grows a file past the cap between `fstat` and the read), used by `list`'s hashing (no cap); a test swapping a listed file's parent for a symlink between the walk and the read (entry skipped, nothing read outside)
+- [x] **Resources**: `src/mcp/resources.ts` on `listPaths({ type: "file" })` with the tests named above
+- [x] **Schemas: `src/schemas/paths.ts`** (re-exported from `src/schemas/index.ts`) with tests in `test/schemas/paths.test.ts`
+- [x] **HTTP: `src/http/routes/paths.ts`** — `GET /v1/vaults/:slug/paths`, `DELETE /v1/vaults/:slug/paths/:path{.+}`; tests in `test/http/paths.test.ts` including the traversal matrix
+- [x] **MCP: `src/mcp/tools/list.ts`, `delete.ts`** registered in `src/mcp/index.ts`; descriptions per the spec; `list` read-only; tests in `test/mcp/tools/`
+- [x] **Parity: `test/parity/list.test.ts`, `test/parity/delete.test.ts`**
+- [x] **Registry assertions** in `test/mcp/server.test.ts`: the exact tool set and exact `readOnlyHint` set as of this change (listed under Testing Requirements), unscoped and scoped
+- [x] **Scoped sessions**: tests that `list` and `delete` in a `/mcp/:slug/:prefix` session see and touch only the scope, with scope-relative paths and cursors. `list`'s `prefix` needs no scoped translation: the scoped deps substitute the scope root, so the prefix is matched literally against scope-relative paths, and `prefix: ""` lists the whole scope; a test covers it
+- [x] **README** tool and route lists updated
+- [x] **Tracking**: tick this list, set Status to complete, sync `docs/index.yml` / `docs/index.md`
 
 ## References
 

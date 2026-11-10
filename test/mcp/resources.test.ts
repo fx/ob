@@ -5,7 +5,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import { decodeCursor, parseObVaultUri } from "../../src/mcp/resources.ts";
@@ -138,6 +138,60 @@ describe("resources/list", () => {
     expect(page1.nextCursor).toBeDefined();
     const page2 = await fx.resources.list(page1.nextCursor);
     expect(page2.resources.map((r) => r.uri)).toEqual(["obvault://b/only.md"]);
+  });
+
+  test("a page of only non-Markdown files is empty but still carries a cursor", async () => {
+    const fx = await makeMcpFixture({ label: "res-nonmd" });
+    cleanup.push(fx.stop);
+    const { buildResourceHandler } = await import("../../src/mcp/resources.ts");
+    writeFileSync(join(fx.vaultRoot, "a.png"), new Uint8Array([0x89]));
+    writeFileSync(join(fx.vaultRoot, "b.pdf"), new Uint8Array([0x25]));
+    writeFileSync(join(fx.vaultRoot, "c.md"), "# c");
+    mkdirSync(join(fx.vaultRoot, "folders-are-not-resources"));
+    const small = buildResourceHandler(fx.serviceDeps, () => ["v"], 2);
+    const page1 = await small.list(undefined);
+    expect(page1.resources).toEqual([]);
+    expect(page1.nextCursor).toBeDefined();
+    const page2 = await small.list(page1.nextCursor);
+    expect(page2.resources.map((r) => r.name)).toEqual(["c.md"]);
+    expect(page2.nextCursor).toBeUndefined();
+  });
+
+  test("pages follow the segment order, so a sibling between a folder's notes is not skipped", async () => {
+    const fx = await makeMcpFixture({ label: "res-skip" });
+    cleanup.push(fx.stop);
+    const { buildResourceHandler } = await import("../../src/mcp/resources.ts");
+    mkdirSync(join(fx.vaultRoot, "a"));
+    writeFileSync(join(fx.vaultRoot, "a", "x.md"), "# x");
+    writeFileSync(join(fx.vaultRoot, "a", "y.md"), "# y");
+    writeFileSync(join(fx.vaultRoot, "a-b.md"), "# ab");
+    const small = buildResourceHandler(fx.serviceDeps, () => ["v"], 1);
+    const names: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await small.list(cursor);
+      names.push(...page.resources.map((r) => r.name));
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+    expect(names).toEqual(["a/x.md", "a/y.md", "a-b.md"]);
+  });
+
+  test("the multi-vault hand-off follows a full page to the next vault", async () => {
+    const fx = await makeMcpFixture({ label: "res-handoff", slugs: ["a", "b"] });
+    cleanup.push(fx.stop);
+    const { buildResourceHandler } = await import("../../src/mcp/resources.ts");
+    writeFileSync(join(fx.dataDir, "vaults", "a", "one.md"), "# 1");
+    writeFileSync(join(fx.dataDir, "vaults", "a", "two.md"), "# 2");
+    writeFileSync(join(fx.dataDir, "vaults", "b", "three.md"), "# 3");
+    const small = buildResourceHandler(fx.serviceDeps, () => ["a", "b"], 2);
+    const p1 = await small.list(undefined);
+    expect(p1.resources.map((r) => r.uri)).toEqual(["obvault://a/one.md", "obvault://a/two.md"]);
+    // Vault `a` holds nothing after `two.md`, so the full page already hands
+    // off to the start of `b`.
+    expect(decodeCursor(p1.nextCursor)).toEqual({ slug: "b", innerCursor: undefined });
+    const p2 = await small.list(p1.nextCursor);
+    expect(p2.resources.map((r) => r.uri)).toEqual(["obvault://b/three.md"]);
+    expect(p2.nextCursor).toBeUndefined();
   });
 
   test("stale cursor naming an unknown slug returns empty", async () => {

@@ -10,39 +10,6 @@
 import { z } from "zod";
 
 /**
- * List query parameters.
- *
- * `prefix` is matched literally against the leading bytes of each path.
- * `limit` defaults to 100, capped at 1000 (REST spec).
- * `cursor` is opaque — base64-encoded path of the last item from the
- * previous page; `listFiles` is the only producer/consumer.
- */
-export const ListFilesQuery = z
-  .object({
-    prefix: z.string().max(1024).optional(),
-    limit: z.coerce.number().int().min(1).max(1000).default(100),
-    cursor: z.string().optional(),
-  })
-  .strict();
-export type ListFilesQuery = z.infer<typeof ListFilesQuery>;
-
-/** Single entry in the list-files response. */
-export const FileEntry = z.object({
-  path: z.string(),
-  mtimeMs: z.number(),
-  size: z.number(),
-  sha256: z.string(),
-  contentType: z.string(),
-});
-export type FileEntry = z.infer<typeof FileEntry>;
-
-export const ListFilesResponse = z.object({
-  items: z.array(FileEntry),
-  nextCursor: z.string().nullable(),
-});
-export type ListFilesResponse = z.infer<typeof ListFilesResponse>;
-
-/**
  * Markdown-with-frontmatter view of a read response. Returned by the HTTP
  * adapter when a `.md`/`.markdown` GET carries `Accept: application/json`.
  */

@@ -68,6 +68,8 @@ function fakeIndexer(statuses: IndexerStatus[]): Indexer {
     reindex: async () => undefined,
     drop: async () => undefined,
     tags: async () => ({ items: [], total: 0 }),
+    indexedPaths: async () => [],
+    isIndexable: async () => false,
     stop: async () => undefined,
   };
 }
@@ -111,6 +113,8 @@ describe("buildHttpApp", () => {
         reindex: async () => undefined,
         drop: async () => undefined,
         tags: async () => ({ items: [], total: 0 }),
+        indexedPaths: async () => [],
+        isIndexable: async () => false,
         stop: async () => undefined,
       },
       config: {

@@ -1,8 +1,8 @@
 /**
- * Folder routes through the real Hono app (`app.fetch` via `app.request`),
- * real `safeJoin`, and a tmpdir vault. A fake indexer records `drop` calls so
- * the recursive-delete and non-recursive scenarios can assert index behavior
- * precisely (the fake supervisor + fake indexer pattern from 0003/0004).
+ * Folder route (create) through the real Hono app (`app.fetch` via
+ * `app.request`), real `safeJoin`, and a tmpdir vault, with the fake
+ * supervisor + fake indexer pattern from 0003/0004. Listing and deleting
+ * folders are path operations, tested in `./paths.test.ts`.
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
@@ -72,6 +72,8 @@ function makeFixture(label: string): FolderHttpFixture {
       drops.push({ slug: s, path: p });
     },
     tags: async () => ({ items: [], total: 0 }),
+    indexedPaths: async () => [],
+    isIndexable: async () => false,
     stop: async () => undefined,
   };
 
@@ -99,44 +101,6 @@ function track(fx: FolderHttpFixture): FolderHttpFixture {
   roots.push(fx.vaultRoot);
   return fx;
 }
-
-describe("GET /v1/vaults/:slug/folders", () => {
-  test("lists folders under a prefix in lexicographic order", async () => {
-    const fx = track(makeFixture("folders-list"));
-    await fs.mkdir(join(fx.vaultRoot, "social-graphs/people/peter-thiel"), { recursive: true });
-    await fs.mkdir(join(fx.vaultRoot, "social-graphs/people/sam-altman"), { recursive: true });
-    await fs.mkdir(join(fx.vaultRoot, "social-graphs/places"), { recursive: true });
-    writeFileSync(join(fx.vaultRoot, "social-graphs/people/sam-altman/note.md"), "n");
-
-    const res = await fx.app.request("/v1/vaults/v/folders?prefix=social-graphs%2Fpeople%2F");
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { items: { path: string }[]; nextCursor: string | null };
-    expect(body.items.map((i) => i.path)).toEqual([
-      "social-graphs/people/peter-thiel",
-      "social-graphs/people/sam-altman",
-    ]);
-    expect(body.items.map((i) => i.path)).not.toContain("social-graphs/places");
-  });
-
-  test("empty folders are visible to /folders but not /files", async () => {
-    const fx = track(makeFixture("folders-empty-vis"));
-    await fs.mkdir(join(fx.vaultRoot, "notes/scratchpad"), { recursive: true });
-
-    const folders = await fx.app.request("/v1/vaults/v/folders");
-    const foldersBody = (await folders.json()) as { items: { path: string }[] };
-    expect(foldersBody.items.map((i) => i.path)).toContain("notes/scratchpad");
-
-    const files = await fx.app.request("/v1/vaults/v/files");
-    expect(await files.json()).toEqual({ items: [], nextCursor: null });
-  });
-
-  test("invalid query param → 400 invalid_query", async () => {
-    const fx = track(makeFixture("folders-badquery"));
-    const res = await fx.app.request("/v1/vaults/v/folders?limit=abc");
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("invalid_query");
-  });
-});
 
 describe("PUT /v1/vaults/:slug/folders/*path", () => {
   test("create is idempotent and does not touch the folder on replay", async () => {
@@ -198,90 +162,6 @@ describe("PUT /v1/vaults/:slug/folders/*path", () => {
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe("invalid_path");
     // Nothing landed outside the vault root.
     expect(await exists(join(fx.vaultRoot, "..", "..", "etc", "passwd"))).toBe(false);
-  });
-});
-
-describe("DELETE /v1/vaults/:slug/folders/*path", () => {
-  test("non-empty folder without recursive → 409 folder_not_empty, no drops", async () => {
-    const fx = track(makeFixture("folders-del-409"));
-    await fs.mkdir(join(fx.vaultRoot, "social-graphs/people/peter-thiel"), { recursive: true });
-    writeFileSync(join(fx.vaultRoot, "social-graphs/people/peter-thiel/intro.md"), "hi");
-    const res = await fx.app.request("/v1/vaults/v/folders/social-graphs/people/peter-thiel", {
-      method: "DELETE",
-    });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("folder_not_empty");
-    expect(
-      await fs.readFile(join(fx.vaultRoot, "social-graphs/people/peter-thiel/intro.md"), "utf8"),
-    ).toBe("hi");
-    expect(fx.drops).toEqual([]);
-  });
-
-  test("recursive delete drops Markdown entries only and removes the tree", async () => {
-    const fx = track(makeFixture("folders-del-recursive"));
-    await fs.mkdir(join(fx.vaultRoot, "archive/2024"), { recursive: true });
-    writeFileSync(join(fx.vaultRoot, "archive/2024/jan.md"), "# jan");
-    writeFileSync(join(fx.vaultRoot, "archive/2024/cover.png"), new Uint8Array([0x89]));
-    const res = await fx.app.request("/v1/vaults/v/folders/archive/2024?recursive=true", {
-      method: "DELETE",
-    });
-    expect(res.status).toBe(204);
-    expect(fx.drops).toEqual([{ slug: "v", path: "archive/2024/jan.md" }]);
-    expect(await exists(join(fx.vaultRoot, "archive/2024"))).toBe(false);
-  });
-
-  test("empty folder deletes with 204 (no recursive needed)", async () => {
-    const fx = track(makeFixture("folders-del-empty"));
-    await fs.mkdir(join(fx.vaultRoot, "empty"), { recursive: true });
-    const res = await fx.app.request("/v1/vaults/v/folders/empty", { method: "DELETE" });
-    expect(res.status).toBe(204);
-    expect(await exists(join(fx.vaultRoot, "empty"))).toBe(false);
-  });
-
-  test("delete is type-aware: a file → 400 invalid_path, file unchanged", async () => {
-    const fx = track(makeFixture("folders-del-file"));
-    writeFileSync(join(fx.vaultRoot, "x.md"), "keep");
-    const res = await fx.app.request("/v1/vaults/v/folders/x.md", { method: "DELETE" });
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("invalid_path");
-    expect(await fs.readFile(join(fx.vaultRoot, "x.md"), "utf8")).toBe("keep");
-  });
-
-  test("missing folder → 404 not_found", async () => {
-    const fx = track(makeFixture("folders-del-404"));
-    const res = await fx.app.request("/v1/vaults/v/folders/nope", { method: "DELETE" });
-    expect(res.status).toBe(404);
-    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("not_found");
-  });
-
-  test("invalid recursive query value → 400 invalid_query", async () => {
-    const fx = track(makeFixture("folders-del-badquery"));
-    await fs.mkdir(join(fx.vaultRoot, "d"), { recursive: true });
-    const res = await fx.app.request("/v1/vaults/v/folders/d?recursive=yes", { method: "DELETE" });
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("invalid_query");
-  });
-
-  test("empty path does not match DELETE (404)", async () => {
-    const fx = track(makeFixture("folders-del-emptypath"));
-    const res = await fx.app.request("/v1/vaults/v/folders/", { method: "DELETE" });
-    expect(res.status).toBe(404);
-  });
-
-  test("path traversal is blocked (400) and nothing outside the vault is removed", async () => {
-    const fx = track(makeFixture("folders-del-traversal"));
-    const outside = join(fx.vaultRoot, "..", "..", "sentinel");
-    writeFileSync(outside, "keep");
-    try {
-      const res = await fx.app.request("/v1/vaults/v/folders/..%2F..%2Fsentinel", {
-        method: "DELETE",
-      });
-      expect(res.status).toBe(400);
-      expect(((await res.json()) as { error: { code: string } }).error.code).toBe("invalid_path");
-      expect(await fs.readFile(outside, "utf8")).toBe("keep");
-    } finally {
-      await fs.rm(outside, { force: true });
-    }
   });
 });
 
