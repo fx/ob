@@ -364,6 +364,27 @@ describe("listPaths", () => {
     expect((await listPaths(deps, fx.slug)).items.map((i) => i.path)).toEqual(["a.md", "z.md"]);
   });
 
+  test("a folder replaced by a file between its check and its read is not listed", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "a/x.md");
+    put(fx.root, "b.md");
+    const deps = withHooks(fx, {
+      beforeReadDir: async (p) => {
+        if (p !== "a") return;
+        rmSync(join(fx.root, "a"), { recursive: true });
+        writeFileSync(join(fx.root, "a"), "now a file");
+      },
+    });
+    expect(tags((await listPaths(deps, fx.slug)).items)).toEqual(["file:b.md"]);
+    // Not descending (recursive: false at the root) lists the folder on its check alone.
+    put(fx.root, "c/y.md");
+    expect(tags((await listPaths(deps, fx.slug, { recursive: false })).items)).toEqual([
+      "file:a",
+      "file:b.md",
+      "folder:c",
+    ]);
+  });
+
   test("a file that stopped being a regular file is skipped", async () => {
     const fx = makeVaultFixture();
     put(fx.root, "f.md");

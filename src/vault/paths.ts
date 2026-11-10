@@ -31,7 +31,7 @@ import { promises as fs, type Dirent } from "node:fs";
 import { join } from "node:path";
 import { DocNotFoundError, FolderNotEmptyError, InvalidPathError } from "../errors.ts";
 import { detectContentType } from "./contentType.ts";
-import { type VaultServiceDeps, resolveVault, sha256 } from "./files.ts";
+import { type PathOpHooks, type VaultServiceDeps, resolveVault, sha256 } from "./files.ts";
 import { dropGuarded, dropUnlessIndexable, guardedRead } from "./guarded.ts";
 import { pathLockKey, withPathLock } from "./lock.ts";
 import { assertNotSymlinkEscape, lstatContainedDirectory, safeJoin } from "./path.ts";
@@ -143,16 +143,19 @@ export function encodeCursor(path: string): string {
  * so no caller code runs between them.
  *
  * `descend(rel)` decides whether to read a directory's children; the default
- * reads every one.
+ * reads every one. A descended directory is yielded only once its children
+ * were read; one that is not descended is yielded on its check alone.
+ * `hooks.beforeReadDir` is a test seam between the check and the read.
  */
 export async function* walkVaultEntries(
   root: string,
   sub = "",
   descend: (rel: string) => boolean = () => true,
+  hooks: Pick<PathOpHooks, "beforeReadDir"> = {},
 ): AsyncIterable<WalkEntry> {
   if (sub !== "" && (await lstatContainedDirectory(join(root, sub), root)) === null) return;
   const entries = await readDirSorted(root, sub);
-  if (entries !== null) yield* walkEntries(root, sub, entries, descend);
+  if (entries !== null) yield* walkEntries(root, sub, entries, descend, hooks);
 }
 
 /** `readdir` + sort; `null` when the directory vanished or stopped being one. */
@@ -173,6 +176,7 @@ async function* walkEntries(
   sub: string,
   entries: readonly Dirent[],
   descend: (rel: string) => boolean,
+  hooks: Pick<PathOpHooks, "beforeReadDir">,
 ): AsyncIterable<WalkEntry> {
   for (const ent of entries) {
     if (ent.name.startsWith(".")) continue; // hidden / .obsidian / .trash
@@ -182,9 +186,18 @@ async function* walkEntries(
       // Checked, then read, before anything is yielded (see above).
       const st = await lstatContainedDirectory(join(root, rel), root);
       if (st === null) continue;
-      const children = descend(rel) ? await readDirSorted(root, rel) : null;
-      yield { type: "folder", rel, mtimeMs: st.mtimeMs };
-      if (children !== null) yield* walkEntries(root, rel, children, descend);
+      const folder: WalkEntry = { type: "folder", rel, mtimeMs: st.mtimeMs };
+      if (!descend(rel)) {
+        yield folder;
+        continue;
+      }
+      await hooks.beforeReadDir?.(rel);
+      // A directory that vanished or became a file since its check is not
+      // listed from the check's now-stale metadata.
+      const children = await readDirSorted(root, rel);
+      if (children === null) continue;
+      yield folder;
+      yield* walkEntries(root, rel, children, descend, hooks);
     } else if (ent.isFile()) {
       yield { type: "file", rel };
     }
@@ -246,7 +259,7 @@ export async function listPaths(
   };
 
   const items: PathEntry[] = [];
-  for await (const ent of walkVaultEntries(v.root, "", descend)) {
+  for await (const ent of walkVaultEntries(v.root, "", descend, deps.hooks)) {
     if (cursor !== undefined && comparePaths(ent.rel, cursor) <= 0) continue;
     if (!matches(ent.rel)) continue;
     if (opts.type !== undefined && ent.type !== opts.type) continue;

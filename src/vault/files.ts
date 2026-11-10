@@ -83,6 +83,8 @@ export interface VaultServiceDeps {
 
 /** Injection points inside `listPaths` / `deletePath`. Each receives the vault-relative path. */
 export interface PathOpHooks {
+  /** `listPaths`: after a folder passed its containment check, immediately before it is read. */
+  readonly beforeReadDir?: (path: string) => Promise<void>;
   /** `listPaths`: after a file entry was walked, immediately before its guarded read. */
   readonly beforeListRead?: (path: string) => Promise<void>;
   /** `deletePath`: under the path's lock, after the type check, immediately before the removal. */
