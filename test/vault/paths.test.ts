@@ -99,6 +99,18 @@ describe("canonicalPath", () => {
 });
 
 describe("walkVaultEntries", () => {
+  test("a starting folder that is a symlink, a file, or missing yields nothing", async () => {
+    const fx = makeVaultFixture();
+    const outside = outsideDir();
+    symlinkSync(outside, join(fx.root, "link"));
+    put(fx.root, "file.md");
+    for (const sub of ["link", "file.md", "missing"]) {
+      const seen: string[] = [];
+      for await (const e of walkVaultEntries(fx.root, sub)) seen.push(e.rel);
+      expect(seen).toEqual([]);
+    }
+  });
+
   test("walks a subfolder in pre-order with the default descend", async () => {
     const fx = makeVaultFixture();
     put(fx.root, "a/b/c.md");
@@ -363,6 +375,45 @@ describe("listPaths", () => {
       },
     });
     expect((await listPaths(deps, fx.slug)).items.map((i) => i.path)).toEqual(["z.md"]);
+  });
+
+  test("a folder swapped for an outside symlink before its descent is skipped", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "p/f.md");
+    put(fx.root, "p/q/inside.md");
+    const outside = outsideDir();
+    put(outside, "deep/secret.md", "SECRET");
+    const deps = withHooks(fx, {
+      // `p` has been read; its sibling-sorted folder `q` has not been entered.
+      beforeListRead: async (p) => {
+        if (p !== "p/f.md") return;
+        rmSync(join(fx.root, "p", "q"), { recursive: true });
+        symlinkSync(outside, join(fx.root, "p", "q"));
+      },
+    });
+    const page = await listPaths(deps, fx.slug);
+    expect(tags(page.items)).toEqual(["folder:p", "file:p/f.md"]);
+  });
+
+  test("an intermediate folder swapped after it was yielded is never followed", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "p/f.md");
+    put(fx.root, "p/q/r/inside.md");
+    const outside = outsideDir();
+    put(outside, "q/r/secret.md", "SECRET");
+    const deps = withHooks(fx, {
+      // `p` itself was yielded and read; swap it before its subfolder is read.
+      beforeListRead: async (p) => {
+        if (p !== "p/f.md") return;
+        renameSync(join(fx.root, "p"), join(fx.root, "p-moved"));
+        symlinkSync(outside, join(fx.root, "p"));
+      },
+    });
+    const page = await listPaths(deps, fx.slug);
+    // `p/f.md` itself now sits behind the symlink, so its guarded read skips
+    // it too; neither it nor anything under `q` is read from outside.
+    expect(tags(page.items)).toEqual(["folder:p"]);
+    expect(JSON.stringify(page)).not.toContain("secret");
   });
 
   test("a parent swapped for a symlink before the read is skipped and nothing outside is read", async () => {

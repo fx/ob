@@ -26,14 +26,14 @@
  * indexed into the folder while the delete ran is dropped too.
  */
 
-import { promises as fs } from "node:fs";
+import { promises as fs, type Dirent } from "node:fs";
 import { join } from "node:path";
 import { DocNotFoundError, FolderNotEmptyError, InvalidPathError } from "../errors.ts";
 import { detectContentType } from "./contentType.ts";
 import { type VaultServiceDeps, resolveVault, sha256 } from "./files.ts";
 import { dropGuarded, dropUnlessIndexable, guardedRead } from "./guarded.ts";
 import { withPathLock } from "./lock.ts";
-import { assertNotSymlinkEscape, safeJoin } from "./path.ts";
+import { assertNotSymlinkEscape, lstatContainedDirectory, safeJoin } from "./path.ts";
 
 export const DEFAULT_LIMIT = 100;
 export const MAX_LIMIT = 1000;
@@ -79,11 +79,13 @@ function isGone(e: unknown): boolean {
   return code === "ENOENT" || code === "ENOTDIR";
 }
 
-/** One walked entry: its type as `readdir` reported it, and its vault-relative path. */
-export interface WalkEntry {
-  readonly type: PathType;
-  readonly rel: string;
-}
+/**
+ * One walked entry and its vault-relative path. A folder carries the `mtimeMs`
+ * of the containment-checked `lstat` that admitted it to the walk.
+ */
+export type WalkEntry =
+  | { readonly type: "file"; readonly rel: string }
+  | { readonly type: "folder"; readonly rel: string; readonly mtimeMs: number };
 
 /** Compare two strings by raw code point (not UTF-16 code unit). */
 function compareSegments(a: string, b: string): number {
@@ -131,31 +133,57 @@ export function encodeCursor(path: string): string {
  * `compareSegments`. Hidden names and symlinks are skipped by `Dirent`
  * inspection, never followed, and nothing below them is visited.
  *
- * `descend(rel)` decides whether to enter a yielded directory; the default
- * enters every one. A directory that vanishes (or stops being one) between
- * being listed and being read is treated as empty.
+ * Containment: every directory below the root passes `lstatContainedDirectory`
+ * (no symlink on its chain to the vault root, a real directory) immediately
+ * before it is read, and its listing metadata comes from that same check; a
+ * directory that fails it — swapped for a symlink, turned into a file, or
+ * gone since its parent was read — is skipped with everything below it. The
+ * check and the `readdir` run back to back, before the directory is yielded,
+ * so no caller code runs between them.
+ *
+ * `descend(rel)` decides whether to read a directory's children; the default
+ * reads every one.
  */
 export async function* walkVaultEntries(
   root: string,
   sub = "",
   descend: (rel: string) => boolean = () => true,
 ): AsyncIterable<WalkEntry> {
-  let entries: import("node:fs").Dirent[];
+  if (sub !== "" && (await lstatContainedDirectory(join(root, sub), root)) === null) return;
+  const entries = await readDirSorted(root, sub);
+  if (entries !== null) yield* walkEntries(root, sub, entries, descend);
+}
+
+/** `readdir` + sort; `null` when the directory vanished or stopped being one. */
+async function readDirSorted(root: string, sub: string): Promise<Dirent[] | null> {
+  let entries: Dirent[];
   try {
     entries = await fs.readdir(sub === "" ? root : join(root, sub), { withFileTypes: true });
   } catch (e) {
     // Vault root missing on a fresh install, or a racing removal: empty.
     if (!isGone(e)) throw e;
-    return;
+    return null;
   }
-  entries.sort((a, b) => compareSegments(a.name, b.name));
+  return entries.sort((a, b) => compareSegments(a.name, b.name));
+}
+
+async function* walkEntries(
+  root: string,
+  sub: string,
+  entries: readonly Dirent[],
+  descend: (rel: string) => boolean,
+): AsyncIterable<WalkEntry> {
   for (const ent of entries) {
     if (ent.name.startsWith(".")) continue; // hidden / .obsidian / .trash
     if (ent.isSymbolicLink()) continue;
     const rel = sub === "" ? ent.name : `${sub}/${ent.name}`;
     if (ent.isDirectory()) {
-      yield { type: "folder", rel };
-      if (descend(rel)) yield* walkVaultEntries(root, rel, descend);
+      // Checked, then read, before anything is yielded (see above).
+      const st = await lstatContainedDirectory(join(root, rel), root);
+      if (st === null) continue;
+      const children = descend(rel) ? await readDirSorted(root, rel) : null;
+      yield { type: "folder", rel, mtimeMs: st.mtimeMs };
+      if (children !== null) yield* walkEntries(root, rel, children, descend);
     } else if (ent.isFile()) {
       yield { type: "file", rel };
     }
@@ -168,19 +196,8 @@ async function readEntry(
   root: string,
   ent: WalkEntry,
 ): Promise<PathEntry | null> {
-  if (ent.type === "folder") {
-    // `lstat`, not `stat`: an entry swapped for a symlink after `readdir`
-    // must not report the metadata of a target outside the vault.
-    let st: import("node:fs").Stats;
-    try {
-      st = await fs.lstat(join(root, ent.rel));
-    } catch (e) {
-      if (!isGone(e)) throw e;
-      return null;
-    }
-    if (!st.isDirectory()) return null;
-    return { type: "folder", path: ent.rel, mtimeMs: st.mtimeMs };
-  }
+  // A folder's metadata is the walk's containment-checked `lstat`.
+  if (ent.type === "folder") return { type: "folder", path: ent.rel, mtimeMs: ent.mtimeMs };
   await deps.hooks?.beforeListRead?.(ent.rel);
   let read: Awaited<ReturnType<typeof guardedRead>>;
   try {
