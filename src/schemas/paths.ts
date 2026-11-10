@@ -1,6 +1,6 @@
 /**
  * Zod schemas for the type-agnostic path operations (REST API › Path
- * operations): list and delete over files and folders alike.
+ * operations): list, delete, move, and copy over files and folders alike.
  *
  * REST parses the `*Query` schemas from the query string (so booleans and
  * numbers arrive as strings); the MCP `list` / `delete` tools parse the
@@ -96,3 +96,73 @@ export const DeletePathInput = z
   })
   .strict();
 export type DeletePathInput = z.infer<typeof DeletePathInput>;
+
+/** `POST /v1/vaults/:slug/paths/*path:move` body. Unknown keys are `invalid_input`. */
+export const MoveBody = z
+  .object({
+    destination: z.string().min(1),
+    overwrite: z.boolean().optional(),
+    updateLinks: z.boolean().optional(),
+  })
+  .strict();
+export type MoveBody = z.infer<typeof MoveBody>;
+
+/** MCP `move` input: the REST body plus `vault` and `path`. */
+export const MoveInput = z
+  .object({
+    vault: z.string().min(1),
+    path: z.string().min(1),
+    destination: z.string().min(1),
+    overwrite: z.boolean().optional(),
+    updateLinks: z.boolean().optional(),
+  })
+  .strict();
+export type MoveInput = z.infer<typeof MoveInput>;
+
+/** `POST /v1/vaults/:slug/paths/*path:copy` body. Unknown keys are `invalid_input`. */
+export const CopyBody = z
+  .object({
+    destination: z.string().min(1),
+    overwrite: z.boolean().optional(),
+    recursive: z.boolean().optional(),
+  })
+  .strict();
+export type CopyBody = z.infer<typeof CopyBody>;
+
+/** MCP `copy` input: the REST body plus `vault` and `path`. */
+export const CopyInput = z
+  .object({
+    vault: z.string().min(1),
+    path: z.string().min(1),
+    destination: z.string().min(1),
+    overwrite: z.boolean().optional(),
+    recursive: z.boolean().optional(),
+  })
+  .strict();
+export type CopyInput = z.infer<typeof CopyInput>;
+
+export const MoveResponse = z.object({
+  path: z.string(),
+  destination: z.string(),
+  type: z.enum(["file", "folder"]),
+  overwritten: z.boolean(),
+  indexed: z.boolean(),
+  links: z
+    .object({
+      updated: z.array(z.object({ path: z.string(), links: z.number(), indexed: z.boolean() })),
+      failed: z.array(z.object({ path: z.string(), code: z.string(), message: z.string() })),
+    })
+    .nullable(),
+});
+export type MoveResponse = z.infer<typeof MoveResponse>;
+
+export const CopyResponse = z.object({
+  path: z.string(),
+  destination: z.string(),
+  type: z.enum(["file", "folder"]),
+  overwritten: z.boolean(),
+  indexed: z.boolean(),
+  files: z.number(),
+  skipped: z.number(),
+});
+export type CopyResponse = z.infer<typeof CopyResponse>;

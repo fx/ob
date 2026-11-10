@@ -17,7 +17,7 @@
  *   - `GET /v1/vaults` and `GET /v1/vaults/:slug` — vault listing & status
  *   - File CRUD + patch + append under `/v1/vaults/:slug/files`
  *   - Folder create under `/v1/vaults/:slug/folders`
- *   - Path operations (list, delete) under `/v1/vaults/:slug/paths`
+ *   - Path operations (list, delete, move, copy) under `/v1/vaults/:slug/paths`
  *   - Search at `POST /v1/vaults/:slug/search`
  *   - Tag listing at `GET /v1/vaults/:slug/tags`
  *   - Grep at `POST /v1/vaults/:slug/grep`
