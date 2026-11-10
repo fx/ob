@@ -118,6 +118,7 @@ test("tools/list over HTTP returns every registered tool", async () => {
       "delete_folder",
       "list_files",
       "list_folders",
+      "list_tags",
       "list_vaults",
       "patch_file",
       "read_file",
@@ -139,6 +140,7 @@ test("tools/list over HTTP returns every registered tool", async () => {
   expect(hinted.map((t) => t.name).sort()).toEqual([
     "list_files",
     "list_folders",
+    "list_tags",
     "list_vaults",
     "read_file",
     "search",

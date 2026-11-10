@@ -611,6 +611,54 @@ describe("scoped containment", () => {
     expect(fx.calls.search).toHaveLength(1);
   });
 
+  test("list_tags counts only documents inside the scope", async () => {
+    const fx = await makeScopeFixture("sc-tags");
+    cleanup.push(fx.stop);
+    write(fx.root("v"), "agents/a/one.md", "# One\n\n#todo #mine\n");
+    write(fx.root("v"), "agents/a/journal/two.md", "# Two\n\n#todo\n");
+    // The `agents/ab` sibling shares the scope's bytes but is outside it.
+    write(fx.root("v"), "agents/ab/other.md", "# Other\n\n#todo #theirs\n");
+    write(fx.root("v"), "notes/n.md", "# N\n\n#todo #theirs\n");
+    for (const p of [
+      "agents/a/one.md",
+      "agents/a/journal/two.md",
+      "agents/ab/other.md",
+      "notes/n.md",
+    ])
+      await fx.index("v", p);
+    fx.reset();
+
+    const sid = await openSession(fx.app, "/mcp/v/agents/a");
+    const all = await callTool(fx.app, "/mcp/v/agents/a", sid, "list_tags", {});
+    expect(all.isError).toBe(false);
+    expect(all.parsed).toEqual({
+      items: [
+        { tag: "todo", count: 2 },
+        { tag: "mine", count: 1 },
+      ],
+      total: 2,
+    });
+    expect(fx.calls.tags[0]?.opts?.pathPrefix).toBe("agents/a/");
+
+    const nested = await callTool(fx.app, "/mcp/v/agents/a", sid, "list_tags", {
+      prefix: "journal/",
+    });
+    expect(nested.parsed).toEqual({ items: [{ tag: "todo", count: 1 }], total: 1 });
+    expect(fx.calls.tags[1]?.opts?.pathPrefix).toBe("agents/a/journal/");
+
+    const empty = await callTool(fx.app, "/mcp/v/agents/a", sid, "list_tags", { prefix: "" });
+    expect(empty.parsed).toEqual(all.parsed);
+    expect(fx.calls.tags[2]?.opts?.pathPrefix).toBe("agents/a/");
+
+    const escaping = await callTool(fx.app, "/mcp/v/agents/a", sid, "list_tags", {
+      prefix: "../ab/",
+    });
+    expect(escaping.isError).toBe(true);
+    expect(asError(escaping.parsed).code).toBe("invalid_path");
+    // The rejected prefix never reached the indexer.
+    expect(fx.calls.tags).toHaveLength(3);
+  });
+
   test("an empty scope is usable immediately and is not created eagerly", async () => {
     const fx = await makeScopeFixture("sc-empty");
     cleanup.push(fx.stop);
@@ -747,6 +795,7 @@ describe("scoped vault visibility", () => {
     expect(hinted.map((t) => t.name).sort()).toEqual([
       "list_files",
       "list_folders",
+      "list_tags",
       "list_vaults",
       "read_file",
       "search",
@@ -1006,6 +1055,15 @@ describe("vault-root scope", () => {
     // No forced filter in the vault-root scope — a literal "/" prefix would
     // match nothing and silently empty every search.
     expect(fx.calls.search[0]?.opts?.filter?.pathPrefix).toBeUndefined();
+
+    // Tag listing likewise forces no prefix, and an empty one stays absent.
+    const plainTags = await callTool(fx.app, "/mcp", plainSid, "list_tags", { vault: "v" });
+    for (const tagArgs of [{}, { prefix: "" }]) {
+      const scopedTags = await callTool(fx.app, "/mcp/v", rootSid, "list_tags", tagArgs);
+      expect(scopedTags.isError).toBe(false);
+      expect(scopedTags.parsed).toEqual(plainTags.parsed);
+    }
+    expect(fx.calls.tags.map((c) => c.opts?.pathPrefix)).toEqual([undefined, undefined, undefined]);
 
     const other = await callTool(fx.app, "/mcp/v", rootSid, "vault_status", { vault: "w" });
     expect(other.isError).toBe(true);
