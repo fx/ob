@@ -173,7 +173,7 @@ changes:
     path: changes/0021-list-tags.md
     description: Read-only `list_tags` (REST GET /v1/vaults/:slug/tags) listing indexed inline tags with distinct-document counts, no parent roll-up, scoped by path prefix.
     spec: vault-indexer
-    status: draft
+    status: complete
     depends_on: ["0008", "0014", "0018"]
   - id: "0022"
     name: grep

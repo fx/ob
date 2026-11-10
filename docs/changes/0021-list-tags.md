@@ -5,7 +5,7 @@
 Add tag listing: `Indexer.tags()`, REST `GET /v1/vaults/:slug/tags`, and the read-only MCP tool `list_tags`, reporting the inline tags in a vault's index with distinct-document counts. Implements [Vault Indexer › Tag listing](../specs/vault-indexer/index.md#tag-listing), [REST API › Tags](../specs/rest-api/index.md#tags), and the `list_tags` row of [MCP Server › Tool surface](../specs/mcp-server/index.md#tool-surface).
 
 **Spec:** [Vault Indexer](../specs/vault-indexer/), [REST API](../specs/rest-api/), [MCP Server](../specs/mcp-server/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0008, 0014, 0018
 
 ## Motivation
@@ -60,15 +60,15 @@ Skipping or weakening any of these rules to land the PR MUST be treated as a bug
 
 ## Tasks
 
-- [ ] `VaultStore.tagCounts(pathPrefix?)` in `src/indexer/store.ts`; real-LanceDB tests including multi-chunk documents, literal prefix with SQL wildcard characters, and an empty table
-- [ ] `Indexer.tags()` in `src/indexer/index.ts` (sort, limit, total, unknown vault); tests for both spec scenarios
-- [ ] Scoped wrapper translation in `src/mcp/scope.ts`; tests for root scope, folder scope, nested caller prefix, invalid caller prefix
-- [ ] `src/vault/tags.ts` service function and `src/schemas/tags.ts` schemas with tests
-- [ ] `GET /v1/vaults/:slug/tags` route and tests (validation → `invalid_query`)
-- [ ] `src/mcp/tools/list_tags.ts` (read-only) registered in `src/mcp/index.ts`; tool tests; registry and `readOnlyHint` assertions updated
-- [ ] Parity test `test/parity/list_tags.test.ts`
-- [ ] README gains `list_tags` and the route
-- [ ] Tracking: tick this list, set Status to complete, sync `docs/index.yml` / `docs/index.md`
+- [x] `VaultStore.tagCounts(pathPrefix?)` in `src/indexer/store.ts`; real-LanceDB tests including multi-chunk documents, literal prefix with SQL wildcard characters, and an empty table
+- [x] `Indexer.tags()` in `src/indexer/index.ts` (sort, limit, total, unknown vault); tests for both spec scenarios
+- [x] Scoped wrapper translation in `src/mcp/scope.ts`; tests for root scope, folder scope, nested caller prefix, invalid caller prefix
+- [x] `src/vault/tags.ts` service function and `src/schemas/tags.ts` schemas with tests
+- [x] `GET /v1/vaults/:slug/tags` route and tests (validation → `invalid_query`)
+- [x] `src/mcp/tools/list_tags.ts` (read-only) registered in `src/mcp/index.ts`; tool tests; registry and `readOnlyHint` assertions updated
+- [x] Parity test `test/parity/list_tags.test.ts`
+- [x] README gains `list_tags` and the route
+- [x] Tracking: tick this list, set Status to complete, sync `docs/index.yml` / `docs/index.md`
 
 ## References
 

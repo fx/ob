@@ -199,8 +199,6 @@ The indexer MUST address these via four cooperating mechanisms.
 
 ### Tag listing
 
-> Specified by draft change [0021](../../changes/0021-list-tags.md); not yet implemented.
-
 `Indexer.tags(slug, opts)` reports the tags present in a vault's index and how many documents carry each. It backs `GET /v1/vaults/:slug/tags` and the MCP `list_tags` tool.
 
 - The tags reported MUST be exactly those stored on the vault's chunks — the inline tags the [chunker](#chunker) extracts, without the leading `#`, code excluded — so every reported tag is a value `search` accepts as `filter.tag`.
