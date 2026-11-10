@@ -20,7 +20,7 @@ In v1 the indexer covers Markdown only (`.md` / `.markdown`). Binary files (imag
 
 Indexability is always evaluated against the real vault root with the vault-relative path, never against a scoped root: a session scoped to `node_modules/pkg` sees `note.md`, but the path that is judged is `node_modules/pkg/note.md`, which is not indexable. The predicate is therefore reached through the indexer, which already deals in vault-relative paths, as `Indexer.isIndexable(slug, path)`; service code never calls it with its own (possibly scoped) root, and a scoped session's wrapper prefixes the path exactly as it does for `reindex` and `drop`.
 
-One predicate, `isIndexablePath`, decides what the index may hold, and the initial scan, the watcher, the pipeline, and every direct `reindex` (writes, moves, copies, link rewrites) MUST all apply it, so no route into the index admits a path another route would refuse. A vault-relative path is indexable iff all of these hold:
+One predicate, `isIndexablePath`, decides what the index may hold, and the initial scan, the watcher, the pipeline, and every direct `reindex` (writes, moves, copies, link rewrites) MUST all apply it — inside `reindex`, not before it: every writer calls `reindex` for every path it writes, and `reindex` itself indexes the path or, if it is not indexable, drops its rows — so no route into the index admits a path another route would refuse. A vault-relative path is indexable iff all of these hold:
 
 - its extension is `.md` or `.markdown`, case-insensitively;
 - no segment starts with `.` (which covers `.obsidian/`, `.trash/`, and dotfiles at any depth);
@@ -258,7 +258,7 @@ interface Indexer {
   status(slug: string): IndexerStatus | null;
   list(): IndexerStatus[];
   search(slug: string, query: string, opts?: SearchOptions): Promise<SearchHit[]>;
-  reindex(slug: string, path: string): Promise<void>;
+  reindex(slug: string, path: string): Promise<{ indexed: boolean }>;   // indexed: false = not indexable, rows dropped
   drop(slug: string, path: string): Promise<void>;
   indexedPaths(slug: string, prefix: string): Promise<string[]>;   // distinct indexed paths starting with prefix
   isIndexable(slug: string, path: string): Promise<boolean>;      // isIndexablePath on the real vault root
@@ -273,7 +273,7 @@ interface TagListing {
 
 - `search` MUST return at most `limit ?? 20` hits ordered by descending fused score (after MMR and threshold).
 - `reindex` and `drop` are imperative hooks called by REST writes, deletes, moves, and copies — they let the API skip waiting for the chokidar debounce when the API itself was the writer.
-- `reindex` MUST resolve only when the path's rows reflect its current content (including the unchanged-`sha256` short-circuit, and including dropping the rows of a path that is gone or not indexable), and MUST reject when they could not be brought there — a read, chunk, embed, or store failure after its retries. The failure is still counted in `IndexerStatus.errors`. This is what lets every API response's `indexed` flag report a failed index update.
+- `reindex` MUST resolve only when the path's rows reflect its current content (including the unchanged-`sha256` short-circuit, and including dropping the rows of a path that is gone or not indexable), resolving `{ indexed: true }` when the path was indexed and `{ indexed: false }` when it is not indexable and its rows (if any) were dropped, and MUST reject when the rows could not be brought there — a read, chunk, embed, or store failure after its retries. The failure is still counted in `IndexerStatus.errors`. This is what lets every API response's `indexed` flag report a failed index update.
 - `indexedPaths` returns the distinct paths that have rows and start with `prefix` (a literal prefix, as in `filter.pathPrefix`). A recursive folder delete calls it with the folder's path followed by `/` after the removal and drops each returned path under the drop guard, so a note indexed into the folder after the delete collected its contents is dropped, while a path recreated as an indexable note after the removal keeps its rows (anything else recreated there loses them).
 - A move is indexed as a drop of every path that left, never gated by `isIndexablePath` (rows exist only for paths that were indexable) and subject only to the drop guard (an old path's rows are kept only if an indexable note exists there at drop time), and a reindex of every [indexable](#indexable-paths) path that arrived (hidden paths, `node_modules`, and symlinks travel with a moved folder but are not indexed). Rows are not renamed in place: `embed_text` starts with the note's path, so a moved note's vectors and full-text tokens MUST be recomputed for its new path, and a note whose content is unchanged is still re-embedded after a move.
 
