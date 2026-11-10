@@ -193,6 +193,19 @@ describe("guardedRead", () => {
     expect(fetched).toEqual([3]);
   });
 
+  test("readLimit: endStat is a second fstat taken after the read; absent without readLimit", async () => {
+    const root = tree(); // a/x.md is "hello" (5 bytes)
+    const grown = await guardedRead(root, "a/x.md", {
+      maxBytes: 100,
+      readLimit: () => 5,
+      afterStat: async () => appendFileSync(join(root, "a", "x.md"), "!!"),
+    });
+    expect(new TextDecoder().decode(grown.bytes)).toBe("hello");
+    expect(grown.stat.size).toBe(5);
+    expect(grown.endStat?.size).toBe(7);
+    expect((await guardedRead(root, "a/x.md", { maxBytes: 100 })).endStat).toBeUndefined();
+  });
+
   test("maxBytes: growth that stays within the cap is returned, never beyond it", async () => {
     const root = tree();
     const r = await guardedRead(root, "a/x.md", {

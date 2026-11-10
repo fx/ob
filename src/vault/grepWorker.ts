@@ -36,6 +36,7 @@
  * only the `attach(self)` line at the bottom.
  */
 
+import type { Stats } from "node:fs";
 import { DocNotFoundError, InvalidPathError } from "../errors.ts";
 import { isTextPath } from "./contentType.ts";
 import { OversizeReadError, guardedRead } from "./guarded.ts";
@@ -223,9 +224,11 @@ class ByteBudgetExceeded extends Error {
  * cap. Before any byte is read, the opened file's size — as much of it as a
  * read could fetch, `maxFileBytes + 1` at most — must fit in what is left of
  * the budget, and the read itself is bounded by what is left, so no call ever
- * reads past it. A file that grows after its size was taken, until the read
- * fills what was left, may hold more than the budget covers: that is a
- * `"bytes"` stop too.
+ * reads past it. A file that grows after its size was taken can hold more
+ * than is left: when the read fills what was left and a second `fstat` of
+ * the descriptor shows the file larger than that, the search stops with
+ * `"bytes"` without searching or counting it — this holds even when the
+ * size first taken was exactly what was left, or zero.
  */
 async function readForScan(
   p: ScanParams,
@@ -251,8 +254,10 @@ async function readForScan(
       },
       ...(afterStat !== undefined && { afterStat: () => afterStat(rel) }),
     });
-    // Filled the budget-bounded read with a file that grew since its fstat.
-    if (read.bytes.byteLength === limit && limit > read.stat.size) return "bytes";
+    // The read filled what was left and the file holds more (it grew since
+    // its first fstat): the bytes are a truncated prefix, never searched.
+    const endSize = (read.endStat as Stats).size;
+    if (read.bytes.byteLength === limit && endSize > limit) return "bytes";
     return read.bytes;
   } catch (e) {
     if (e instanceof ByteBudgetExceeded) return "bytes";

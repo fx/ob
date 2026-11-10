@@ -658,6 +658,63 @@ describe("grep — the byte budget bounds bytes read", () => {
     expect(roomy).toMatchObject({ reason: null, filesScanned: 2 });
   });
 
+  test("a file whose size is exactly what is left, grown before the read, is not searched", async () => {
+    // Repro: 1 byte left, the file is `N` at its fstat and `NX` by the read.
+    // Searching the 1-byte prefix would report a false `N$` match.
+    const { deps, root } = vault({ "a.md": "N" });
+    const fetched: string[] = [];
+    const fake = inProcess({
+      afterStat: async () => appendFileSync(join(root, "a.md"), "X"),
+      onRead: (path, n) => fetched.push(`${path}:${n}`),
+    });
+    const r = await grep(
+      deps,
+      "v",
+      { pattern: "N$", regex: true },
+      { spawn: fake.spawn, byteBudget: 1 },
+    );
+    expect(fetched).toEqual(["a.md:1"]);
+    expect(r).toEqual({
+      matches: [],
+      truncated: true,
+      reason: "bytes",
+      filesScanned: 0,
+      filesSkipped: 0,
+    });
+  });
+
+  test("an empty file that grows before the read, with no budget left, is not searched", async () => {
+    const { deps, root } = vault({ "a.md": "" });
+    const fake = inProcess({ afterStat: async () => appendFileSync(join(root, "a.md"), "X") });
+    const r = await grep(deps, "v", { pattern: "X" }, { spawn: fake.spawn, byteBudget: 0 });
+    expect(r).toEqual({
+      matches: [],
+      truncated: true,
+      reason: "bytes",
+      filesScanned: 0,
+      filesSkipped: 0,
+    });
+  });
+
+  test("a file whose size is exactly what is left, unchanged, is searched", async () => {
+    const { r } = await reads({ "a.md": "N" }, { byteBudget: 1 });
+    expect(at(r.matches)).toEqual(["a.md:1:1"]);
+    expect(r).toMatchObject({ reason: null, filesScanned: 1 });
+  });
+
+  test("a file that grows to exactly fill what is left is complete and searched", async () => {
+    const { deps, root } = vault({ "a.md": "N 456789\n", "b.md": "N 456789\n" });
+    const fake = inProcess({
+      afterStat: async (path) => {
+        if (path === "b.md") appendFileSync(join(root, "b.md"), "N\n");
+      },
+    });
+    // 11 bytes left for b.md, which grows from 9 to exactly 11.
+    const r = await grep(deps, "v", { pattern: "N" }, { spawn: fake.spawn, byteBudget: 20 });
+    expect(at(r.matches)).toEqual(["a.md:1:1", "b.md:1:1", "b.md:2:1"]);
+    expect(r).toMatchObject({ reason: null, filesScanned: 2 });
+  });
+
   test("an empty file fits even an exhausted budget", async () => {
     const { r } = await reads({ "a.md": "N 456789\n", "b.md": "" }, { byteBudget: 9 });
     expect(r).toMatchObject({ reason: null, filesScanned: 2 });

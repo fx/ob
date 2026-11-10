@@ -54,7 +54,7 @@ export interface GuardedReadOptions {
    * and returns how many bytes the read may fetch at most (capped at
    * `maxBytes + 1`). It may throw to refuse the read; the error propagates.
    * A read stopped by a limit below `maxBytes + 1` can be short of the file's
-   * content; the caller compares the bytes with `stat.size`.
+   * content; the caller compares the bytes with the result's `endStat.size`.
    */
   readonly readLimit?: (stat: Stats) => number;
 }
@@ -63,6 +63,12 @@ export interface GuardedReadResult {
   readonly bytes: Uint8Array;
   /** `fstat` of the opened descriptor — the file that was actually read. */
   readonly stat: Stats;
+  /**
+   * With `readLimit`: a second `fstat` of the same descriptor, taken after
+   * the read, so a caller can tell a read that stopped at its limit from one
+   * that reached the end of the file.
+   */
+  readonly endStat?: Stats;
 }
 
 /**
@@ -105,7 +111,8 @@ export async function guardedRead(
     if (stat.size > max) throw new OversizeReadError(rel, max);
     await opts.afterStat?.();
     const bytes = await readBounded(handle, rel, max, limit, opts.onRead);
-    return { bytes, stat };
+    if (opts.readLimit === undefined) return { bytes, stat };
+    return { bytes, stat, endStat: await handle.stat() };
   } finally {
     await handle.close();
   }
