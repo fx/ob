@@ -38,9 +38,16 @@ Scoping confines a cooperating client and is not an access control; see
 - Exact text: `grep` — a literal substring (or an ECMAScript regex with
   `regex: true`) matched line by line in the text files on disk, returning
   path, line, column, and the line itself, optionally with context lines.
-  PDFs and binaries are not searched; results are capped at `limit` matches,
-  64 MiB read, and 5 seconds, and a capped response says `truncated: true`.
-  Use `search` to find notes by meaning. REST: `POST /v1/vaults/:slug/grep`.
+  Text files are those `PATCH` accepts, by extension: `.md`, `.markdown`,
+  `.txt`, `.json`, `.yaml`, `.yml`, `.csv`, `.toml`, `.html`, `.xml`, `.svg`,
+  `.geojson`. Every other file — PDFs, images, other binaries — is neither
+  searched nor counted in `filesSkipped`, which counts only text files skipped
+  for being over 1 MiB, containing a NUL byte, or failing the containment
+  check (see [REST API › Grep](docs/specs/rest-api/index.md#grep)). Results
+  are capped at `limit` matches, 64 MiB of file bytes read (skipped files'
+  reads included), and 5 seconds, and a capped response says
+  `truncated: true`. Use `search` to find notes by meaning. REST:
+  `POST /v1/vaults/:slug/grep`.
 
 ## Run
 

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ToolDefinition } from "../../../src/mcp/tool.ts";
+import { isTextPath } from "../../../src/vault/contentType.ts";
 import { GREP_TIME_BUDGET_MS, grepSlots } from "../../../src/vault/grep.ts";
 import { type McpFixture, makeMcpFixture } from "../helpers.ts";
 
@@ -202,6 +203,14 @@ describe("grep", () => {
     expect(d).toContain("truncated");
     expect(d).toContain("`search`");
     expect(d).toContain("by meaning");
+    // The extensions it names are exactly the text rule `patch_file` uses.
+    const named = [...d.matchAll(/`\.([a-z]+)`/g)].map((m) => m[1] as string);
+    expect(named.length).toBeGreaterThan(0);
+    for (const ext of named) expect(isTextPath(`x.${ext}`)).toBe(true);
+    for (const ext of ["pdf", "png", "jpg", "gif", "webp", "bin"]) {
+      expect(isTextPath(`x.${ext}`)).toBe(false);
+    }
+    expect(d).toContain("64 MiB of file bytes read");
     expect(t?.inputSchema).toMatchObject({
       type: "object",
       required: ["vault", "pattern"],
