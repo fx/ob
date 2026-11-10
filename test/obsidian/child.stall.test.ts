@@ -685,11 +685,12 @@ describe("a stalled vault on the health endpoints", () => {
       list: () => [ready],
       status: () => ready,
       search: async () => [],
-      reindex: async () => undefined,
+      reindex: async () => ({ indexed: false }),
       drop: async () => undefined,
       tags: async () => ({ items: [], total: 0 }),
       indexedPaths: async () => [],
       isIndexable: async () => false,
+      dropHidden: async () => undefined,
       stop: async () => undefined,
     };
     const app = buildHttpApp({ supervisor, indexer });

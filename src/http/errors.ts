@@ -17,6 +17,7 @@
 
 import { EmbedderError } from "../embeddings/index.ts";
 import {
+  AlreadyExistsError,
   DocNotFoundError,
   type ErrorCode,
   FolderNotEmptyError,
@@ -62,6 +63,7 @@ export function mapErrorToHttp(error: unknown, requestId?: string): HttpErrorEnv
   if (error instanceof PatchNoMatchError) return envelope(409, error);
   if (error instanceof PatchAmbiguousError) return envelope(409, error);
   if (error instanceof FolderNotEmptyError) return envelope(409, error);
+  if (error instanceof AlreadyExistsError) return envelope(409, error);
   if (error instanceof PdfExtractionError) return envelope(422, error);
   if (error instanceof EmbedderError) {
     return {

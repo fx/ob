@@ -690,6 +690,7 @@ describe("startIndexer round-trip", () => {
             fingerprint: async () => undefined,
             fingerprints: async () => new Map(),
             indexedPaths: async () => [],
+            hasRows: async () => true,
             close: () => {
               firstStoreClosed = true;
             },
@@ -740,6 +741,7 @@ describe("startIndexer round-trip", () => {
         fingerprint: async () => undefined,
         fingerprints: async () => new Map(),
         indexedPaths: async () => [],
+        hasRows: async () => true,
         close: () => {
           if (which === "first") firstStoreClosed = true;
         },

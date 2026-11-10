@@ -75,3 +75,72 @@ describe("pathLockKey", () => {
     );
   });
 });
+
+describe("withPathLocks", () => {
+  test("acquires every key in one sorted, de-duplicated order", async () => {
+    const { withPathLocks } = await import("../../src/vault/lock.ts");
+    const order: string[] = [];
+    // Hold `b`; a call for [c, b, a, a] must queue on `a` first, then `b`.
+    let release!: () => void;
+    const holdB = withPathLock(
+      "b",
+      () =>
+        new Promise<void>((r) => {
+          release = r;
+        }),
+    );
+    const both = withPathLocks(["c", "b", "a", "a"], async () => {
+      order.push("in");
+    });
+    // `a` is free, so a second caller on `a` alone must wait behind `both`.
+    const onA = withPathLock("a", async () => {
+      order.push("a");
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(order).toEqual([]);
+    release();
+    await Promise.all([holdB, both, onA]);
+    expect(order).toEqual(["in", "a"]);
+  });
+
+  test("opposite-order pairs never deadlock", async () => {
+    const { withPathLocks } = await import("../../src/vault/lock.ts");
+    const runs = Array.from({ length: 10 }, (_v, i) =>
+      withPathLocks(i % 2 === 0 ? ["x", "y"] : ["y", "x"], async () => {
+        await new Promise((r) => setTimeout(r, 1));
+        return i;
+      }),
+    );
+    expect(await Promise.all(runs)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+});
+
+describe("withMoveMutex", () => {
+  test("serializes per slug, never against path locks or other vaults", async () => {
+    const { withMoveMutex } = await import("../../src/vault/lock.ts");
+    const order: string[] = [];
+    let release!: () => void;
+    const first = withMoveMutex(
+      "v",
+      () =>
+        new Promise<void>((r) => {
+          order.push("v1");
+          release = r;
+        }),
+    );
+    const second = withMoveMutex("v", async () => {
+      order.push("v2");
+    });
+    const other = withMoveMutex("w", async () => {
+      order.push("w");
+    });
+    const path = withPathLock(pathLockKey("/r", "v"), async () => {
+      order.push("path");
+    });
+    await Promise.all([other, path]);
+    expect(order).toEqual(["v1", "w", "path"]);
+    release();
+    await Promise.all([first, second]);
+    expect(order).toEqual(["v1", "w", "path", "v2"]);
+  });
+});

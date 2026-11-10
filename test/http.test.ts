@@ -65,11 +65,12 @@ function fakeIndexer(statuses: IndexerStatus[]): Indexer {
     list: () => statuses.slice(),
     status: (slug) => statuses.find((s) => s.slug === slug) ?? null,
     search: async () => [],
-    reindex: async () => undefined,
+    reindex: async () => ({ indexed: false }),
     drop: async () => undefined,
     tags: async () => ({ items: [], total: 0 }),
     indexedPaths: async () => [],
     isIndexable: async () => false,
+    dropHidden: async () => undefined,
     stop: async () => undefined,
   };
 }
@@ -110,11 +111,12 @@ describe("buildHttpApp", () => {
         search: async (): Promise<never> => {
           throw new Error("indexer down");
         },
-        reindex: async () => undefined,
+        reindex: async () => ({ indexed: false }),
         drop: async () => undefined,
         tags: async () => ({ items: [], total: 0 }),
         indexedPaths: async () => [],
         isIndexable: async () => false,
+        dropHidden: async () => undefined,
         stop: async () => undefined,
       },
       config: {

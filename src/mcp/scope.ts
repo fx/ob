@@ -355,7 +355,8 @@ export function scopeDeps(deps: McpRoutesDeps, scope: McpScope): McpRoutesDeps {
     // Every method that takes a path adds the scope prefix; every method that
     // returns paths strips it and discards anything outside the scope.
     reindex: (s, p) => deps.indexer.reindex(s, under(p)),
-    drop: (s, p) => deps.indexer.drop(s, under(p)),
+    drop: (s, p, opts) => deps.indexer.drop(s, under(p), opts),
+    dropHidden: (s, p) => deps.indexer.dropHidden(s, under(p)),
     // Judged on the VAULT-relative path: a session scoped to
     // `node_modules/pkg` sees `note.md`, but `node_modules/pkg/note.md` is
     // what is (not) indexable.
@@ -391,6 +392,11 @@ export function scopeDeps(deps: McpRoutesDeps, scope: McpScope): McpRoutesDeps {
     ...deps,
     vault: (s) => (s === scope.slug ? { ...inner, root } : null),
     indexer,
+    // Link rewriting after a move resolves links over the WHOLE vault and
+    // rewrites only notes inside the scope; this is the one place the real
+    // vault root and the prefix reach the service core, and nothing it
+    // returns carries either.
+    linkScope: (s) => (s === scope.slug ? { root: inner.root, prefix: scope.prefix } : null),
   };
 }
 

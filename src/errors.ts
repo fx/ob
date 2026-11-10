@@ -31,6 +31,7 @@ export type ErrorCode =
   | "patch_no_match"
   | "patch_ambiguous"
   | "folder_not_empty"
+  | "already_exists"
   | "embedder_failed"
   | "extraction_failed"
   | "internal";
@@ -50,6 +51,7 @@ export const ERROR_CODES: readonly ErrorCode[] = Object.freeze([
   "patch_no_match",
   "patch_ambiguous",
   "folder_not_empty",
+  "already_exists",
   "embedder_failed",
   "extraction_failed",
   "internal",
@@ -208,6 +210,22 @@ export class FolderNotEmptyError extends OBError {
   readonly path: string;
   constructor(path: string) {
     super(`folder "${path}" is not empty; pass recursive to delete its contents`, { path });
+    this.path = path;
+  }
+}
+
+/**
+ * A move or copy would replace or merge into an existing path it is not
+ * allowed to: the destination exists and `overwrite` is not `true`, or a
+ * folder is involved (a folder never replaces or merges, and a file never
+ * replaces a folder). Carries the conflicting path. Maps to HTTP 409 /
+ * `already_exists`.
+ */
+export class AlreadyExistsError extends OBError {
+  override readonly code = "already_exists" as const;
+  readonly path: string;
+  constructor(path: string, reason = "destination already exists") {
+    super(`"${path}": ${reason}`, { path });
     this.path = path;
   }
 }

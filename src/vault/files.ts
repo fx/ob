@@ -3,7 +3,8 @@
  *
  * Every public function is a pure-by-deps wrapper: it takes `(deps, slug, …)`,
  * resolves the path inside the configured vault root via `safeJoin`, performs
- * the on-disk operation, and (for Markdown) calls the indexer hook. The HTTP
+ * the on-disk operation, and calls the indexer's `reindex` hook for the path
+ * it wrote, whatever its type. The HTTP
  * adapter under `src/http/` and the MCP adapter (0005) call these functions
  * unchanged — every behavioral test for the surface lands in `test/vault/`.
  *
@@ -14,7 +15,12 @@
  * outside the root. The Markdown-with-frontmatter wrapper lives in the HTTP
  * adapter, not here — these functions deal in raw bytes only.
  *
- * Indexer hooks (`reindex` / `drop`) are best-effort post-disk steps. If
+ * Indexer hooks (`reindex` / `drop`) are best-effort post-disk steps. Every
+ * writer calls `reindex` for every path it writes, still holding the path's
+ * lock; the indexer itself applies the indexable-path rule on the REAL vault
+ * root (a scoped session's wrapper prefixes the path), indexing an indexable
+ * path and dropping the rows of any other, and reports which it did. So no
+ * writer decides indexability from its own (possibly scoped) root. If
  * reindex fails after a successful disk write, we log a warning and return
  * `indexed: false` — the on-disk change has already happened, the chokidar
  * watcher will reconcile asynchronously, and the spec's "MUST `await
@@ -41,6 +47,7 @@ import {
 import type { Indexer } from "../indexer/index.ts";
 import type { Logger } from "../log.ts";
 import { detectContentType, isMarkdownPath, isTextPath } from "./contentType.ts";
+import type { GuardSite } from "./guarded.ts";
 import { pathLockKey, withPathLock } from "./lock.ts";
 import { assertNotSymlinkEscape, safeJoin } from "./path.ts";
 
@@ -62,7 +69,7 @@ export interface VaultServiceDeps {
   /** Indexer surface the service core calls. */
   readonly indexer: Pick<
     Indexer,
-    "reindex" | "drop" | "search" | "tags" | "indexedPaths" | "isIndexable"
+    "reindex" | "drop" | "dropHidden" | "search" | "tags" | "indexedPaths" | "isIndexable"
   >;
   /** Inject `Date.now`-equivalent for deterministic tests. */
   readonly now?: () => number;
@@ -85,6 +92,22 @@ export interface VaultServiceDeps {
    * mocking `fs`. Production wiring never sets them.
    */
   readonly hooks?: PathOpHooks;
+  /**
+   * Link context for `movePath` in a scoped MCP session (`src/mcp/scope.ts`):
+   * the REAL vault root and the scope prefix, used ONLY to resolve links over
+   * the whole vault and to keep link rewriting inside the scope. Every other
+   * path still resolves against `vault(slug).root`, the scope root. Unscoped
+   * deps omit it, which means the vault root with an empty prefix.
+   */
+  readonly linkScope?: (slug: string) => LinkScope | null;
+}
+
+/** The whole-vault view a scoped move resolves links against. */
+export interface LinkScope {
+  /** Absolute on-disk path of the real vault root. */
+  readonly root: string;
+  /** Vault-relative scope prefix, no leading or trailing `/`; `""` for the vault root. */
+  readonly prefix: string;
 }
 
 /** Injection points inside `listPaths` / `deletePath`. Each receives the vault-relative path. */
@@ -97,6 +120,14 @@ export interface PathOpHooks {
   readonly beforeRemove?: (path: string) => Promise<void>;
   /** `deletePath`: immediately after a successful removal, before any index drop. */
   readonly afterRemove?: (path: string) => Promise<void>;
+  /**
+   * Move, copy, and the link rewriter: runs at each named step — inside
+   * `guarded`, BEFORE its containment check — with the absolute paths the
+   * step touches. A test acts as a concurrent or outside writer here, or
+   * throws to inject the step's own failure (an errno-coded error stands in
+   * for the filesystem call's).
+   */
+  readonly beforeStep?: (site: GuardSite, paths: readonly string[]) => Promise<void>;
 }
 
 export interface ReadFileResult {
@@ -169,23 +200,33 @@ export function resolveVault(deps: VaultServiceDeps, slug: string): VaultDescrip
 }
 
 /**
- * Try-catch wrapper around `indexer.reindex`. Logs a structured warning on
- * failure and returns `false` so the caller can flip `indexed` in the
- * response. Disk state has already been committed by the time we get here;
- * the chokidar watcher will reconcile asynchronously.
+ * Try-catch wrapper around `indexer.reindex`, called for every written path.
+ * `indexed` is the reindex's own result (`false` for a path that is not
+ * indexable, whose rows the indexer dropped); `ok` is `false` when the
+ * reindex rejected — the index could not be brought to the file's content —
+ * which is logged and also reported as not indexed. Disk state has already
+ * been committed by the time we get here; the chokidar watcher will
+ * reconcile asynchronously.
  */
-async function tryReindex(deps: VaultServiceDeps, slug: string, path: string): Promise<boolean> {
+export async function tryReindexResult(
+  deps: VaultServiceDeps,
+  slug: string,
+  path: string,
+): Promise<{ ok: boolean; indexed: boolean }> {
   try {
-    await deps.indexer.reindex(slug, path);
-    return true;
+    return { ok: true, indexed: (await deps.indexer.reindex(slug, path)).indexed };
   } catch (e) {
     deps.logger?.warn("indexer.reindex failed; chokidar will reconcile", {
       vault: slug,
       path,
       error: e instanceof Error ? e.message : String(e),
     });
-    return false;
+    return { ok: false, indexed: false };
   }
+}
+
+async function tryReindex(deps: VaultServiceDeps, slug: string, path: string): Promise<boolean> {
+  return (await tryReindexResult(deps, slug, path)).indexed;
 }
 
 export async function readFile(
@@ -292,7 +333,7 @@ export async function writeFile(
     const randomUUID = deps.randomUUID ?? crypto.randomUUID.bind(crypto);
     await atomicWrite(abs, bytes, randomUUID);
     // Indexer is a soft post-disk step — see file header.
-    const indexed = isMd ? await tryReindex(deps, slug, path) : false;
+    const indexed = await tryReindex(deps, slug, path);
     const stat = await fs.stat(abs);
     return {
       path,
@@ -374,7 +415,7 @@ export async function patchFile(
     const bytes = new TextEncoder().encode(next);
     const randomUUID = deps.randomUUID ?? crypto.randomUUID.bind(crypto);
     await atomicWrite(abs, bytes, randomUUID);
-    const indexed = isMarkdownPath(path) ? await tryReindex(deps, slug, path) : false;
+    const indexed = await tryReindex(deps, slug, path);
     const stat = await fs.stat(abs);
     return {
       path,
@@ -423,7 +464,7 @@ export async function appendFile(
     combined.set(bytes, original.byteLength);
     const randomUUID = deps.randomUUID ?? crypto.randomUUID.bind(crypto);
     await atomicWrite(abs, combined, randomUUID);
-    const indexed = isMarkdownPath(path) ? await tryReindex(deps, slug, path) : false;
+    const indexed = await tryReindex(deps, slug, path);
     const stat = await fs.stat(abs);
     return {
       path,

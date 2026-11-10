@@ -148,9 +148,18 @@ function makeScopeFixture(slugs: readonly string[] = ["v"]): ScopeFixture {
     },
     reindex: async (s, p) => {
       calls.reindex.push({ slug: s, path: p });
+      return { indexed: true };
     },
-    drop: async (s, p) => {
+    // The drop guard is re-checked inside the drop, on the REAL vault root.
+    drop: async (s, p, opts) => {
+      if (opts?.unlessIndexable === true) {
+        calls.isIndexable.push({ slug: s, path: p });
+        if (await isIndexablePath(root(s), p)) return;
+      }
       calls.drop.push({ slug: s, path: p });
+    },
+    dropHidden: async (s, p) => {
+      calls.drop.push({ slug: s, path: `hidden:${p}` });
     },
     search: async (s, q, opts) => {
       calls.search.push({ slug: s, query: q, opts });
@@ -851,13 +860,17 @@ describe("scopeDeps indexer", () => {
     expect(fx.calls.stop.length).toBe(1);
   });
 
-  test("prepends the prefix to reindex and drop", async () => {
+  test("prepends the prefix to reindex, drop, and dropHidden", async () => {
     const fx = makeScopeFixture();
     const scoped = scopeDeps(fx.deps, AGENTS_A);
-    await scoped.indexer.reindex("v", "memory.md");
+    expect(await scoped.indexer.reindex("v", "memory.md")).toEqual({ indexed: true });
     await scoped.indexer.drop("v", "sub/old.md");
+    await scoped.indexer.dropHidden("v", "sub/.d/x.md");
     expect(fx.calls.reindex).toEqual([{ slug: "v", path: "agents/a/memory.md" }]);
-    expect(fx.calls.drop).toEqual([{ slug: "v", path: "agents/a/sub/old.md" }]);
+    expect(fx.calls.drop).toEqual([
+      { slug: "v", path: "agents/a/sub/old.md" },
+      { slug: "v", path: "hidden:agents/a/sub/.d/x.md" },
+    ]);
   });
 
   test("the vault-root scope prepends nothing", async () => {

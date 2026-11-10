@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AlreadyExistsError,
   DocNotFoundError,
   ERROR_CODES,
   FolderNotEmptyError,
@@ -121,6 +122,7 @@ describe("typed error classes", () => {
     expect(set.has("patch_no_match")).toBe(true);
     expect(set.has("patch_ambiguous")).toBe(true);
     expect(set.has("folder_not_empty")).toBe(true);
+    expect(set.has("already_exists")).toBe(true);
     expect(set.has("embedder_failed")).toBe(true);
     expect(set.has("extraction_failed")).toBe(true);
     expect(set.has("internal")).toBe(true);
@@ -138,6 +140,7 @@ describe("typed error classes", () => {
       new PatchNoMatchError(0),
       new PatchAmbiguousError(0, 2),
       new FolderNotEmptyError("p"),
+      new AlreadyExistsError("p"),
     ];
     const codes = instances.map((e) => e.code);
     // Every code is in the closed set.
@@ -207,6 +210,16 @@ describe("typed error classes", () => {
     expect(e.path).toBe("notes/full");
     expect(e.details).toEqual({ path: "notes/full" });
     expect(e.name).toBe("FolderNotEmptyError");
+  });
+
+  test("AlreadyExistsError carries code + path and a default or custom reason", () => {
+    const e = new AlreadyExistsError("notes/b.md");
+    expect(e.code).toBe("already_exists");
+    expect(e.path).toBe("notes/b.md");
+    expect(e.details).toEqual({ path: "notes/b.md" });
+    expect(e.message).toContain("destination already exists");
+    expect(e.name).toBe("AlreadyExistsError");
+    expect(new AlreadyExistsError("d", "a folder never merges").message).toContain("never merges");
   });
 
   test("OBError default constructor with no details leaves details undefined", () => {

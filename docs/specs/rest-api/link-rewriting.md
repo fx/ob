@@ -2,8 +2,6 @@
 
 Supplementary document of the [REST API spec](index.md). It owns how a move (`POST /v1/vaults/:slug/paths/*path:move` and the MCP `move` tool) keeps internal links pointing at what they pointed at before. The move itself — atomicity, clobber rules, indexing, the response shape — is owned by [REST API › Path operations](index.md#path-operations).
 
-> Specified by draft change [0020](../../changes/0020-move-and-copy.md); not yet implemented.
-
 ## Overview
 
 Obsidian desktop rewrites internal links when a note or attachment is renamed or moved ("Automatically update internal links", on by default). A move made through ob, which happens on disk and reaches desktop clients through Obsidian Sync, gets no such treatment from Obsidian, so ob does it itself: `updateLinks` defaults to `true`.

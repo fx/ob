@@ -24,10 +24,14 @@ provision on the server:
 Scoping confines a cooperating client and is not an access control; see
 [Scoped MCP sessions](#scoped-mcp-sessions) for the details and caveats.
 
-**Twelve MCP tools**, with the same names in every scope:
+**Fourteen MCP tools**, with the same names in every scope:
 
 - Files and folders alike: `list` (`ls`), `delete` (`rm`, `rm -r` with
-  `recursive: true`)
+  `recursive: true`), `move` (`mv -T`: to an exact destination, refusing
+  to clobber unless `overwrite: true`, rewriting internal links to what
+  moved unless `updateLinks: false`), and `copy` (`cp -T`, `cp -r -T` with
+  `recursive: true`). REST: `POST /v1/vaults/:slug/paths/*path:move` and
+  `POST /v1/vaults/:slug/paths/*path:copy`.
 - File content: `read_file`, `write_file`, `append_file`, `patch_file`
 - Folders: `create_folder`
 - Vaults and search: `list_vaults`, `vault_status`, `search`

@@ -135,8 +135,14 @@ export interface VaultStore {
   readonly dim: number;
   /** Atomically replace every chunk for `path` with the provided new set. */
   upsert(path: string, rows: readonly StoreRow[]): Promise<void>;
-  /** Remove all chunks for `path`. No-op if no such rows exist. */
+  /**
+   * Remove all chunks for `path`. Matching nothing is a no-op for the rows,
+   * but LanceDB still commits a new table version, so callers that may drop
+   * a path with no rows ask `hasRows` first.
+   */
   drop(path: string): Promise<void>;
+  /** Whether any chunk for `path` exists: one cheap filtered, limited query. */
+  hasRows(path: string): Promise<boolean>;
   /**
    * Distinct paths that have rows and start with `prefix`, sorted. `prefix`
    * is a LITERAL prefix (the `starts_with` operator `search` filters with):
@@ -577,6 +583,15 @@ export async function openVaultStore(opts: OpenVaultStoreOptions): Promise<Vault
     },
     async drop(path: string): Promise<void> {
       await table.delete(`path = ${sqlString(path)}`);
+    },
+    async hasRows(path: string): Promise<boolean> {
+      const rows = await table
+        .query()
+        .where(`path = ${sqlString(path)}`)
+        .select(["path"])
+        .limit(1)
+        .toArray();
+      return rows.length > 0;
     },
     async indexedPaths(prefix: string): Promise<string[]> {
       // LanceDB has no `SELECT DISTINCT`; project `path` only and dedupe in

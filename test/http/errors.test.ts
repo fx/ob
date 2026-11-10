@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { EmbedderError } from "../../src/embeddings/index.ts";
 import {
+  AlreadyExistsError,
   DocNotFoundError,
   FolderNotEmptyError,
   InvalidBodyError,
@@ -74,6 +75,13 @@ describe("mapErrorToHttp", () => {
     expect(env.status).toBe(409);
     expect(env.body.error.code).toBe("folder_not_empty");
     expect(env.body.error.details).toEqual({ path: "notes/full" });
+  });
+
+  test("AlreadyExistsError → 409 already_exists with path", () => {
+    const env = mapErrorToHttp(new AlreadyExistsError("notes/b.md"));
+    expect(env.status).toBe(409);
+    expect(env.body.error.code).toBe("already_exists");
+    expect(env.body.error.details).toEqual({ path: "notes/b.md" });
   });
 
   test("EmbedderError → 502 embedder_failed", () => {

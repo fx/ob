@@ -114,7 +114,10 @@ export function makeVaultFixture(): VaultFixture {
   const deps: VaultServiceDeps = {
     vault: (s): VaultDescriptor | null => (s === slug ? descriptor : null),
     indexer: {
-      reindex: async (s, p): Promise<void> => {
+      // Like the real indexer: the rule is applied INSIDE reindex, on the
+      // real vault root — an indexable path is indexed, any other has its
+      // rows dropped and reports `indexed: false`.
+      reindex: async (s, p): Promise<{ indexed: boolean }> => {
         calls.reindex.push({ slug: s, path: p });
         events.push(`reindex:${p}`);
         if (reindexErrorPending) {
@@ -123,9 +126,21 @@ export function makeVaultFixture(): VaultFixture {
           nextReindexError = null;
           throw e;
         }
-        indexed.add(p);
+        if (await isIndexablePath(root, p)) {
+          indexed.add(p);
+          return { indexed: true };
+        }
+        indexed.delete(p);
+        return { indexed: false };
       },
-      drop: async (s, p): Promise<void> => {
+      // Like the real indexer: with `unlessIndexable` the rule is re-checked
+      // inside the drop, and the rows are kept for an indexable note.
+      drop: async (s, p, opts): Promise<void> => {
+        if (opts?.unlessIndexable === true) {
+          calls.isIndexable.push({ slug: s, path: p });
+          events.push(`isIndexable:${p}`);
+          if (await isIndexablePath(root, p)) return;
+        }
         calls.drop.push({ slug: s, path: p });
         events.push(`drop:${p}`);
         if (dropErrorPending) {
@@ -134,6 +149,11 @@ export function makeVaultFixture(): VaultFixture {
           nextDropError = null;
           throw e;
         }
+        indexed.delete(p);
+      },
+      dropHidden: async (s, p): Promise<void> => {
+        calls.drop.push({ slug: s, path: p });
+        events.push(`dropHidden:${p}`);
         indexed.delete(p);
       },
       indexedPaths: async (s, prefix): Promise<string[]> => {

@@ -7,9 +7,11 @@
  * sha256 once and compares against what the store already has — if they
  * match, the file is skipped (no embedder call).
  *
- * Ignore rules mirror the watcher: the same paths should be filtered in both
- * code paths so a file that the watcher would never report on `change` is
- * also never picked up by the scanner.
+ * Ignore rules are the one indexable-path rule (`isIndexablePath`), shared
+ * with the watcher, the pipeline, and every direct reindex: directories are
+ * pruned by segment (hidden, `node_modules`) and never followed through a
+ * symlink, and each file the walk yields is admitted only if
+ * `isIndexablePath` holds for it on the real vault root at that moment.
  *
  * The scan owns no state of its own: it's a pure async iterator over the
  * filesystem plus a `processFile` helper the pipeline injects.
@@ -17,7 +19,8 @@
 
 import { createHash } from "node:crypto";
 import { type Dirent, readdirSync } from "node:fs";
-import { lstat, readFile, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { assertSafeRelativePath } from "../errors.ts";
 
@@ -80,12 +83,107 @@ export async function isIndexablePath(root: string, rel: string): Promise<boolea
   return true;
 }
 
+/** The read found something that is not an indexable regular file. */
+export class NotIndexableReadError extends Error {
+  // biome-ignore lint/complexity/noUselessConstructor: explicit ctor needed for Bun coverage tracking.
+  constructor(path: string) {
+    super(path);
+  }
+}
+
+/**
+ * A read failure that means "nothing indexable is there" rather than a
+ * fault: the file is gone (`ENOENT`), a parent stopped being a directory
+ * (`ENOTDIR`), the leaf is a symlink (`ELOOP` from `O_NOFOLLOW`), or it is
+ * not a regular file.
+ */
+export function isNotIndexableRead(e: unknown): boolean {
+  if (e instanceof NotIndexableReadError) return true;
+  const code = (e as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP";
+}
+
+/** No-follow, non-blocking: a symlink leaf is refused, a FIFO opens without waiting. */
+const NO_FOLLOW_READ = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+
+/**
+ * Read a file as UTF-8 through a descriptor opened with `O_NOFOLLOW` and
+ * `O_NONBLOCK`, after an `fstat` confirmed a regular file: a leaf that is a
+ * symlink is refused (`ELOOP`), and a FIFO or device opens without waiting
+ * and is then rejected as not regular, so nothing blocks while a caller
+ * holds a per-path lock. The pipeline's read when it has no vault root.
+ */
+export async function readRegularNoFollow(absPath: string): Promise<string> {
+  const handle = await open(absPath, NO_FOLLOW_READ);
+  try {
+    if (!(await handle.stat()).isFile()) throw new NotIndexableReadError(absPath);
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Test seam for `readIndexable`: runs between the open and the re-check. */
+export interface ReadIndexableHooks {
+  readonly afterOpen?: () => Promise<void>;
+}
+
+/**
+ * The content of `rel` if it is indexable right now, else `null`. This is
+ * the one way the indexer reads note content (the scan and the pipeline):
+ *
+ * 1. the rule's parent-chain check (`isIndexablePath`);
+ * 2. an `O_NOFOLLOW | O_NONBLOCK` open and an `fstat` regular-file check
+ *    on the descriptor;
+ * 3. the chain check again, and the descriptor's `dev`/`ino` compared with
+ *    an `lstat` of the path — a mismatch means the path no longer names
+ *    the file that was opened (a parent was swapped in between);
+ * 4. the read, from that descriptor.
+ *
+ * A leaf symlink is never followed. A parent swapped for a symlink is
+ * detected by the re-check after the open unless the swap happens and is
+ * undone again inside the residual instant between the checks and the
+ * open — the window the threat model (REST API › Path operations) places
+ * out of scope, as for every other content read.
+ */
+export async function readIndexable(
+  root: string,
+  rel: string,
+  hooks: ReadIndexableHooks = {},
+): Promise<string | null> {
+  try {
+    if (!(await isIndexablePath(root, rel))) return null;
+    const abs = join(root, rel);
+    const handle = await open(abs, NO_FOLLOW_READ);
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile()) return null;
+      await hooks.afterOpen?.();
+      if (!(await isIndexablePath(root, rel))) return null;
+      const now = await lstat(abs);
+      if (now.dev !== opened.dev || now.ino !== opened.ino) return null;
+      return await handle.readFile("utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch (e) {
+    if (isNotIndexableRead(e)) return null;
+    throw e;
+  }
+}
+
 export interface ScannerFile {
   readonly absPath: string;
   readonly relPath: string;
 }
 
-/** Yield every Markdown file under `root`, recursively, post-ignore-filter. */
+/**
+ * Yield every file under `root` that passes the LEXICAL half of the
+ * indexable-path rule, recursively. Directories are pruned by segment, and a
+ * symlink `Dirent` is neither a file nor a directory, so nothing is reached
+ * through a link. `scanVault` applies the full `isIndexablePath` to each
+ * yielded file before it is processed.
+ */
 export function* walkVault(root: string): Generator<ScannerFile> {
   const stack: string[] = [root];
   while (stack.length > 0) {
@@ -139,8 +237,15 @@ export interface ScanOptions {
   readonly lookupFingerprint?: (relPath: string) => Promise<ScanFingerprint | undefined>;
   /** Override for `node:fs/promises#stat` — tests inject a fake. */
   readonly statMtimeMs?: (absPath: string) => Promise<number>;
-  /** Bun.file by default; tests inject a fake. */
-  readonly readFile?: (absPath: string) => Promise<string>;
+  /**
+   * Read a file's content; `null` skips it. Default: `readIndexable` — the
+   * chain check, a no-follow non-blocking regular-file open, the chain
+   * check again with the descriptor's identity compared to the path's. A
+   * leaf symlink is never followed; a swapped parent is detected unless the
+   * swap falls inside the residual instant between the checks and the open,
+   * which the threat model excludes. Tests inject a fake.
+   */
+  readonly readFile?: (absPath: string) => Promise<string | null>;
   /** Inject a sha computation override (default: node:crypto sha256 hex). */
   readonly sha256?: (content: string) => string;
 }
@@ -174,7 +279,8 @@ export async function scanVault(
   const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
   const lookup = opts.lookupFingerprint ?? (async () => undefined);
   const statMtime = opts.statMtimeMs ?? defaultStatMtime;
-  const read = opts.readFile ?? ((p) => readFile(p, "utf8"));
+  const read =
+    opts.readFile ?? ((abs) => readIndexable(root, relative(root, abs).split(sep).join("/")));
   const shaFn = opts.sha256 ?? defaultSha;
 
   const iterator = walkVault(root)[Symbol.iterator]();
@@ -188,6 +294,8 @@ export async function scanVault(
       if (next.done === true) return;
       const file = next.value;
       try {
+        // The full rule, filesystem half included, at the moment of the scan.
+        if (!(await isIndexablePath(root, file.relPath))) continue;
         const prev = await lookup(file.relPath);
         // Cheap mtime gate: if both mtimes match, treat the file as
         // unchanged without reading or hashing it. Per spec this is the
@@ -208,6 +316,8 @@ export async function scanVault(
           }
         }
         const content = await read(file.absPath);
+        // No longer an indexable regular file (swapped, gone): not read, not processed.
+        if (content === null) continue;
         const sha = shaFn(content);
         // Content gate: even if mtime differs (touch with no change), a
         // matching sha means we already have the right rows.
