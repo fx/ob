@@ -17,12 +17,17 @@
  * linear backoff before being surfaced.
  *
  * Indexable paths. With `root` set (production always sets it), `upsert`
- * re-checks the one indexable-path rule (`isIndexablePath`: chain `lstat`,
- * no symlink, a regular Markdown file outside hidden and `node_modules`
- * segments) immediately before reading, and reads with `O_NOFOLLOW` plus an
- * `fstat` regular-file check. A path that fails — or that is gone — has its
- * rows dropped instead and resolves `{ indexed: false }`, so no route into
- * the index admits a path another route would refuse.
+ * reads through the scanner's `readIndexable`: the one indexable-path rule
+ * (`isIndexablePath`: chain `lstat`, no symlink, a regular Markdown file
+ * outside hidden and `node_modules` segments) checked before the open, a
+ * no-follow non-blocking open with an `fstat` regular-file check, and the
+ * rule checked again after the open with the descriptor's identity compared
+ * to the path's. A leaf symlink is never followed and a FIFO never blocks;
+ * a swapped parent is detected unless it falls in the residual instant
+ * between the checks and the open, which the threat model excludes. A path
+ * that fails — or that is gone — has its rows dropped instead and resolves
+ * `{ indexed: false }`, so no route into the index admits a path another
+ * route would refuse.
  *
  * A per-path mutex (`pathLocks`) serialises writes for the same file so a
  * stale scan write that resolved after a watcher write can't overwrite the
@@ -36,7 +41,12 @@ import { stat } from "node:fs/promises";
 import type { Embedder } from "../embeddings/index.ts";
 import type { Logger } from "../log.ts";
 import { type Chunk, chunkMarkdown } from "./chunker.ts";
-import { isIndexablePath, isNotIndexableRead, readRegularNoFollow } from "./scanner.ts";
+import {
+  isIndexablePath,
+  isNotIndexableRead,
+  readIndexable,
+  readRegularNoFollow,
+} from "./scanner.ts";
 import type { PathFingerprint, StoreRow, VaultStore } from "./store.ts";
 
 export interface PipelineCounters {
@@ -352,9 +362,13 @@ export function buildPipeline(deps: PipelineDeps, opts: BuildPipelineOptions = {
   }
 
   /** The file's content, or `null` when nothing indexable is at the path. */
-  async function readIndexable(absPath: string, relPath: string): Promise<string | null> {
+  async function readContent(absPath: string, relPath: string): Promise<string | null> {
     try {
-      // Re-checked immediately before the read, on the real vault root.
+      // Production: the full checked read on the real vault root.
+      if (deps.root !== undefined && deps.readFile === undefined) {
+        return await readIndexable(deps.root, relPath);
+      }
+      // Test seams (an injected reader, or no root): the rule, then the read.
       if (deps.root !== undefined && !(await isIndexablePath(deps.root, relPath))) return null;
       return await read(absPath);
     } catch (e) {
@@ -363,8 +377,28 @@ export function buildPipeline(deps: PipelineDeps, opts: BuildPipelineOptions = {
     }
   }
 
+  /**
+   * Whether `relPath` has any rows. Every drop asks first, because a LanceDB
+   * delete commits a new table version even when it matches nothing, and the
+   * watcher now drops on every non-indexable event (each attachment write).
+   * The question goes to the STORE, not to `counters.documents`, so rows
+   * written outside this pipeline (an earlier version, a hidden path) are
+   * still found and dropped. If the question itself fails, the drop runs.
+   */
+  async function mayHaveRows(relPath: string): Promise<boolean> {
+    try {
+      return await deps.store.hasRows(relPath);
+    } catch {
+      return true;
+    }
+  }
+
   const removeImpl = async (relPath: string): Promise<void> => {
     if (stopped) return;
+    if (!(await mayHaveRows(relPath))) {
+      counters.documents.delete(relPath);
+      return;
+    }
     try {
       await withStoreRetry(() => deps.store.drop(relPath), sleep);
     } catch (e) {
@@ -377,7 +411,7 @@ export function buildPipeline(deps: PipelineDeps, opts: BuildPipelineOptions = {
 
   const upsertImpl = async (absPath: string, relPath: string): Promise<UpsertResult> => {
     if (stopped) return { indexed: false };
-    const content = await readIndexable(absPath, relPath);
+    const content = await readContent(absPath, relPath);
     if (content === null) {
       // Not indexable (or gone): whatever rows the path still holds go.
       await removeImpl(relPath);

@@ -15,6 +15,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as lancedb from "@lancedb/lancedb";
 import type { Config } from "../../src/config/index.ts";
 import { buildHashEmbedder } from "../../src/embeddings/fake.ts";
 import type { Embedder } from "../../src/embeddings/index.ts";
@@ -326,6 +327,8 @@ describe("reindex applies the rule and reports it", () => {
     });
     await waitFor(() => indexer.status("v")?.state === "ready");
     writeFileSync(join(root, "a.md"), "# A\n\nbody");
+    // Indexed first, so the drop below has rows and really calls the store.
+    await indexer.reindex("v", "a.md");
     fail = true;
     await expect(indexer.reindex("v", "a.md")).rejects.toThrow("store down");
     await expect(indexer.drop("v", "a.md")).rejects.toThrow("store down");
@@ -592,5 +595,75 @@ describe("a drop decided from an earlier check never deletes fresh rows", () => 
     rmSync(join(root, "a.md"));
     await indexer.drop("v", "a.md", { unlessIndexable: true });
     expect(await indexer.indexedPaths("v", "")).toEqual([]);
+  }, 20_000);
+});
+
+describe("a drop of a path with no rows commits nothing", () => {
+  /** The table's current version, from a fresh connection. */
+  async function version(dataDir: string): Promise<number> {
+    const db = await lancedb.connect(join(dataDir, "lancedb"));
+    try {
+      const t = await db.openTable("v");
+      const v = await t.version();
+      t.close();
+      return v;
+    } finally {
+      db.close();
+    }
+  }
+
+  test("a non-indexable event or reindex with no rows makes no delete call and no new version; seeded rows still go", async () => {
+    const { dataDir, root } = fixtureDirs("no-rows");
+    let store: VaultStore | undefined;
+    const drops: string[] = [];
+    const indexer = await start(dataDir, {
+      openStore: async () => {
+        const real = await openVaultStore({ dataDir, slug: "v", dim: DIM });
+        store = real;
+        return {
+          ...real,
+          drop: async (p) => {
+            drops.push(p);
+            return real.drop(p);
+          },
+        };
+      },
+    });
+    await waitFor(() => indexer.status("v")?.state === "ready");
+    // Make the table exist with one row, so versions can be read.
+    writeFileSync(join(root, "n.md"), "# N\n\nbody");
+    await indexer.reindex("v", "n.md");
+    // Let the watcher's own (debounced) event for `n.md` land first.
+    await new Promise((r) => setTimeout(r, 600));
+    await waitFor(() => indexer.status("v")?.pending === 0);
+    const before = await version(dataDir);
+    writeFileSync(join(root, "img.png"), "PNG");
+    expect(await indexer.reindex("v", "img.png")).toEqual({ indexed: false });
+    await indexer.drop("v", "never-indexed.md");
+    // A watcher event for an attachment: classified non-indexable, dropped.
+    writeFileSync(join(root, "logo.png"), "PNG");
+    await new Promise((r) => setTimeout(r, 600));
+    await waitFor(() => indexer.status("v")?.pending === 0);
+    expect(drops).toEqual([]);
+    expect(await version(dataDir)).toBe(before);
+    // Rows written outside the pipeline are found by the same check and go.
+    await (store as VaultStore).upsert("img.png", [
+      {
+        path: "img.png",
+        chunkIndex: 0,
+        headingPath: [],
+        text: "stale",
+        embedText: "stale",
+        frontmatter: {},
+        links: [],
+        tags: [],
+        mtimeMs: 1,
+        sha256: "s",
+        vector: Float32Array.from([1, 0, 0, 0]),
+      },
+    ]);
+    expect(await indexer.reindex("v", "img.png")).toEqual({ indexed: false });
+    expect(drops).toEqual(["img.png"]);
+    expect(await indexer.indexedPaths("v", "")).toEqual(["n.md"]);
   }, 20_000);
 });

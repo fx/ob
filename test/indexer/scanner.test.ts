@@ -6,6 +6,7 @@ import {
   type ScannerFile,
   isIndexablePath,
   isMarkdownFile,
+  readIndexable,
   scanVault,
   shouldIgnorePath,
   walkVault,
@@ -126,7 +127,82 @@ describe("walkVault", () => {
   });
 });
 
+describe("readIndexable", () => {
+  test("reads an indexable note; a parent swapped or the leaf replaced between open and re-check is skipped", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "ob-scanner-outside-"));
+    writeFileSync(join(outside, "a.md"), "# OUTSIDE");
+    const root = tmpRoot();
+    writeMd(root, "notes/a.md", "# inside");
+    expect(await readIndexable(root, "notes/a.md")).toBe("# inside");
+    // The parent becomes a symlink after the open: the re-check refuses.
+    const swapped = await readIndexable(root, "notes/a.md", {
+      afterOpen: async () => {
+        renameSync(join(root, "notes"), join(root, "notes-real"));
+        symlinkSync(outside, join(root, "notes"));
+      },
+    });
+    expect(swapped).toBeNull();
+    // A different file now at the path: its identity no longer matches.
+    const root2 = tmpRoot();
+    writeMd(root2, "a.md", "# first");
+    const replaced = await readIndexable(root2, "a.md", {
+      afterOpen: async () => {
+        renameSync(join(root2, "a.md"), join(root2, "old.md"));
+        writeFileSync(join(root2, "a.md"), "# second");
+      },
+    });
+    expect(replaced).toBeNull();
+    // Gone after the open, or turned into a FIFO: skipped, nothing blocks.
+    const root3 = tmpRoot();
+    writeMd(root3, "a.md");
+    writeMd(root3, "b.md");
+    expect(
+      await readIndexable(root3, "a.md", { afterOpen: async () => rmSync(join(root3, "a.md")) }),
+    ).toBeNull();
+    const fifo = await readIndexable(root3, "b.md", {
+      afterOpen: async () => {
+        rmSync(join(root3, "b.md"));
+        expect(Bun.spawnSync(["mkfifo", join(root3, "b.md")]).exitCode).toBe(0);
+      },
+    });
+    expect(fifo).toBeNull();
+    expect(await readIndexable(root3, "missing.md")).toBeNull();
+  });
+
+  test("a read fault other than a non-indexable entry propagates", async () => {
+    const root = tmpRoot();
+    writeMd(root, "a.md");
+    require("node:fs").chmodSync(join(root, "a.md"), 0o000);
+    try {
+      await expect(readIndexable(root, "a.md")).rejects.toMatchObject({ code: "EACCES" });
+    } finally {
+      require("node:fs").chmodSync(join(root, "a.md"), 0o644);
+    }
+  });
+});
+
 describe("scanVault", () => {
+  test("a note that became a FIFO after the walk is skipped and nothing blocks", async () => {
+    const root = tmpRoot();
+    writeMd(root, "a.md");
+    const seen: string[] = [];
+    const summary = await scanVault(
+      root,
+      async (f) => {
+        seen.push(f.relPath);
+      },
+      {
+        lookupFingerprint: async () => {
+          rmSync(join(root, "a.md"));
+          Bun.spawnSync(["mkfifo", join(root, "a.md")]);
+          return undefined;
+        },
+      },
+    );
+    expect(seen).toEqual([]);
+    expect(summary.errors).toBe(0);
+  });
+
   test("a leaf or parent swapped for a symlink after the walk is never followed by the read", async () => {
     const outside = mkdtempSync(join(tmpdir(), "ob-scanner-outside-"));
     writeFileSync(join(outside, "a.md"), "# OUTSIDE-CONTENT");

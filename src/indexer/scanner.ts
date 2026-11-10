@@ -103,13 +103,18 @@ export function isNotIndexableRead(e: unknown): boolean {
   return code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP";
 }
 
+/** No-follow, non-blocking: a symlink leaf is refused, a FIFO opens without waiting. */
+const NO_FOLLOW_READ = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+
 /**
- * Read a file as UTF-8 through a descriptor opened with `O_NOFOLLOW`, after
- * an `fstat` confirmed a regular file, so a leaf swapped for a symlink is
- * never followed and a non-file is never read.
+ * Read a file as UTF-8 through a descriptor opened with `O_NOFOLLOW` and
+ * `O_NONBLOCK`, after an `fstat` confirmed a regular file: a leaf that is a
+ * symlink is refused (`ELOOP`), and a FIFO or device opens without waiting
+ * and is then rejected as not regular, so nothing blocks while a caller
+ * holds a per-path lock. The pipeline's read when it has no vault root.
  */
 export async function readRegularNoFollow(absPath: string): Promise<string> {
-  const handle = await open(absPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(absPath, NO_FOLLOW_READ);
   try {
     if (!(await handle.stat()).isFile()) throw new NotIndexableReadError(absPath);
     return await handle.readFile("utf8");
@@ -118,16 +123,49 @@ export async function readRegularNoFollow(absPath: string): Promise<string> {
   }
 }
 
+/** Test seam for `readIndexable`: runs between the open and the re-check. */
+export interface ReadIndexableHooks {
+  readonly afterOpen?: () => Promise<void>;
+}
+
 /**
- * The content of `rel` if it is indexable right now, else `null`: the
- * rule's parent-chain check (`isIndexablePath`) immediately followed by the
- * no-follow read. This is the one way the indexer reads note content
- * (the scan here, the pipeline through the same two steps).
+ * The content of `rel` if it is indexable right now, else `null`. This is
+ * the one way the indexer reads note content (the scan and the pipeline):
+ *
+ * 1. the rule's parent-chain check (`isIndexablePath`);
+ * 2. an `O_NOFOLLOW | O_NONBLOCK` open and an `fstat` regular-file check
+ *    on the descriptor;
+ * 3. the chain check again, and the descriptor's `dev`/`ino` compared with
+ *    an `lstat` of the path — a mismatch means the path no longer names
+ *    the file that was opened (a parent was swapped in between);
+ * 4. the read, from that descriptor.
+ *
+ * A leaf symlink is never followed. A parent swapped for a symlink is
+ * detected by the re-check after the open unless the swap happens and is
+ * undone again inside the residual instant between the checks and the
+ * open — the window the threat model (REST API › Path operations) places
+ * out of scope, as for every other content read.
  */
-export async function readIndexable(root: string, rel: string): Promise<string | null> {
+export async function readIndexable(
+  root: string,
+  rel: string,
+  hooks: ReadIndexableHooks = {},
+): Promise<string | null> {
   try {
     if (!(await isIndexablePath(root, rel))) return null;
-    return await readRegularNoFollow(join(root, rel));
+    const abs = join(root, rel);
+    const handle = await open(abs, NO_FOLLOW_READ);
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile()) return null;
+      await hooks.afterOpen?.();
+      if (!(await isIndexablePath(root, rel))) return null;
+      const now = await lstat(abs);
+      if (now.dev !== opened.dev || now.ino !== opened.ino) return null;
+      return await handle.readFile("utf8");
+    } finally {
+      await handle.close();
+    }
   } catch (e) {
     if (isNotIndexableRead(e)) return null;
     throw e;
@@ -201,9 +239,11 @@ export interface ScanOptions {
   readonly statMtimeMs?: (absPath: string) => Promise<number>;
   /**
    * Read a file's content; `null` skips it. Default: `readIndexable` — the
-   * chain check immediately followed by an `O_NOFOLLOW` regular-file read,
-   * so a leaf or parent swapped for a symlink after the walk is never
-   * followed. Tests inject a fake.
+   * chain check, a no-follow non-blocking regular-file open, the chain
+   * check again with the descriptor's identity compared to the path's. A
+   * leaf symlink is never followed; a swapped parent is detected unless the
+   * swap falls inside the residual instant between the checks and the open,
+   * which the threat model excludes. Tests inject a fake.
    */
   readonly readFile?: (absPath: string) => Promise<string | null>;
   /** Inject a sha computation override (default: node:crypto sha256 hex). */

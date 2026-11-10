@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Embedder } from "../../src/embeddings/index.ts";
 import { buildPipeline } from "../../src/indexer/pipeline.ts";
+import { readRegularNoFollow } from "../../src/indexer/scanner.ts";
 import { type StoreRow, type VaultStore, openVaultStore } from "../../src/indexer/store.ts";
 import { type Logger, createLogger } from "../../src/log.ts";
 
@@ -131,6 +132,7 @@ describe("buildPipeline", () => {
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
       indexedPaths: async () => [],
+      hasRows: async () => true,
       close: () => undefined,
     };
     const pipe = buildPipeline(
@@ -170,6 +172,7 @@ describe("buildPipeline", () => {
       fingerprint: realStore.fingerprint.bind(realStore),
       fingerprints: realStore.fingerprints.bind(realStore),
       indexedPaths: async () => [],
+      hasRows: async () => true,
       close: () => realStore.close(),
     };
     const pipe = buildPipeline(
@@ -224,6 +227,7 @@ describe("buildPipeline", () => {
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
       indexedPaths: async () => [],
+      hasRows: async () => true,
       close: () => undefined,
     };
     const pipe = buildPipeline(
@@ -339,6 +343,7 @@ describe("buildPipeline", () => {
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
       indexedPaths: async () => [],
+      hasRows: async () => true,
       close: () => undefined,
     };
     const pipe = buildPipeline(
@@ -372,6 +377,7 @@ describe("buildPipeline", () => {
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
       indexedPaths: async () => [],
+      hasRows: async () => true,
       close: () => undefined,
     };
     const pipe = buildPipeline(
@@ -402,6 +408,7 @@ describe("buildPipeline", () => {
       },
       fingerprints: async () => new Map(),
       indexedPaths: async () => [],
+      hasRows: async () => true,
       close: () => undefined,
     };
     const pipe = buildPipeline({
@@ -436,6 +443,7 @@ describe("buildPipeline", () => {
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
       indexedPaths: async () => [],
+      hasRows: async () => true,
       close: () => undefined,
     };
     const pipe = buildPipeline({
@@ -492,6 +500,7 @@ describe("buildPipeline", () => {
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
       indexedPaths: async () => [],
+      hasRows: async () => true,
       close: () => undefined,
     };
     const pipe = buildPipeline({
@@ -739,6 +748,7 @@ describe("per-path serialisation (LDKd)", () => {
       fingerprint: realStore.fingerprint.bind(realStore),
       fingerprints: realStore.fingerprints.bind(realStore),
       indexedPaths: async () => [],
+      hasRows: async () => true,
       close: () => realStore.close(),
     };
     const pipe = buildPipeline(
@@ -816,6 +826,7 @@ describe("per-path serialisation (LDKd)", () => {
       fingerprint: async () => ({ mtimeMs: 5000, sha256: "newer" }),
       fingerprints: async () => new Map(),
       indexedPaths: async () => [],
+      hasRows: async () => true,
       close: () => undefined,
     };
     const pipe = buildPipeline({
@@ -897,6 +908,7 @@ describe("hydrateCounters (LDKZ)", () => {
         throw new Error("disk on fire");
       },
       indexedPaths: async () => [],
+      hasRows: async () => true,
       close: () => undefined,
     };
     const pipe = buildPipeline({
@@ -927,6 +939,7 @@ describe("markStopped (LDKr)", () => {
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
       indexedPaths: async () => [],
+      hasRows: async () => true,
       close: () => undefined,
     };
     const pipe = buildPipeline({
@@ -959,6 +972,7 @@ describe("markStopped (LDKr)", () => {
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
       indexedPaths: async () => [],
+      hasRows: async () => true,
       close: () => undefined,
     };
     let resolveRead!: (v: string) => void;
@@ -1032,6 +1046,7 @@ describe("markStopped (LDKr)", () => {
       fingerprint: async () => undefined,
       fingerprints: async () => new Map(),
       indexedPaths: async () => [],
+      hasRows: async () => true,
       close: () => undefined,
     };
     const pipe = buildPipeline({
@@ -1129,6 +1144,64 @@ describe("markStopped (LDKr)", () => {
       });
       await expect(pipe.upsert("/abs/a.md", "a.md")).rejects.toThrow("permission denied");
       expect(pipe.counters.errors).toBe(1);
+      store.close();
+    });
+  });
+
+  describe("no store churn, no blocking", () => {
+    test("a drop asks the store for rows first; a failed question still drops", async () => {
+      const drops: string[] = [];
+      let has: () => Promise<boolean> = async () => false;
+      const store: VaultStore = {
+        dim: 4,
+        upsert: async () => undefined,
+        drop: async (p) => {
+          drops.push(p);
+        },
+        hasRows: () => has(),
+        search: async () => [],
+        searchHybrid: async () => [],
+        documentCount: async () => 0,
+        tagCounts: async () => new Map(),
+        chunkCount: async () => 0,
+        fingerprint: async () => undefined,
+        fingerprints: async () => new Map(),
+        indexedPaths: async () => [],
+        close: () => undefined,
+      };
+      const pipe = buildPipeline({ slug: "v", store, embedder: fakeEmbedder(4), logger: silent() });
+      await pipe.remove("x.md");
+      expect(drops).toEqual([]);
+      has = async () => true;
+      await pipe.remove("x.md");
+      has = async () => {
+        throw new Error("query failed");
+      };
+      await pipe.remove("y.md");
+      expect(drops).toEqual(["x.md", "y.md"]);
+    });
+
+    test("a FIFO at the path neither blocks nor is read, with or without a root", async () => {
+      const dir = tmpDir("fifo");
+      const vault = join(dir, "vault");
+      mkdirSync(vault, { recursive: true });
+      const fifo = join(vault, "f.md");
+      expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+      const store = await openVaultStore({ dataDir: dir, slug: "v", dim: 4 });
+      const bare = buildPipeline({ slug: "v", store, embedder: fakeEmbedder(4), logger: silent() });
+      const rooted = buildPipeline({
+        slug: "v",
+        root: vault,
+        store,
+        embedder: fakeEmbedder(4),
+        logger: silent(),
+      });
+      const raced = await Promise.race([
+        Promise.all([bare.upsert(fifo, "f.md"), rooted.upsert(fifo, "f.md")]),
+        new Promise<"blocked">((r) => setTimeout(() => r("blocked"), 2000)),
+      ]);
+      expect(raced).toEqual([{ indexed: false }, { indexed: false }]);
+      await expect(readRegularNoFollow(fifo)).rejects.toBeDefined();
       store.close();
     });
   });
