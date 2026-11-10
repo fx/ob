@@ -166,7 +166,7 @@ changes:
     path: changes/0020-move-and-copy.md
     description: "`move` and `copy` for files and folders (REST paths/*path:move and :copy): exact destination, no clobber without overwrite, Obsidian-style internal-link rewriting on move by default, moved notes re-embedded, atomic folder copy; new error code already_exists."
     spec: rest-api
-    status: draft
+    status: complete
     depends_on: ["0019"]
   - id: "0021"
     name: list-tags

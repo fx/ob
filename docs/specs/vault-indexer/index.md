@@ -16,7 +16,7 @@ In v1 the indexer covers Markdown only (`.md` / `.markdown`). Binary files (imag
 
 ### Indexable paths
 
-> The `isIndexablePath` predicate and the drop guard below are introduced by change [0019](../../changes/0019-unified-list-and-delete.md), whose deletes use both. Draft change [0020](../../changes/0020-move-and-copy.md) adopts the predicate in the scan, the watcher, the pipeline, and every direct reindex, and adds the startup sweep; until 0020 lands those routes keep today's predicates, which agree on segments and extensions but not on symlinks.
+> The `isIndexablePath` predicate and the drop guard below were introduced by change [0019](../../changes/0019-unified-list-and-delete.md), whose deletes use both. Change [0020](../../changes/0020-move-and-copy.md) adopted the predicate in the scan, the watcher, the pipeline, and every direct reindex, and added the startup sweep.
 
 Indexability is always evaluated against the real vault root with the vault-relative path, never against a scoped root: a session scoped to `node_modules/pkg` sees `note.md`, but the path that is judged is `node_modules/pkg/note.md`, which is not indexable. The predicate is therefore reached through the indexer, which already deals in vault-relative paths, as `Indexer.isIndexable(slug, path)`; service code never calls it with its own (possibly scoped) root, and a scoped session's wrapper prefixes the path exactly as it does for `reindex` and `drop`.
 

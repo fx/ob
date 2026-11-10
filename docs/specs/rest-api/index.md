@@ -230,7 +230,7 @@ Creating a folder is the one folder-only operation. Listing, deleting, moving, a
 
 ### Path operations
 
-> Move and copy are specified by draft change [0020](../../changes/0020-move-and-copy.md) and not yet implemented; list and delete landed with [0019](../../changes/0019-unified-list-and-delete.md).
+> List and delete landed with [0019](../../changes/0019-unified-list-and-delete.md); move and copy with [0020](../../changes/0020-move-and-copy.md).
 
 Operations that apply to files and folders alike live under one type-agnostic resource family, `/v1/vaults/:slug/paths`, with the semantics of the matching unix tool: list (`ls`), delete (`rm` / `rm -r`), move (`mv -T`), copy (`cp` / `cp -r -T`). `*path` names a file or a folder; the operation determines which it is from the filesystem, never from the request.
 
