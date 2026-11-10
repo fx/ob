@@ -32,12 +32,11 @@
  */
 
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { open, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import type { Embedder } from "../embeddings/index.ts";
 import type { Logger } from "../log.ts";
 import { type Chunk, chunkMarkdown } from "./chunker.ts";
-import { isIndexablePath } from "./scanner.ts";
+import { isIndexablePath, isNotIndexableRead, readRegularNoFollow } from "./scanner.ts";
 import type { PathFingerprint, StoreRow, VaultStore } from "./store.ts";
 
 export interface PipelineCounters {
@@ -83,37 +82,6 @@ export const EMBED_BATCH_MAX_CHUNKS = 32;
 
 function defaultSha(content: string): string {
   return createHash("sha256").update(content).digest("hex");
-}
-
-/** The read found something that is not an indexable regular file. */
-class NotIndexableReadError extends Error {
-  // biome-ignore lint/complexity/noUselessConstructor: explicit ctor needed for Bun coverage tracking.
-  constructor(path: string) {
-    super(path);
-  }
-}
-
-async function defaultReadFile(p: string): Promise<string> {
-  const handle = await open(p, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    if (!(await handle.stat()).isFile()) throw new NotIndexableReadError(p);
-    return await handle.readFile("utf8");
-  } finally {
-    await handle.close();
-  }
-}
-
-/**
- * A read failure that means "nothing indexable is there" rather than a
- * fault: the file is gone (`ENOENT`), a parent stopped being a directory
- * (`ENOTDIR`), the leaf is a symlink (`ELOOP` from `O_NOFOLLOW`), or it is
- * not a regular file. Such a path has its rows dropped, never counted as an
- * error.
- */
-function isNotIndexableRead(e: unknown): boolean {
-  if (e instanceof NotIndexableReadError) return true;
-  const code = (e as NodeJS.ErrnoException).code;
-  return code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP";
 }
 
 async function defaultStatMtime(p: string): Promise<number> {
@@ -339,7 +307,7 @@ async function runLocked<T>(
 
 /** Build the pipeline. Caller owns the deps' lifetimes (store/embedder/etc.). */
 export function buildPipeline(deps: PipelineDeps, opts: BuildPipelineOptions = {}): Pipeline {
-  const read = deps.readFile ?? defaultReadFile;
+  const read = deps.readFile ?? readRegularNoFollow;
   const statMtime = deps.statMtimeMs ?? defaultStatMtime;
   const shaFn = deps.sha256 ?? defaultSha;
   const now = deps.now ?? Date.now;

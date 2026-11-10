@@ -19,7 +19,8 @@
 
 import { createHash } from "node:crypto";
 import { type Dirent, readdirSync } from "node:fs";
-import { lstat, readFile, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { assertSafeRelativePath } from "../errors.ts";
 
@@ -80,6 +81,57 @@ export async function isIndexablePath(root: string, rel: string): Promise<boolea
     return false;
   }
   return true;
+}
+
+/** The read found something that is not an indexable regular file. */
+export class NotIndexableReadError extends Error {
+  // biome-ignore lint/complexity/noUselessConstructor: explicit ctor needed for Bun coverage tracking.
+  constructor(path: string) {
+    super(path);
+  }
+}
+
+/**
+ * A read failure that means "nothing indexable is there" rather than a
+ * fault: the file is gone (`ENOENT`), a parent stopped being a directory
+ * (`ENOTDIR`), the leaf is a symlink (`ELOOP` from `O_NOFOLLOW`), or it is
+ * not a regular file.
+ */
+export function isNotIndexableRead(e: unknown): boolean {
+  if (e instanceof NotIndexableReadError) return true;
+  const code = (e as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP";
+}
+
+/**
+ * Read a file as UTF-8 through a descriptor opened with `O_NOFOLLOW`, after
+ * an `fstat` confirmed a regular file, so a leaf swapped for a symlink is
+ * never followed and a non-file is never read.
+ */
+export async function readRegularNoFollow(absPath: string): Promise<string> {
+  const handle = await open(absPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    if (!(await handle.stat()).isFile()) throw new NotIndexableReadError(absPath);
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * The content of `rel` if it is indexable right now, else `null`: the
+ * rule's parent-chain check (`isIndexablePath`) immediately followed by the
+ * no-follow read. This is the one way the indexer reads note content
+ * (the scan here, the pipeline through the same two steps).
+ */
+export async function readIndexable(root: string, rel: string): Promise<string | null> {
+  try {
+    if (!(await isIndexablePath(root, rel))) return null;
+    return await readRegularNoFollow(join(root, rel));
+  } catch (e) {
+    if (isNotIndexableRead(e)) return null;
+    throw e;
+  }
 }
 
 export interface ScannerFile {
@@ -147,8 +199,13 @@ export interface ScanOptions {
   readonly lookupFingerprint?: (relPath: string) => Promise<ScanFingerprint | undefined>;
   /** Override for `node:fs/promises#stat` — tests inject a fake. */
   readonly statMtimeMs?: (absPath: string) => Promise<number>;
-  /** Bun.file by default; tests inject a fake. */
-  readonly readFile?: (absPath: string) => Promise<string>;
+  /**
+   * Read a file's content; `null` skips it. Default: `readIndexable` — the
+   * chain check immediately followed by an `O_NOFOLLOW` regular-file read,
+   * so a leaf or parent swapped for a symlink after the walk is never
+   * followed. Tests inject a fake.
+   */
+  readonly readFile?: (absPath: string) => Promise<string | null>;
   /** Inject a sha computation override (default: node:crypto sha256 hex). */
   readonly sha256?: (content: string) => string;
 }
@@ -182,7 +239,8 @@ export async function scanVault(
   const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
   const lookup = opts.lookupFingerprint ?? (async () => undefined);
   const statMtime = opts.statMtimeMs ?? defaultStatMtime;
-  const read = opts.readFile ?? ((p) => readFile(p, "utf8"));
+  const read =
+    opts.readFile ?? ((abs) => readIndexable(root, relative(root, abs).split(sep).join("/")));
   const shaFn = opts.sha256 ?? defaultSha;
 
   const iterator = walkVault(root)[Symbol.iterator]();
@@ -218,6 +276,8 @@ export async function scanVault(
           }
         }
         const content = await read(file.absPath);
+        // No longer an indexable regular file (swapped, gone): not read, not processed.
+        if (content === null) continue;
         const sha = shaFn(content);
         // Content gate: even if mtime differs (touch with no change), a
         // matching sha means we already have the right rows.

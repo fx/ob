@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -127,6 +127,50 @@ describe("walkVault", () => {
 });
 
 describe("scanVault", () => {
+  test("a leaf or parent swapped for a symlink after the walk is never followed by the read", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "ob-scanner-outside-"));
+    writeFileSync(join(outside, "a.md"), "# OUTSIDE-CONTENT");
+    for (const swap of ["leaf", "parent"] as const) {
+      const root = tmpRoot();
+      writeMd(root, "notes/a.md", "# inside");
+      const seen: string[] = [];
+      const summary = await scanVault(
+        root,
+        async (_f, content) => {
+          seen.push(content);
+        },
+        {
+          // A seam after the walk and the rule check, before the read.
+          lookupFingerprint: async () => {
+            if (swap === "leaf") {
+              rmSync(join(root, "notes", "a.md"));
+              symlinkSync(join(outside, "a.md"), join(root, "notes", "a.md"));
+            } else {
+              renameSync(join(root, "notes"), join(root, "notes-real"));
+              symlinkSync(outside, join(root, "notes"));
+            }
+            return undefined;
+          },
+        },
+      );
+      expect([swap, seen]).toEqual([swap, []]);
+      expect(summary.errors).toBe(0);
+    }
+  });
+
+  test("a read fault other than a non-indexable entry is counted as an error", async () => {
+    const root = tmpRoot();
+    writeMd(root, "a.md");
+    const summary = await scanVault(root, async () => undefined, {
+      lookupFingerprint: async () => {
+        require("node:fs").chmodSync(join(root, "a.md"), 0o000);
+        return undefined;
+      },
+    });
+    require("node:fs").chmodSync(join(root, "a.md"), 0o644);
+    expect(summary.errors).toBe(1);
+  });
+
   test("a file that stopped being indexable after the walk listed it is not processed", async () => {
     const root = tmpRoot();
     writeMd(root, "a.md");
