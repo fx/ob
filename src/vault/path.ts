@@ -122,32 +122,61 @@ export async function assertNotSymlinkEscape(absPath: string, root: string): Pro
   }
 }
 
+/** Outcome of `checkContainedDirectory`. */
+export type DirectoryCheck =
+  /** A real directory, contained: its own `lstat`. */
+  | { readonly kind: "dir"; readonly stat: import("node:fs").Stats }
+  /** Nothing to walk, by design: it vanished or stopped being a directory. */
+  | { readonly kind: "skip" }
+  /** A real failure: an `lstat` fault (EACCES, …) or a containment violation above it. */
+  | { readonly kind: "error"; readonly error: unknown };
+
 /**
  * The containment check a directory walk runs immediately before it reads a
  * directory: `lstat` every level from `absDir` up to (not including) `root`,
- * never following a link. Returns the directory's own `lstat` when every level
- * exists, none is a symbolic link, and each is a real directory; otherwise
- * (a symlink anywhere on the chain, a level that is a file, a level that is
- * gone, or any other `lstat` failure) `null`, and the caller skips the
- * directory and everything below it. One chain walk per directory — never per
- * entry — so the walk's listing metadata comes from this same `lstat`.
+ * never following a link. One chain walk per directory — never per entry —
+ * so the walk's listing metadata comes from this same `lstat`.
+ *
+ * The outcomes are kept apart because callers treat them differently:
+ * - `dir`: every level exists, none is a symlink, each is a real directory.
+ * - `skip`: the directory itself vanished (`ENOENT` / `ENOTDIR` anywhere on
+ *   the chain) or stopped being a directory (now a symlink or a file) —
+ *   an entry changing under the walk, which every walk skips silently.
+ * - `error`: an `lstat` that failed for any other reason, or a level ABOVE
+ *   the directory that is a symlink or not a directory (a containment
+ *   violation), or a path not under `root` at all. A walk that must not
+ *   miss anything (a move's or a folder copy's) is told about these.
  */
-export async function lstatContainedDirectory(
+export async function checkContainedDirectory(
   absDir: string,
   root: string,
-): Promise<import("node:fs").Stats | null> {
+): Promise<DirectoryCheck> {
   const absRoot = resolve(root);
+  const dir = resolve(absDir);
   let leaf: import("node:fs").Stats | null = null;
-  try {
-    for (let current = resolve(absDir); current !== absRoot; current = dirname(current)) {
-      // A path that is not under `root` at all never reaches `absRoot`.
-      if (current.length < absRoot.length) return null;
-      const st = await fs.lstat(current);
-      if (st.isSymbolicLink() || !st.isDirectory()) return null;
-      leaf ??= st;
+  for (let current = dir; current !== absRoot; current = dirname(current)) {
+    if (current.length < absRoot.length) {
+      return { kind: "error", error: new InvalidPathError(absDir, "not under the root") };
     }
-  } catch {
-    return null;
+    let st: import("node:fs").Stats;
+    try {
+      st = await fs.lstat(current);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return { kind: "skip" };
+      return { kind: "error", error: e };
+    }
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      if (current === dir) return { kind: "skip" };
+      return {
+        kind: "error",
+        error: new InvalidPathError(
+          toPosixRelative(absRoot, dir),
+          "path traverses a symbolic link or non-directory",
+        ),
+      };
+    }
+    leaf ??= st;
   }
-  return leaf;
+  return leaf === null ? { kind: "skip" } : { kind: "dir", stat: leaf };
 }

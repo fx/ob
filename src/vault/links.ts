@@ -592,6 +592,9 @@ async function writeNote(
 ): Promise<void> {
   const uuid = (deps.randomUUID ?? crypto.randomUUID.bind(crypto))();
   const tmp = join(dirname(abs), `.${basename(abs)}.${uuid}.tmp`);
+  // Ownership: a failed exclusive open (EEXIST: the name is someone else's)
+  // throws from here, outside the cleanup below, which therefore only ever
+  // removes a temp file this call created.
   const handle = await guarded(g, "rewrite.openTmp", [abs, tmp], () => fs.open(tmp, "wx"));
   try {
     try {

@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -501,6 +502,72 @@ describe("copyPath: retries and owned-only cleanup", () => {
     const res = await copyPath(fx.deps, fx.slug, "d", { destination: "e", recursive: true });
     expect(res).toMatchObject({ files: 1, skipped: 2 });
     expect(readdirSync(join(fx.root, "e"))).toEqual(["a.md"]);
+  });
+});
+
+describe("copyPath: owned temp and staging names", () => {
+  test("a temp name that collides with an existing file fails the copy and never removes that file", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "a.md", "A");
+    put(fx.root, ".b.md.fixed.tmp", "THEIRS");
+    const deps: VaultServiceDeps = { ...fx.deps, randomUUID: () => "fixed" };
+    const err = await copyPath(deps, fx.slug, "a.md", { destination: "b.md" }).catch((e) => e);
+    expect((err as NodeJS.ErrnoException).code).toBe("EEXIST");
+    expect(read(fx.root, ".b.md.fixed.tmp")).toBe("THEIRS");
+    expect(existsSync(join(fx.root, "b.md"))).toBe(false);
+  });
+
+  test("a staging name that collides with an existing folder fails the copy and never removes it", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "d/x.md", "X");
+    put(fx.root, ".e.fixed.copy/theirs.md", "THEIRS");
+    const deps: VaultServiceDeps = { ...fx.deps, randomUUID: () => "fixed" };
+    const err = await copyPath(deps, fx.slug, "d", { destination: "e", recursive: true }).catch(
+      (e) => e,
+    );
+    expect((err as NodeJS.ErrnoException).code).toBe("EEXIST");
+    expect(read(fx.root, ".e.fixed.copy/theirs.md")).toBe("THEIRS");
+    expect(existsSync(join(fx.root, "e"))).toBe(false);
+  });
+});
+
+describe("copyPath: an unreadable source fails before publishing", () => {
+  test("the source root becoming unreadable fails the copy; no empty destination appears", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "p/d/x.md", "X");
+    const deps = stepping(fx, (site) => {
+      // After the checks, before the walk: `p/d` can no longer be lstat'ed.
+      if (site === "copy.mkdirStaging") chmodSync(join(fx.root, "p"), 0o600);
+    });
+    try {
+      const err = await copyPath(deps, fx.slug, "p/d", { destination: "e", recursive: true }).catch(
+        (e) => e,
+      );
+      expect((err as NodeJS.ErrnoException).code).toBe("EACCES");
+      expect(readdirSync(fx.root).sort()).toEqual(["p"]);
+    } finally {
+      chmodSync(join(fx.root, "p"), 0o755);
+    }
+  });
+
+  test("a subtree becoming unreadable fails the copy; no partial destination appears", async () => {
+    const fx = makeVaultFixture();
+    // `d/sub` stays listable but not searchable, so only the walk's contained
+    // lstat of `d/sub/inner` fails (EACCES); `d/z.md` would still copy fine.
+    put(fx.root, "d/sub/inner/b.md", "B");
+    put(fx.root, "d/z.md", "Z");
+    const deps = stepping(fx, (site) => {
+      if (site === "copy.mkdirStaging") chmodSync(join(fx.root, "d", "sub"), 0o600);
+    });
+    try {
+      const err = await copyPath(deps, fx.slug, "d", { destination: "e", recursive: true }).catch(
+        (e) => e,
+      );
+      expect((err as NodeJS.ErrnoException).code).toBe("EACCES");
+      expect(readdirSync(fx.root)).toEqual(["d"]);
+    } finally {
+      chmodSync(join(fx.root, "d", "sub"), 0o755);
+    }
   });
 });
 

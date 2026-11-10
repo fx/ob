@@ -57,7 +57,7 @@ import { type LinksReport, type ReindexOutcome, buildFileIndex, rewriteLinks } f
 import { pathLockKey, withMoveMutex, withPathLock, withPathLocks } from "./lock.ts";
 import { comparePaths, compareSegments } from "./order.ts";
 import { ParentVanishedError, ensureParents, errnoOf, removeCreatedParents } from "./parents.ts";
-import { assertNotSymlinkEscape, lstatContainedDirectory, safeJoin } from "./path.ts";
+import { assertNotSymlinkEscape, checkContainedDirectory, safeJoin } from "./path.ts";
 
 export const DEFAULT_LIMIT = 100;
 export const MAX_LIMIT = 1000;
@@ -111,9 +111,13 @@ function isGone(e: unknown): boolean {
 export type WalkHooks = Pick<PathOpHooks, "beforeReadDir"> & {
   readonly onSkip?: (rel: string) => void;
   /**
-   * When set, a directory whose listing fails (other than by vanishing) is
-   * reported here and skipped with everything below it, instead of failing
-   * the walk. Without it the failure propagates, as a listing needs.
+   * When set, a directory that cannot be walked for a reason other than
+   * vanishing or no longer being a directory — its `readdir` or its
+   * contained `lstat` failed, or its parent chain stopped being contained —
+   * is reported here and skipped with everything below it, instead of
+   * failing the walk (a failed `readdir`) or being skipped silently (a
+   * failed check). Without it a failed `readdir` propagates, as a listing
+   * needs, and a failed check is skipped like a vanished entry.
    */
   readonly onReadError?: (rel: string, error: unknown) => void;
 };
@@ -142,11 +146,12 @@ export function encodeCursor(path: string): string {
  * `compareSegments`. Hidden names and symlinks are skipped by `Dirent`
  * inspection, never followed, and nothing below them is visited.
  *
- * Containment: every directory below the root passes `lstatContainedDirectory`
+ * Containment: every directory below the root passes `checkContainedDirectory`
  * (no symlink on its chain to the vault root, a real directory) immediately
  * before it is read, and its listing metadata comes from that same check; a
  * directory that fails it — swapped for a symlink, turned into a file, or
- * gone since its parent was read — is skipped with everything below it. The
+ * gone since its parent was read — is skipped with everything below it (a
+ * real failure is reported to `hooks.onReadError` first, if set). The
  * check and the `readdir` run back to back, before the directory is yielded,
  * so no caller code runs between them.
  *
@@ -163,9 +168,27 @@ export async function* walkVaultEntries(
   descend: (rel: string) => boolean = () => true,
   hooks: WalkHooks = {},
 ): AsyncIterable<WalkEntry> {
-  if (sub !== "" && (await lstatContainedDirectory(join(root, sub), root)) === null) return;
+  if (sub !== "" && (await containedDirectory(root, sub, hooks)) === null) return;
   const entries = await readDirChecked(root, sub, hooks);
   if (entries !== null) yield* walkEntries(root, sub, entries, descend, hooks);
+}
+
+/**
+ * The directory's contained `lstat`, or `null` when it must not be walked.
+ * A vanished or no-longer-a-directory entry is skipped silently; a real
+ * failure (an `lstat` fault, a containment violation) is also skipped but
+ * first reported to `hooks.onReadError`, so a walk that must be complete
+ * knows it is not.
+ */
+async function containedDirectory(
+  root: string,
+  rel: string,
+  hooks: WalkHooks,
+): Promise<import("node:fs").Stats | null> {
+  const check = await checkContainedDirectory(join(root, rel), root);
+  if (check.kind === "dir") return check.stat;
+  if (check.kind === "error") hooks.onReadError?.(rel, check.error);
+  return null;
 }
 
 /** `readDirSorted`, routing a failure to `hooks.onReadError` when one is set. */
@@ -212,7 +235,7 @@ async function* walkEntries(
     }
     if (ent.isDirectory()) {
       // Checked, then read, before anything is yielded (see above).
-      const st = await lstatContainedDirectory(join(root, rel), root);
+      const st = await containedDirectory(root, rel, hooks);
       if (st === null) continue;
       const folder: WalkEntry = { type: "folder", rel, mtimeMs: st.mtimeMs };
       if (!descend(rel)) {
@@ -540,6 +563,11 @@ export async function listFiles(
   return out;
 }
 
+/** An `onReadError` for walks that must be complete: the failure fails the caller. */
+export function failListing(_rel: string, error: unknown): never {
+  throw error;
+}
+
 /** Run `fn` over `items` with at most `limit` in flight; results in input order. */
 export async function mapLimit<T, R>(
   items: readonly T[],
@@ -650,7 +678,9 @@ export async function movePath(
           completion = dstSt.dev === sst.dev && dstSt.ino === sst.ino;
         }
         const overwritten = dstSt !== null && !completion;
-        const before = updateLinks ? await listFiles(scope.root) : null;
+        // Before publication a folder that cannot be listed fails the move
+        // (nothing has changed yet): a partial F_before could mis-rewrite links.
+        const before = updateLinks ? await listFiles(scope.root, "", failListing) : null;
         await publishWithParents(g, dstAbs, dst, async () => {
           if (completion) return removeSourceIfSame(g, srcAbs, dstAbs);
           if (type === "folder" || overwritten || opts.overwrite === true) {

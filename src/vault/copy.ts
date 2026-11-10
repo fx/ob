@@ -44,6 +44,7 @@ import {
   type PathType,
   REINDEX_CONCURRENCY,
   collision,
+  failListing,
   lstatDestination,
   lstatSource,
   mapLimit,
@@ -134,6 +135,10 @@ async function copyFileLocked(
   const uuid = deps.randomUUID ?? crypto.randomUUID.bind(crypto);
   await publishWithParents(g, dstAbs, dst, async () => {
     const tmp = join(dirname(dstAbs), `.${basename(dstAbs)}.${uuid()}.tmp`);
+    // Ownership: a failed exclusive open (EEXIST: the name is someone
+    // else's) throws from here, outside the cleanup below; only once this
+    // open has succeeded is the temp file provably this call's own and
+    // removable on a failure path.
     const handle = await guarded(g, "copy.openTmp", [tmp], () => fs.open(tmp, "wx"));
     try {
       try {
@@ -197,6 +202,9 @@ async function createStaging(
   staging: string,
   created: string[],
 ): Promise<string[]> {
+  // Ownership: an exclusive `mkdir` that fails (EEXIST included) leaves
+  // whatever is at that name alone; the staging handle that admits removal
+  // is minted only after this call's own `mkdir` succeeded.
   try {
     await guarded(g, "copy.mkdirStaging", [staging], () => fs.mkdir(staging));
     return created;
@@ -239,7 +247,13 @@ async function copyFolder(
   let skipped = 0;
   const copied: string[] = [];
   try {
-    const walk = walkVaultEntries(g.root, src, undefined, { onSkip: () => skipped++ });
+    // The copy must be complete or not happen: a source folder (the root
+    // included) that cannot be read or is no longer contained fails it
+    // here, before anything is published.
+    const walk = walkVaultEntries(g.root, src, undefined, {
+      onSkip: () => skipped++,
+      onReadError: failListing,
+    });
     for await (const ent of walk) {
       const target = join(stagingAbs, ent.rel.slice(src.length + 1));
       await atStep(g, "copy.entry", [join(g.root, ent.rel), target]);

@@ -516,6 +516,40 @@ describe("movePath: enumeration after publication never fails the move", () => {
     }
   });
 
+  test("a subtree whose lstat fails (EACCES) during the post-publish scan makes the set incomplete", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "f/x/sub/b.md", "B");
+    put(fx.root, "f/a.md", "A");
+    // Readable but not searchable: `x` lists its entries, but `x/sub` cannot be lstat'ed.
+    const deps = stepping(fx, (site) => {
+      if (site === "move.afterPublish") chmodSync(join(fx.root, "g", "x"), 0o600);
+    });
+    try {
+      const res = await movePath(deps, fx.slug, "f", { destination: "g" });
+      expect(res.indexed).toBe(false);
+      expect(res.links?.failed.map((f) => [f.path, f.code])).toEqual([["g", "internal"]]);
+      expect(fx.calls.reindex.map((c) => c.path)).toEqual(["g/a.md"]);
+      const warns = fx.logCalls.warn.filter((w) => w.msg.includes("could not list a folder"));
+      expect(warns.map((w) => (w.fields as { path: string }).path)).toEqual(["g/x/sub", "g/x/sub"]);
+    } finally {
+      chmodSync(join(fx.root, "g", "x"), 0o755);
+    }
+  });
+
+  test("a subtree that cannot be checked before publication fails the move, nothing changed", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "a.md", "A");
+    put(fx.root, "locked/inner/x.md", "X");
+    chmodSync(join(fx.root, "locked"), 0o600);
+    try {
+      const err = await movePath(fx.deps, fx.slug, "a.md", { destination: "b.md" }).catch((e) => e);
+      expect((err as NodeJS.ErrnoException).code).toBe("EACCES");
+      expect(read(fx.root, "a.md")).toBe("A");
+    } finally {
+      chmodSync(join(fx.root, "locked"), 0o755);
+    }
+  });
+
   test("a listing failure before publication still fails the move with nothing changed", async () => {
     const fx = makeVaultFixture();
     put(fx.root, "a.md", "A");
@@ -747,6 +781,18 @@ describe("movePath: links", () => {
       { path: "n.md", code: "invalid_path", message: expect.stringContaining("n.md") },
     ]);
     expect(read(fx.root, "n.md")).toBe("see [[old]] and [o](old.md)");
+  });
+
+  test("a rewrite temp name that collides with an existing file never removes that file", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "a.md", "A");
+    put(fx.root, "n.md", "[[a]]");
+    put(fx.root, ".n.md.fixed.tmp", "THEIRS");
+    const deps: VaultServiceDeps = { ...fx.deps, randomUUID: () => "fixed" };
+    const res = await movePath(deps, fx.slug, "a.md", { destination: "b.md" });
+    expect(res.links?.failed.map((f) => f.path)).toEqual(["n.md"]);
+    expect(read(fx.root, ".n.md.fixed.tmp")).toBe("THEIRS");
+    expect(read(fx.root, "n.md")).toBe("[[a]]");
   });
 
   test("a note that is not valid UTF-8 is left alone and not reported", async () => {

@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import * as nodeFs from "node:fs";
 import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { InvalidPathError } from "../../src/errors.ts";
-import { assertNotSymlinkEscape, safeJoin } from "../../src/vault/path.ts";
+import { assertNotSymlinkEscape, checkContainedDirectory, safeJoin } from "../../src/vault/path.ts";
 
 describe("safeJoin", () => {
   const root = resolve("/tmp/ob-test-root");
@@ -70,6 +72,51 @@ describe("assertNotSymlinkEscape", () => {
       await expect(assertNotSymlinkEscape(target, root)).rejects.toThrow("EACCES");
     } finally {
       (fs as unknown as { lstat: typeof fs.lstat }).lstat = realLstat;
+    }
+  });
+});
+
+describe("checkContainedDirectory", () => {
+  const tmp = (): string => nodeFs.mkdtempSync(join(tmpdir(), "ob-contained-"));
+
+  test("a contained real directory is `dir`, with its own lstat", async () => {
+    const root = tmp();
+    nodeFs.mkdirSync(join(root, "a", "b"), { recursive: true });
+    const r = await checkContainedDirectory(join(root, "a", "b"), root);
+    expect(r.kind).toBe("dir");
+    expect(r.kind === "dir" && r.stat.isDirectory()).toBe(true);
+  });
+
+  test("vanished, or no longer a directory itself, is a silent `skip`", async () => {
+    const root = tmp();
+    const out = tmp();
+    nodeFs.writeFileSync(join(root, "f"), "x");
+    nodeFs.symlinkSync(out, join(root, "link"));
+    for (const p of ["gone", "gone/deeper", "f", "f/under", "link"]) {
+      expect([p, (await checkContainedDirectory(join(root, p), root)).kind]).toEqual([p, "skip"]);
+    }
+    expect((await checkContainedDirectory(root, root)).kind).toBe("skip");
+  });
+
+  test("a symlink above the directory, a path outside the root, or an lstat fault is an `error`", async () => {
+    const root = tmp();
+    const out = tmp();
+    nodeFs.mkdirSync(join(out, "sub"));
+    nodeFs.symlinkSync(out, join(root, "link"));
+    const viaLink = await checkContainedDirectory(join(root, "link", "sub"), root);
+    expect(viaLink.kind).toBe("error");
+    expect(viaLink.kind === "error" && viaLink.error).toBeInstanceOf(InvalidPathError);
+    const outside = await checkContainedDirectory(out, root);
+    expect(outside.kind === "error" && outside.error).toBeInstanceOf(InvalidPathError);
+    nodeFs.mkdirSync(join(root, "locked", "inner"), { recursive: true });
+    nodeFs.chmodSync(join(root, "locked"), 0o600);
+    try {
+      const denied = await checkContainedDirectory(join(root, "locked", "inner"), root);
+      expect(denied.kind === "error" && (denied.error as NodeJS.ErrnoException).code).toBe(
+        "EACCES",
+      );
+    } finally {
+      nodeFs.chmodSync(join(root, "locked"), 0o755);
     }
   });
 });
