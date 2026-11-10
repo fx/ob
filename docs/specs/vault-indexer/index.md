@@ -16,7 +16,7 @@ In v1 the indexer covers Markdown only (`.md` / `.markdown`). Binary files (imag
 
 ### Indexable paths
 
-> The single rule below is introduced by draft change [0020](../../changes/0020-move-and-copy.md); until it lands the scanner and watcher apply today's predicates, which agree on segments and extensions but not on symlinks.
+> The `isIndexablePath` predicate and the drop guard below are introduced by draft change [0019](../../changes/0019-unified-list-and-delete.md), whose deletes use both. Draft change [0020](../../changes/0020-move-and-copy.md) adopts the predicate in the scan, the watcher, the pipeline, and every direct reindex, and adds the startup sweep; until 0020 lands those routes keep today's predicates, which agree on segments and extensions but not on symlinks.
 
 One predicate, `isIndexablePath`, decides what the index may hold, and the initial scan, the watcher, the pipeline, and every direct `reindex` (writes, moves, copies, link rewrites) MUST all apply it, so no route into the index admits a path another route would refuse. A vault-relative path is indexable iff all of these hold:
 
@@ -341,5 +341,5 @@ fs unlink ───────────────────────�
 | 2026-05-03 | New "Search relevance" section: hybrid retrieval (vector + FTS via RRF), MMR diversification, score threshold. Indexer interface gains `mode`, `threshold`, `mmrLambda`, `maxPerPath`. | [Change 0008](../../changes/0008-search-relevance.md) |
 | 2026-11-09 | Moves are indexed as drop-old plus reindex-new, re-embedding moved notes because `embed_text` carries the path; `reindex` / `drop` are now also called by moves and copies. | [Change 0020](../../changes/0020-move-and-copy.md) |
 | 2026-11-09 | New "Tag listing" section and `Indexer.tags()`: stored inline tags with distinct-document counts, no parent roll-up, ordered by count then tag, optional path prefix. | [Change 0021](../../changes/0021-list-tags.md) |
-| 2026-11-09 | New "Indexable paths" section: one `isIndexablePath` rule (Markdown, no hidden or `node_modules` segment, regular file not reached through a symlink) for the scan, the watcher (which stops following symlinks), the pipeline, and every direct reindex; `reindex` now rejects when the index could not be updated, so `indexed` reports failures. | [Change 0020](../../changes/0020-move-and-copy.md) |
+| 2026-11-09 | New "Indexable paths" section: one `isIndexablePath` rule (Markdown, no hidden or `node_modules` segment, regular file not reached through a symlink) and the drop guard, introduced with the deletes that use them, then adopted by the scan, the watcher (which stops following symlinks), the pipeline, and every direct reindex; `reindex` now rejects when the index could not be updated, so `indexed` reports failures. | [Change 0019](../../changes/0019-unified-list-and-delete.md), [Change 0020](../../changes/0020-move-and-copy.md) |
 | 2026-11-09 | Startup reconciliation: before a vault is ready, rows whose path fails `isIndexablePath` (gone, symlinked, hidden, `node_modules`) are dropped, clearing rows indexed through symlinks by earlier versions and rows orphaned while ob was stopped. | [Change 0020](../../changes/0020-move-and-copy.md) |
