@@ -609,11 +609,12 @@ describe("server-error logging branch", () => {
       search: async (): Promise<never> => {
         throw new Error("kaboom internal");
       },
-      reindex: async () => undefined,
+      reindex: async () => ({ indexed: false }),
       drop: async () => undefined,
       tags: async () => ({ items: [], total: 0 }),
       indexedPaths: async () => [],
       isIndexable: async () => false,
+      dropHidden: async () => undefined,
       stop: async () => undefined,
     };
     const calls: { msg: string; fields?: Record<string, unknown> }[] = [];

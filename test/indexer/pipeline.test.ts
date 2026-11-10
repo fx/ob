@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Embedder } from "../../src/embeddings/index.ts";
@@ -47,9 +47,10 @@ describe("buildPipeline", () => {
     const pipe = buildPipeline({ slug: "v", store, embedder: emb, logger: silent() });
     const root = join(dir, "vault");
     const abs = join(root, "a.md");
-    await pipe.upsert(abs, "a.md");
-    // The file doesn't exist; we expect an error counter, not a throw.
-    expect(pipe.counters.errors).toBe(1);
+    // The file doesn't exist: nothing indexable is there, so its rows (none)
+    // are dropped and the upsert reports it not indexed — not an error.
+    expect(await pipe.upsert(abs, "a.md")).toEqual({ indexed: false });
+    expect(pipe.counters.errors).toBe(0);
     store.close();
   });
 
@@ -107,7 +108,7 @@ describe("buildPipeline", () => {
       readFile: async () => "# H\n\nbody",
       statMtimeMs: fakeStat,
     });
-    await pipe.upsert("/abs/a.md", "a.md");
+    await expect(pipe.upsert("/abs/a.md", "a.md")).rejects.toBeDefined();
     expect(pipe.counters.errors).toBe(1);
     expect(pipe.counters.documents.size).toBe(0);
     store.close();
@@ -143,7 +144,7 @@ describe("buildPipeline", () => {
       },
       { sleep: async () => undefined },
     );
-    await pipe.upsert("/abs/a.md", "a.md");
+    await expect(pipe.upsert("/abs/a.md", "a.md")).rejects.toBeDefined();
     expect(pipe.counters.errors).toBe(1);
     expect(pipe.counters.documents.size).toBe(0);
     store.close();
@@ -234,7 +235,7 @@ describe("buildPipeline", () => {
       },
       { sleep: async () => undefined },
     );
-    await pipe.remove("x.md");
+    await expect(pipe.remove("x.md")).rejects.toBeDefined();
     expect(pipe.counters.errors).toBe(1);
   });
 
@@ -250,10 +251,10 @@ describe("buildPipeline", () => {
       // (chunkMarkdown calls .replace internally and throws). Both readFile
       // and sha256 are overridden so we don't hit defaultSha first.
       // biome-ignore lint/suspicious/noExplicitAny: deliberately violate the readFile contract to drive the chunker-error branch.
-      readFile: async () => null as any,
+      readFile: async () => 42 as any,
       sha256: () => "fake-sha",
     });
-    await pipe.upsert("/abs/x.md", "x.md");
+    await expect(pipe.upsert("/abs/x.md", "x.md")).rejects.toBeDefined();
     expect(pipe.counters.errors).toBe(1);
     store.close();
   });
@@ -294,7 +295,7 @@ describe("buildPipeline", () => {
         throw "io failure as string";
       },
     });
-    await pipe.upsert("/abs/a.md", "a.md");
+    await expect(pipe.upsert("/abs/a.md", "a.md")).rejects.toBeDefined();
     expect(pipe.counters.errors).toBe(1);
     store.close();
   });
@@ -317,7 +318,7 @@ describe("buildPipeline", () => {
       readFile: async () => "# H\n\nbody",
       statMtimeMs: fakeStat,
     });
-    await pipe.upsert("/abs/a.md", "a.md");
+    await expect(pipe.upsert("/abs/a.md", "a.md")).rejects.toBeDefined();
     expect(pipe.counters.errors).toBe(1);
     store.close();
   });
@@ -351,7 +352,7 @@ describe("buildPipeline", () => {
       },
       { sleep: async () => undefined },
     );
-    await pipe.upsert("/abs/a.md", "a.md");
+    await expect(pipe.upsert("/abs/a.md", "a.md")).rejects.toBeDefined();
     expect(pipe.counters.errors).toBe(1);
   });
 
@@ -377,7 +378,7 @@ describe("buildPipeline", () => {
       { slug: "v", store: failing, embedder: fakeEmbedder(4), logger: silent() },
       { sleep: async () => undefined },
     );
-    await pipe.remove("x.md");
+    await expect(pipe.remove("x.md")).rejects.toBeDefined();
     expect(pipe.counters.errors).toBe(1);
   });
 
@@ -1042,5 +1043,93 @@ describe("markStopped (LDKr)", () => {
     pipe.markStopped();
     await pipe.remove("a.md");
     expect(drops).toBe(0);
+  });
+
+  describe("indexable-path re-check before the read", () => {
+    async function rooted(label: string) {
+      const dir = tmpDir(label);
+      const root = join(dir, "vault");
+      mkdirSync(root, { recursive: true });
+      const outside = mkdtempSync(join(tmpdir(), "ob-pipeline-outside-"));
+      writeFileSync(join(outside, "secret.md"), "# S\n\nOUTSIDE");
+      const store = await openVaultStore({ dataDir: dir, slug: "v", dim: 4 });
+      const embedded: string[] = [];
+      const emb = fakeEmbedder(4);
+      const pipe = buildPipeline({
+        slug: "v",
+        root,
+        store,
+        embedder: {
+          dim: 4,
+          embed: async (t) => {
+            embedded.push(...t);
+            return emb.embed(t);
+          },
+        },
+        logger: silent(),
+      });
+      return { root, outside, store, pipe, embedded };
+    }
+
+    test("an indexable note is indexed; one replaced by a symlink loses its rows", async () => {
+      const { root, outside, store, pipe, embedded } = await rooted("root-link");
+      writeFileSync(join(root, "a.md"), "# A\n\nbody");
+      expect(await pipe.upsert(join(root, "a.md"), "a.md")).toEqual({ indexed: true });
+      rmSync(join(root, "a.md"));
+      symlinkSync(join(outside, "secret.md"), join(root, "a.md"));
+      expect(await pipe.upsert(join(root, "a.md"), "a.md")).toEqual({ indexed: false });
+      expect(await store.indexedPaths("")).toEqual([]);
+      expect(pipe.counters.documents.has("a.md")).toBe(false);
+      expect(embedded.some((t) => t.includes("OUTSIDE"))).toBe(false);
+      expect(pipe.counters.errors).toBe(0);
+      store.close();
+    });
+
+    test("a note under node_modules or behind a symlinked folder is never read", async () => {
+      const { root, outside, store, pipe, embedded } = await rooted("root-nm");
+      mkdirSync(join(root, "node_modules"), { recursive: true });
+      writeFileSync(join(root, "node_modules", "n.md"), "# N\n\nNM");
+      symlinkSync(outside, join(root, "out"));
+      expect(await pipe.upsert(join(root, "node_modules", "n.md"), "node_modules/n.md")).toEqual({
+        indexed: false,
+      });
+      expect(await pipe.upsert(join(root, "out", "secret.md"), "out/secret.md")).toEqual({
+        indexed: false,
+      });
+      expect(embedded).toEqual([]);
+      store.close();
+    });
+
+    test("without a root, the default read refuses a symlink leaf and a non-regular file", async () => {
+      const dir = tmpDir("noroot");
+      const outside = mkdtempSync(join(tmpdir(), "ob-pipeline-outside-"));
+      writeFileSync(join(outside, "secret.md"), "# S\n\nOUTSIDE");
+      const vault = join(dir, "vault");
+      mkdirSync(join(vault, "dir.md"), { recursive: true });
+      symlinkSync(join(outside, "secret.md"), join(vault, "link.md"));
+      const store = await openVaultStore({ dataDir: dir, slug: "v", dim: 4 });
+      const pipe = buildPipeline({ slug: "v", store, embedder: fakeEmbedder(4), logger: silent() });
+      expect(await pipe.upsert(join(vault, "link.md"), "link.md")).toEqual({ indexed: false });
+      expect(await pipe.upsert(join(vault, "dir.md"), "dir.md")).toEqual({ indexed: false });
+      expect(pipe.counters.errors).toBe(0);
+      store.close();
+    });
+
+    test("a read fault that is not a missing or non-regular file rejects and is counted", async () => {
+      const dir = tmpDir("eacces");
+      const store = await openVaultStore({ dataDir: dir, slug: "v", dim: 4 });
+      const pipe = buildPipeline({
+        slug: "v",
+        store,
+        embedder: fakeEmbedder(4),
+        logger: silent(),
+        readFile: async () => {
+          throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+        },
+      });
+      await expect(pipe.upsert("/abs/a.md", "a.md")).rejects.toThrow("permission denied");
+      expect(pipe.counters.errors).toBe(1);
+      store.close();
+    });
   });
 });

@@ -51,15 +51,15 @@ describe("startWatcher (real fs)", () => {
     expect(sink.events).toEqual([]);
   });
 
-  test("ignores non-markdown files", async () => {
+  test("a non-markdown file is reported as a remove, so any rows it holds are dropped", async () => {
     const root = tmpRoot();
     const sink = collect();
     const w = startWatcher(root, sink.on, { debounceMs: 50 });
     cleanup.push(async () => w.stop());
     await w.ready();
     writeFileSync(join(root, "x.txt"), "not md");
-    await waitMs(400);
-    expect(sink.events).toEqual([]);
+    await waitUntil(() => sink.events.length > 0);
+    expect(sink.events.map((e) => [e.kind, e.relPath])).toEqual([["remove", "x.txt"]]);
   });
 
   test("emits one upsert event for a new markdown file", async () => {

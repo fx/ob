@@ -67,13 +67,14 @@ function makeFixture(label: string): FolderHttpFixture {
     status: () => ready,
     list: () => [ready],
     search: async () => [],
-    reindex: async () => undefined,
+    reindex: async () => ({ indexed: false }),
     drop: async (s, p) => {
       drops.push({ slug: s, path: p });
     },
     tags: async () => ({ items: [], total: 0 }),
     indexedPaths: async () => [],
     isIndexable: async () => false,
+    dropHidden: async () => undefined,
     stop: async () => undefined,
   };
 

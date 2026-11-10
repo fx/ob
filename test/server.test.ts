@@ -43,11 +43,12 @@ function fakeIndexer(
     list: () => statuses.slice(),
     status: (slug) => statuses.find((s) => s.slug === slug) ?? null,
     search: async (): Promise<SearchHit[]> => [],
-    reindex: async () => undefined,
+    reindex: async () => ({ indexed: false }),
     drop: async () => undefined,
     tags: async () => ({ items: [], total: 0 }),
     indexedPaths: async () => [],
     isIndexable: async () => false,
+    dropHidden: async () => undefined,
     stop,
   };
 }
@@ -924,11 +925,12 @@ describe("main", () => {
       list: () => [],
       status: () => null,
       search: async (): Promise<SearchHit[]> => [],
-      reindex: async () => undefined,
+      reindex: async () => ({ indexed: false }),
       drop: async () => undefined,
       tags: async () => ({ items: [], total: 0 }),
       indexedPaths: async () => [],
       isIndexable: async () => false,
+      dropHidden: async () => undefined,
       stop: () => new Promise<void>(() => undefined),
     };
     let exitCode: number | undefined;

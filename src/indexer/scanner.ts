@@ -7,9 +7,11 @@
  * sha256 once and compares against what the store already has — if they
  * match, the file is skipped (no embedder call).
  *
- * Ignore rules mirror the watcher: the same paths should be filtered in both
- * code paths so a file that the watcher would never report on `change` is
- * also never picked up by the scanner.
+ * Ignore rules are the one indexable-path rule (`isIndexablePath`), shared
+ * with the watcher, the pipeline, and every direct reindex: directories are
+ * pruned by segment (hidden, `node_modules`) and never followed through a
+ * symlink, and each file the walk yields is admitted only if
+ * `isIndexablePath` holds for it on the real vault root at that moment.
  *
  * The scan owns no state of its own: it's a pure async iterator over the
  * filesystem plus a `processFile` helper the pipeline injects.
@@ -85,7 +87,13 @@ export interface ScannerFile {
   readonly relPath: string;
 }
 
-/** Yield every Markdown file under `root`, recursively, post-ignore-filter. */
+/**
+ * Yield every file under `root` that passes the LEXICAL half of the
+ * indexable-path rule, recursively. Directories are pruned by segment, and a
+ * symlink `Dirent` is neither a file nor a directory, so nothing is reached
+ * through a link. `scanVault` applies the full `isIndexablePath` to each
+ * yielded file before it is processed.
+ */
 export function* walkVault(root: string): Generator<ScannerFile> {
   const stack: string[] = [root];
   while (stack.length > 0) {
@@ -188,6 +196,8 @@ export async function scanVault(
       if (next.done === true) return;
       const file = next.value;
       try {
+        // The full rule, filesystem half included, at the moment of the scan.
+        if (!(await isIndexablePath(root, file.relPath))) continue;
         const prev = await lookup(file.relPath);
         // Cheap mtime gate: if both mtimes match, treat the file as
         // unchanged without reading or hashing it. Per spec this is the

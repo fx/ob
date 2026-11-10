@@ -11,6 +11,17 @@
  * chokidar's default semantic. Letting them flow through unchanged keeps
  * the pipeline stateless.
  *
+ * Indexable paths (Vault Indexer › Indexable paths). Symlinks are never
+ * followed (`followSymlinks: false`), and `ignored` prunes by SEGMENT only
+ * (hidden, `node_modules`) — never by the file predicate, which would reject
+ * every directory. When a path's debounced event fires, the one rule
+ * (`isIndexablePath` on the real root) decides what it becomes: an indexable
+ * path is an `upsert`, anything else — a non-Markdown file, a note replaced
+ * by a symlink, a removed path — a `remove`, so a non-indexable path loses
+ * any rows it still holds whichever event reported it. An `unlink` of a path
+ * recreated as an indexable note by then is therefore reindexed, not dropped
+ * (the drop guard).
+ *
  * The watcher subscribes to chokidar's `error` event and surfaces the
  * latest error via `lastError()`; callers (the indexer facade) can poll
  * for and log them. Without this, EACCES/ENOSPC/etc. would silently break
@@ -20,7 +31,7 @@
 import { relative, sep } from "node:path";
 import { type FSWatcher, watch } from "chokidar";
 import type { Logger } from "../log.ts";
-import { isMarkdownFile, shouldIgnorePath } from "./scanner.ts";
+import { isIndexablePath, shouldIgnorePath } from "./scanner.ts";
 
 export type WatcherEventKind = "upsert" | "remove";
 
@@ -79,6 +90,8 @@ export function startWatcher(
   const fsw: FSWatcher = watchImpl(root, {
     ignoreInitial: true,
     persistent: true,
+    // A symlink is reported as itself, never descended or read through.
+    followSymlinks: false,
     // chokidar's `ignored` accepts a function — return true to skip. We
     // reuse the scanner's predicate so watcher and scanner stay in lock-
     // step on what counts as "indexable".
@@ -90,31 +103,33 @@ export function startWatcher(
     },
   });
 
-  interface Pending {
-    kind: WatcherEventKind;
-    timer: unknown;
-  }
-  const pending = new Map<string, Pending>();
+  const pending = new Map<string, unknown>();
+
+  /** Classify by the one rule at fire time: indexable → upsert, else remove. */
+  const emit = async (relPath: string, absPath: string): Promise<void> => {
+    const kind: WatcherEventKind = (await isIndexablePath(root, relPath)) ? "upsert" : "remove";
+    onEvent({ kind, absPath, relPath });
+  };
 
   const flush = (relPath: string, absPath: string): void => {
-    const cur = pending.get(relPath);
-    if (cur === undefined) return;
+    if (!pending.has(relPath)) return;
     pending.delete(relPath);
-    onEvent({ kind: cur.kind, absPath, relPath });
+    void emit(relPath, absPath);
   };
 
-  const queue = (kind: WatcherEventKind, absPath: string): void => {
+  const queue = (absPath: string): void => {
     const rel = relative(root, absPath).split(sep).join("/");
-    if (!isMarkdownFile(rel)) return;
     const cur = pending.get(rel);
-    if (cur !== undefined) clearTimer(cur.timer);
-    const timer = setTimer(() => flush(rel, absPath), debounceMs);
-    pending.set(rel, { kind, timer });
+    if (cur !== undefined) clearTimer(cur);
+    pending.set(
+      rel,
+      setTimer(() => flush(rel, absPath), debounceMs),
+    );
   };
 
-  fsw.on("add", (p) => queue("upsert", p));
-  fsw.on("change", (p) => queue("upsert", p));
-  fsw.on("unlink", (p) => queue("remove", p));
+  fsw.on("add", queue);
+  fsw.on("change", queue);
+  fsw.on("unlink", queue);
 
   let lastError: Error | null = null;
   fsw.on("error", (err) => {
@@ -147,17 +162,15 @@ export function startWatcher(
       // Fire any pending events before tearing down so a write that came
       // in during a graceful shutdown still gets indexed if the indexer's
       // pipeline still accepts it.
-      for (const [rel, p] of pending.entries()) {
-        clearTimer(p.timer);
+      const fired: Promise<void>[] = [];
+      for (const [rel, timer] of pending.entries()) {
+        clearTimer(timer);
         // Best-effort: we can't reconstruct absPath without re-joining, but
         // chokidar uses platform path separators, so do the same.
-        onEvent({
-          kind: p.kind,
-          absPath: `${root}${sep}${rel.split("/").join(sep)}`,
-          relPath: rel,
-        });
+        fired.push(emit(rel, `${root}${sep}${rel.split("/").join(sep)}`));
       }
       pending.clear();
+      await Promise.all(fired);
       await fsw.close();
     },
   };

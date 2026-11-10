@@ -9,9 +9,20 @@
  * the next `embedder.embed()` call covers everything queued in the same
  * window.
  *
- * Errors per file are caught and counted; one bad file MUST NOT halt the
- * pipeline. LanceDB write errors retry 3× with linear backoff before being
- * surfaced as an `IndexerStatus.errors` increment.
+ * Errors per file are counted in `IndexerStatus.errors` and logged, and the
+ * call that hit them REJECTS (Vault Indexer › Public surface: `reindex` must
+ * reject when the rows could not be brought to the file's content). One bad
+ * file still never halts the pipeline: the watcher and the initial scan
+ * catch the rejection and carry on. LanceDB write errors retry 3× with
+ * linear backoff before being surfaced.
+ *
+ * Indexable paths. With `root` set (production always sets it), `upsert`
+ * re-checks the one indexable-path rule (`isIndexablePath`: chain `lstat`,
+ * no symlink, a regular Markdown file outside hidden and `node_modules`
+ * segments) immediately before reading, and reads with `O_NOFOLLOW` plus an
+ * `fstat` regular-file check. A path that fails — or that is gone — has its
+ * rows dropped instead and resolves `{ indexed: false }`, so no route into
+ * the index admits a path another route would refuse.
  *
  * A per-path mutex (`pathLocks`) serialises writes for the same file so a
  * stale scan write that resolved after a watcher write can't overwrite the
@@ -21,10 +32,12 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, stat } from "node:fs/promises";
 import type { Embedder } from "../embeddings/index.ts";
 import type { Logger } from "../log.ts";
 import { type Chunk, chunkMarkdown } from "./chunker.ts";
+import { isIndexablePath } from "./scanner.ts";
 import type { PathFingerprint, StoreRow, VaultStore } from "./store.ts";
 
 export interface PipelineCounters {
@@ -41,7 +54,16 @@ export interface PipelineDeps {
   readonly store: VaultStore;
   readonly embedder: Embedder;
   readonly logger: Logger;
-  /** `node:fs/promises#readFile` by default. */
+  /**
+   * The REAL vault root. When set, every upsert re-checks `isIndexablePath`
+   * on it immediately before reading. Production always sets it; pipeline
+   * unit tests that feed content from memory leave it out.
+   */
+  readonly root?: string;
+  /**
+   * Read the file as UTF-8. Default: an `O_NOFOLLOW` open plus an `fstat`
+   * regular-file check, so a leaf swapped for a symlink is never read.
+   */
   readonly readFile?: (p: string) => Promise<string>;
   /** Resolve a file's mtimeMs. Default: `node:fs/promises#stat`. */
   readonly statMtimeMs?: (p: string) => Promise<number>;
@@ -63,8 +85,35 @@ function defaultSha(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-function defaultReadFile(p: string): Promise<string> {
-  return readFile(p, "utf8");
+/** The read found something that is not an indexable regular file. */
+class NotIndexableReadError extends Error {
+  // biome-ignore lint/complexity/noUselessConstructor: explicit ctor needed for Bun coverage tracking.
+  constructor(path: string) {
+    super(path);
+  }
+}
+
+async function defaultReadFile(p: string): Promise<string> {
+  const handle = await open(p, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    if (!(await handle.stat()).isFile()) throw new NotIndexableReadError(p);
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * A read failure that means "nothing indexable is there" rather than a
+ * fault: the file is gone (`ENOENT`), a parent stopped being a directory
+ * (`ENOTDIR`), the leaf is a symlink (`ELOOP` from `O_NOFOLLOW`), or it is
+ * not a regular file. Such a path has its rows dropped, never counted as an
+ * error.
+ */
+function isNotIndexableRead(e: unknown): boolean {
+  if (e instanceof NotIndexableReadError) return true;
+  const code = (e as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP";
 }
 
 async function defaultStatMtime(p: string): Promise<number> {
@@ -95,10 +144,19 @@ async function withStoreRetry<T>(
   throw lastErr;
 }
 
+/** Outcome of an upsert: `indexed: false` means not indexable, rows dropped. */
+export interface UpsertResult {
+  readonly indexed: boolean;
+}
+
 export interface Pipeline {
-  /** Process an upsert (initial scan or watcher add/change). */
-  upsert(absPath: string, relPath: string): Promise<void>;
-  /** Drop a file's chunks (watcher unlink or REST delete). */
+  /**
+   * Bring `relPath`'s rows to its current content: index an indexable file,
+   * drop the rows of anything else. Rejects (after counting the error) when
+   * a read, chunk, embed, or store step fails.
+   */
+  upsert(absPath: string, relPath: string): Promise<UpsertResult>;
+  /** Drop a file's chunks (watcher unlink or REST delete). Rejects on a store failure. */
   remove(relPath: string): Promise<void>;
   /** Counter snapshot for `IndexerStatus`. */
   readonly counters: PipelineCounters;
@@ -303,21 +361,50 @@ export function buildPipeline(deps: PipelineDeps, opts: BuildPipelineOptions = {
     }
   }
 
-  const upsertImpl = async (absPath: string, relPath: string): Promise<void> => {
-    if (stopped) return;
-    let content: string;
+  /** Count, log, and rethrow: the caller's promise rejects with the cause. */
+  function fail(msg: string, relPath: string, e: unknown, level: "warn" | "error" = "warn"): never {
+    counters.errors++;
+    deps.logger[level](msg, {
+      vault: deps.slug,
+      path: relPath,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    throw e;
+  }
+
+  /** The file's content, or `null` when nothing indexable is at the path. */
+  async function readIndexable(absPath: string, relPath: string): Promise<string | null> {
     try {
-      content = await read(absPath);
+      // Re-checked immediately before the read, on the real vault root.
+      if (deps.root !== undefined && !(await isIndexablePath(deps.root, relPath))) return null;
+      return await read(absPath);
     } catch (e) {
-      counters.errors++;
-      deps.logger.warn("indexer: read failed", {
-        vault: deps.slug,
-        path: relPath,
-        error: e instanceof Error ? e.message : String(e),
-      });
-      return;
+      if (isNotIndexableRead(e)) return null;
+      return fail("indexer: read failed", relPath, e);
     }
+  }
+
+  const removeImpl = async (relPath: string): Promise<void> => {
     if (stopped) return;
+    try {
+      await withStoreRetry(() => deps.store.drop(relPath), sleep);
+    } catch (e) {
+      fail("indexer: store.drop failed after retries", relPath, e, "error");
+    }
+    counters.documents.delete(relPath);
+    await refreshChunkCount();
+    counters.lastIndexedAt = now();
+  };
+
+  const upsertImpl = async (absPath: string, relPath: string): Promise<UpsertResult> => {
+    if (stopped) return { indexed: false };
+    const content = await readIndexable(absPath, relPath);
+    if (content === null) {
+      // Not indexable (or gone): whatever rows the path still holds go.
+      await removeImpl(relPath);
+      return { indexed: false };
+    }
+    if (stopped) return { indexed: false };
     const sha = shaFn(content);
     let mtimeMs: number;
     try {
@@ -332,39 +419,27 @@ export function buildPipeline(deps: PipelineDeps, opts: BuildPipelineOptions = {
     try {
       chunks = chunkMarkdown(content, relPath);
     } catch (e) {
-      counters.errors++;
-      deps.logger.warn("indexer: chunker failed", {
-        vault: deps.slug,
-        path: relPath,
-        error: e instanceof Error ? e.message : String(e),
-      });
-      return;
+      return fail("indexer: chunker failed", relPath, e);
     }
-    if (stopped) return;
+    if (stopped) return { indexed: false };
     let vectors: Float32Array[];
     try {
       vectors = await batcher.submit(chunks);
     } catch (e) {
-      counters.errors++;
-      deps.logger.warn("indexer: embed failed", {
-        vault: deps.slug,
-        path: relPath,
-        error: e instanceof Error ? e.message : String(e),
-      });
-      return;
+      return fail("indexer: embed failed", relPath, e);
     }
-    if (stopped) return;
+    if (stopped) return { indexed: false };
     // Freshness re-check: between the time we hashed `content` and the
     // time we acquired the lock + finished embedding, another writer
     // (scan or watcher) may have already persisted a newer version. If
     // the store now reports a fingerprint that is not ours, drop the
-    // stale write.
+    // stale write — the rows already reflect newer content.
     try {
       const fp = await deps.store.fingerprint(relPath);
       if (fp !== undefined && fp.sha256 !== sha && fp.mtimeMs > mtimeMs) {
         // The newer write already happened. Skip — committing here would
         // overwrite fresher content with our stale chunks.
-        return;
+        return { indexed: true };
       }
     } catch {
       // Fingerprint lookup is a best-effort optimisation; on failure,
@@ -389,38 +464,15 @@ export function buildPipeline(deps: PipelineDeps, opts: BuildPipelineOptions = {
     try {
       await withStoreRetry(() => deps.store.upsert(relPath, rows), sleep);
     } catch (e) {
-      counters.errors++;
-      deps.logger.error("indexer: store.upsert failed after retries", {
-        vault: deps.slug,
-        path: relPath,
-        error: e instanceof Error ? e.message : String(e),
-      });
-      return;
+      fail("indexer: store.upsert failed after retries", relPath, e, "error");
     }
     counters.documents.add(relPath);
     await refreshChunkCount();
     counters.lastIndexedAt = now();
+    return { indexed: true };
   };
 
-  const removeImpl = async (relPath: string): Promise<void> => {
-    if (stopped) return;
-    try {
-      await withStoreRetry(() => deps.store.drop(relPath), sleep);
-    } catch (e) {
-      counters.errors++;
-      deps.logger.error("indexer: store.drop failed after retries", {
-        vault: deps.slug,
-        path: relPath,
-        error: e instanceof Error ? e.message : String(e),
-      });
-      return;
-    }
-    counters.documents.delete(relPath);
-    await refreshChunkCount();
-    counters.lastIndexedAt = now();
-  };
-
-  const upsert = (absPath: string, relPath: string): Promise<void> =>
+  const upsert = (absPath: string, relPath: string): Promise<UpsertResult> =>
     runLocked(relPath, lockTails, () => upsertImpl(absPath, relPath));
   const remove = (relPath: string): Promise<void> =>
     runLocked(relPath, lockTails, () => removeImpl(relPath));

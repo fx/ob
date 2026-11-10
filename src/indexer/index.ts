@@ -16,6 +16,18 @@
  *     watcher debounce when the API itself is the writer. Both validate
  *     `path` via `assertSafeRelativePath` (rejects `..`, hidden segments,
  *     leading `/`, NUL bytes, etc.) before touching the filesystem.
+ *     `reindex` applies the one indexable-path rule itself (through the
+ *     pipeline, on the real vault root): it resolves `{ indexed: true }` for
+ *     an indexed path and `{ indexed: false }` after dropping the rows of any
+ *     other, and REJECTS when the rows could not be brought to the file's
+ *     content. `drop` rejects on a store failure.
+ *   - `dropHidden(slug, path)` — drop the rows of an indexed path with a
+ *     hidden segment, which `drop`'s validation refuses. Such a path can
+ *     never be indexable, so the drop guard always drops it; a folder move
+ *     uses this for rows found under the old folder (left by an earlier
+ *     version or an outside writer). It refuses any path without a hidden
+ *     segment, and every other unsafe form, so it can remove nothing that
+ *     `isIndexablePath` would admit.
  *   - `indexedPaths(slug, prefix)` — the distinct indexed paths under a
  *     literal prefix, so a recursive folder delete can drop every row under
  *     the folder, including rows for notes it never saw on disk.
@@ -38,7 +50,7 @@
 import { join } from "node:path";
 import type { Config, VaultConfig } from "../config/index.ts";
 import { type Embedder, buildEmbedder } from "../embeddings/index.ts";
-import { assertSafeRelativePath } from "../errors.ts";
+import { InvalidPathError, assertSafeRelativePath } from "../errors.ts";
 import type { Logger } from "../log.ts";
 import { type Pipeline, buildPipeline } from "./pipeline.ts";
 import {
@@ -104,8 +116,11 @@ export interface Indexer {
   status(slug: string): IndexerStatus | null;
   list(): IndexerStatus[];
   search(slug: string, query: string, opts?: SearchOptions): Promise<SearchHit[]>;
-  reindex(slug: string, path: string): Promise<void>;
+  /** Index `path`, or drop its rows when it is not indexable (`indexed: false`). */
+  reindex(slug: string, path: string): Promise<{ indexed: boolean }>;
   drop(slug: string, path: string): Promise<void>;
+  /** Drop the rows of an indexed path that has a hidden segment (never indexable). */
+  dropHidden(slug: string, path: string): Promise<void>;
   /**
    * Stored inline tags with distinct-document counts, ordered by count
    * descending then tag in code-point order. An unknown slug yields an
@@ -195,6 +210,56 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
   }
 }
 
+/**
+ * Validate a path for `dropHidden`: it MUST have a hidden segment (one
+ * starting with `.` other than `.` / `..`), and with those segments' leading
+ * dot masked it MUST pass every other `assertSafeRelativePath` rule (no
+ * `..`, no leading separator, NUL, drive prefix, or over-length). So the
+ * only thing it relaxes is the hidden-segment rule, and only for a path that
+ * the indexable-path rule rejects by name.
+ */
+export function assertHiddenRowPath(path: string): string {
+  const isHidden = (seg: string): boolean => seg.startsWith(".") && seg !== "." && seg !== "..";
+  // Both separators, exactly as `assertSafeRelativePath` splits.
+  if (!path.split(/[/\\]/).some(isHidden)) {
+    throw new InvalidPathError(path, "has no hidden segment; use drop");
+  }
+  // Mask the leading dot of each hidden segment (never of `.` or `..`).
+  assertSafeRelativePath(path.replace(/(^|[/\\])\.(?![/\\]|$)(?!\.(?:[/\\]|$))/g, "$1_"));
+  return path;
+}
+
+/**
+ * The startup sweep: list every indexed path (`fingerprints()`) and drop the
+ * rows of each one that fails `isIndexablePath` on the real vault root. One
+ * failed drop is counted by the pipeline and does not stop the sweep.
+ */
+async function sweepUnindexable(
+  root: string,
+  store: VaultStore,
+  pipeline: Pipeline,
+  track: (p: Promise<unknown>) => Promise<unknown>,
+  log: Logger,
+  slug: string,
+): Promise<void> {
+  let paths: Iterable<string>;
+  try {
+    paths = (await store.fingerprints()).keys();
+  } catch (e) {
+    // Nothing to reconcile against; the scan still runs and the next start
+    // sweeps again.
+    log.warn("indexer: startup sweep could not list indexed paths", {
+      vault: slug,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return;
+  }
+  for (const path of paths) {
+    if (await isIndexablePath(root, path)) continue;
+    await track(pipeline.remove(path).catch(() => undefined));
+  }
+}
+
 export async function startIndexer(cfg: Config, deps: IndexerDeps): Promise<Indexer> {
   const log = deps.logger;
   // Embedder init and warmup MUST happen before pipeline-version
@@ -254,15 +319,16 @@ export async function startIndexer(cfg: Config, deps: IndexerDeps): Promise<Inde
     for (const vault of cfg.vaults) {
       const store = await openStore(cfg, vault, dim);
 
+      const root = join(cfg.dataDir, "vaults", vault.slug);
       const pipeline = buildPipelineImpl({
         slug: vault.slug,
+        root,
         store,
         embedder,
         logger: log,
         ...(deps.now !== undefined ? { now: deps.now } : {}),
       });
 
-      const root = join(cfg.dataDir, "vaults", vault.slug);
       const inFlight = new Set<Promise<unknown>>();
 
       const trackInFlight = (p: Promise<unknown>): Promise<unknown> => {
@@ -298,7 +364,9 @@ export async function startIndexer(cfg: Config, deps: IndexerDeps): Promise<Inde
             ev.kind === "upsert"
               ? pipeline.upsert(ev.absPath, ev.relPath)
               : pipeline.remove(ev.relPath);
-          trackInFlight(task).finally(() => {
+          // A failure was already counted and logged by the pipeline; the
+          // watcher carries on with the next event.
+          trackInFlight(task.catch(() => undefined)).finally(() => {
             runtime.pending = Math.max(0, runtime.pending - 1);
           });
         },
@@ -315,15 +383,21 @@ export async function startIndexer(cfg: Config, deps: IndexerDeps): Promise<Inde
         try {
           await runtime.watcher.ready();
           runtime.state = "scanning";
+          // Startup reconciliation, before the vault can be ready: rows for
+          // a path that fails the indexable-path rule now — gone, hidden,
+          // under `node_modules`, a symlink an earlier watcher followed —
+          // are dropped (the drop guard: only an indexable note keeps them).
+          await sweepUnindexable(root, store, pipeline, trackInFlight, log, vault.slug);
           await scanVaultImpl(
             root,
             async (file, _content, _sha) => {
               // Submit the file to the pipeline. Track the promise so
               // stop() can drain in-flight scan writes alongside watcher
-              // events. Errors are swallowed by the pipeline itself; the
-              // scanner only counts errors that happen during its own
-              // read/hash phase.
-              await trackInFlight(pipeline.upsert(file.absPath, file.relPath));
+              // events. A failure was already counted and logged by the
+              // pipeline; the scan carries on.
+              await trackInFlight(
+                pipeline.upsert(file.absPath, file.relPath).catch(() => undefined),
+              );
             },
             {
               // Cheap mtime gate first; the pipeline's freshness re-check
@@ -409,17 +483,22 @@ export async function startIndexer(cfg: Config, deps: IndexerDeps): Promise<Inde
       const filtered = applyThreshold(diversified, threshold);
       return filtered.slice(0, limit);
     },
-    async reindex(slug: string, path: string): Promise<void> {
+    async reindex(slug: string, path: string): Promise<{ indexed: boolean }> {
       const rt = runtimes.get(slug);
-      if (rt === undefined) return;
+      if (rt === undefined) return { indexed: false };
       const { abs, rel } = resolveVaultPath(slug, path);
-      await rt.pipeline.upsert(abs, rel);
+      return rt.pipeline.upsert(abs, rel);
     },
     async drop(slug: string, path: string): Promise<void> {
       const rt = runtimes.get(slug);
       if (rt === undefined) return;
       const { rel } = resolveVaultPath(slug, path);
       await rt.pipeline.remove(rel);
+    },
+    async dropHidden(slug: string, path: string): Promise<void> {
+      const rt = runtimes.get(slug);
+      if (rt === undefined) return;
+      await rt.pipeline.remove(assertHiddenRowPath(path));
     },
     async tags(slug: string, opts: TagListingOptions = {}): Promise<TagListing> {
       const rt = runtimes.get(slug);

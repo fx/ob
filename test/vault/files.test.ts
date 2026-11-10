@@ -85,7 +85,7 @@ describe("writeFile", () => {
     expect(readFileSync(join(fx.root, "n.md"), "utf8")).toBe("body");
   });
 
-  test("raw PUT to a binary path does NOT call the indexer", async () => {
+  test("raw PUT to a binary path is reindexed, and reported not indexed", async () => {
     const fx = makeVaultFixture();
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
     const result = await writeFile(fx.deps, fx.slug, "attachments/x.png", {
@@ -95,7 +95,8 @@ describe("writeFile", () => {
     });
     expect(result.indexed).toBe(false);
     expect(result.contentType).toBe("image/png");
-    expect(fx.calls.reindex).toEqual([]);
+    // Every written path is handed to `reindex`, which applies the rule.
+    expect(fx.calls.reindex).toEqual([{ slug: "v", path: "attachments/x.png" }]);
   });
 
   test("PUT replacement reports created: false", async () => {
@@ -246,14 +247,14 @@ describe("patchFile", () => {
     ).rejects.toBeInstanceOf(DocNotFoundError);
   });
 
-  test("non-Markdown text path: writes but does not reindex", async () => {
+  test("non-Markdown text path: writes, reindexes, and reports not indexed", async () => {
     const fx = makeVaultFixture();
     writeFileSync(join(fx.root, "x.txt"), "hello");
     const result = await patchFile(fx.deps, fx.slug, "x.txt", {
       edits: [{ old: "hello", new: "world" }],
     });
     expect(result.indexed).toBe(false);
-    expect(fx.calls.reindex).toEqual([]);
+    expect(fx.calls.reindex).toEqual([{ slug: "v", path: "x.txt" }]);
     expect(readFileSync(join(fx.root, "x.txt"), "utf8")).toBe("world");
   });
 
@@ -324,12 +325,12 @@ describe("appendFile", () => {
     expect(readFileSync(join(fx.root, "x.txt"), "utf8")).toBe("abcdef");
   });
 
-  test("non-Markdown text path does not reindex", async () => {
+  test("non-Markdown text path is reindexed and reported not indexed", async () => {
     const fx = makeVaultFixture();
     writeFileSync(join(fx.root, "x.txt"), "abc");
     const result = await appendFile(fx.deps, fx.slug, "x.txt", new TextEncoder().encode("d"));
     expect(result.indexed).toBe(false);
-    expect(fx.calls.reindex).toEqual([]);
+    expect(fx.calls.reindex).toEqual([{ slug: "v", path: "x.txt" }]);
   });
 
   test("binary path → 415", async () => {

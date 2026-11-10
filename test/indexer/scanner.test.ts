@@ -127,6 +127,25 @@ describe("walkVault", () => {
 });
 
 describe("scanVault", () => {
+  test("a file that stopped being indexable after the walk listed it is not processed", async () => {
+    const root = tmpRoot();
+    writeMd(root, "a.md");
+    writeMd(root, "b.md");
+    const seen: string[] = [];
+    // One worker: `a.md` is processed first (the walk lists one directory's
+    // entries together), and removes `b.md`, which the walk already listed.
+    const summary = await scanVault(
+      root,
+      async (file) => {
+        seen.push(file.relPath);
+        require("node:fs").rmSync(join(root, file.relPath === "a.md" ? "b.md" : "a.md"));
+      },
+      { concurrency: 1 },
+    );
+    expect(seen.length).toBe(1);
+    expect(summary).toEqual({ scanned: 1, skipped: 0, errors: 0 });
+  });
+
   test("processes every markdown file with concurrency cap", async () => {
     const root = tmpRoot();
     for (let i = 0; i < 12; i++) writeMd(root, `notes/${i}.md`);

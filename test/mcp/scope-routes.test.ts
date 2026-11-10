@@ -129,12 +129,13 @@ async function makeScopeFixture(
     stop: () => real.stop(),
     reindex: async (s, p) => {
       calls.reindex.push({ slug: s, path: p });
-      await real.reindex(s, p);
+      return real.reindex(s, p);
     },
     drop: async (s, p) => {
       calls.drop.push({ slug: s, path: p });
       await real.drop(s, p);
     },
+    dropHidden: (s, p) => real.dropHidden(s, p),
     search: async (s, q, opts) => {
       calls.search.push({ slug: s, query: q, opts });
       return real.search(s, q, opts);
@@ -159,7 +160,9 @@ async function makeScopeFixture(
     app,
     calls,
     root: (slug) => join(dataDir, "vaults", slug),
-    index: (slug, path) => real.reindex(slug, path),
+    index: async (slug, path) => {
+      await real.reindex(slug, path);
+    },
     reset: () => {
       calls.reindex.length = 0;
       calls.drop.length = 0;
@@ -1257,11 +1260,12 @@ describe("per-scope surface memo", () => {
       status: () => null,
       list: () => [],
       search: async () => [],
-      reindex: async () => undefined,
+      reindex: async () => ({ indexed: false }),
       drop: async () => undefined,
       tags: async () => ({ items: [], total: 0 }),
       indexedPaths: async () => [],
       isIndexable: async () => false,
+      dropHidden: async () => undefined,
       stop: async () => undefined,
     };
     const deps: McpRoutesDeps = {

@@ -356,6 +356,7 @@ export function scopeDeps(deps: McpRoutesDeps, scope: McpScope): McpRoutesDeps {
     // returns paths strips it and discards anything outside the scope.
     reindex: (s, p) => deps.indexer.reindex(s, under(p)),
     drop: (s, p) => deps.indexer.drop(s, under(p)),
+    dropHidden: (s, p) => deps.indexer.dropHidden(s, under(p)),
     // Judged on the VAULT-relative path: a session scoped to
     // `node_modules/pkg` sees `note.md`, but `node_modules/pkg/note.md` is
     // what is (not) indexable.
