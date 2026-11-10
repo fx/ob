@@ -110,6 +110,12 @@ function isGone(e: unknown): boolean {
 /** Test seam and skip reporting for `walkVaultEntries`. */
 export type WalkHooks = Pick<PathOpHooks, "beforeReadDir"> & {
   readonly onSkip?: (rel: string) => void;
+  /**
+   * When set, a directory whose listing fails (other than by vanishing) is
+   * reported here and skipped with everything below it, instead of failing
+   * the walk. Without it the failure propagates, as a listing needs.
+   */
+  readonly onReadError?: (rel: string, error: unknown) => void;
 };
 
 export type WalkEntry =
@@ -158,8 +164,23 @@ export async function* walkVaultEntries(
   hooks: WalkHooks = {},
 ): AsyncIterable<WalkEntry> {
   if (sub !== "" && (await lstatContainedDirectory(join(root, sub), root)) === null) return;
-  const entries = await readDirSorted(root, sub);
+  const entries = await readDirChecked(root, sub, hooks);
   if (entries !== null) yield* walkEntries(root, sub, entries, descend, hooks);
+}
+
+/** `readDirSorted`, routing a failure to `hooks.onReadError` when one is set. */
+async function readDirChecked(
+  root: string,
+  sub: string,
+  hooks: WalkHooks,
+): Promise<Dirent[] | null> {
+  try {
+    return await readDirSorted(root, sub);
+  } catch (e) {
+    if (hooks.onReadError === undefined) throw e;
+    hooks.onReadError(sub, e);
+    return null;
+  }
 }
 
 /** `readdir` + sort; `null` when the directory vanished or stopped being one. */
@@ -201,7 +222,7 @@ async function* walkEntries(
       await hooks.beforeReadDir?.(rel);
       // A directory that vanished or became a file since its check is not
       // listed from the check's now-stale metadata.
-      const children = await readDirSorted(root, rel);
+      const children = await readDirChecked(root, rel, hooks);
       if (children === null) continue;
       yield folder;
       yield* walkEntries(root, rel, children, descend, hooks);
@@ -501,10 +522,21 @@ export async function publishWithParents(
   }
 }
 
-/** Every file the walk lists under `root` (all types), vault-relative to it. */
-export async function listFiles(root: string, sub = ""): Promise<string[]> {
+/**
+ * Every file the walk lists under `root` (all types), vault-relative to it.
+ * With `onReadError`, a folder that cannot be listed is reported and skipped
+ * instead of failing the call.
+ */
+export async function listFiles(
+  root: string,
+  sub = "",
+  onReadError?: (rel: string, error: unknown) => void,
+): Promise<string[]> {
   const out: string[] = [];
-  for await (const ent of walkVaultEntries(root, sub)) if (ent.type === "file") out.push(ent.rel);
+  const hooks: WalkHooks = onReadError === undefined ? {} : { onReadError };
+  for await (const ent of walkVaultEntries(root, sub, undefined, hooks)) {
+    if (ent.type === "file") out.push(ent.rel);
+  }
   return out;
 }
 
@@ -574,6 +606,10 @@ interface Moved {
   readonly after: readonly string[] | null;
   /** Every required drop so far succeeded. */
   readonly dropsOk: boolean;
+  /** The moved folder was listed completely (always true for a file). */
+  readonly pairsComplete: boolean;
+  /** `after` covers the whole vault; links are rewritten only then. */
+  readonly afterComplete: boolean;
 }
 
 /**
@@ -639,25 +675,56 @@ export async function movePath(
           await removeSourceIfSame(g, srcAbs, dstAbs);
         });
         await atStep(g, "move.afterPublish", [srcAbs, dstAbs]);
+        // Published: from here on only the source steps above may fail the
+        // move. A folder that cannot be listed now is skipped and reported
+        // (indexed: false, a links.failed entry, a warning), never a 500.
+        let unlisted = 0;
+        const skipUnlisted = (rel: string, e: unknown): void => {
+          unlisted++;
+          deps.logger?.warn("move published but could not list a folder; it was skipped", {
+            vault: slug,
+            path: rel,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        };
         const pairs: [string, string][] =
           type === "file"
             ? [[src, dst]]
-            : (await listFiles(v.root, dst)).map((p) => [`${src}${p.slice(dst.length)}`, p]);
+            : (await listFiles(v.root, dst, skipUnlisted)).map((p) => [
+                `${src}${p.slice(dst.length)}`,
+                p,
+              ]);
+        const pairsComplete = unlisted === 0;
         // Drops under the locks: the old path (drop guard), and an overwritten
         // destination's old rows (unconditional), so replaced content is never
         // served even if the reindex below fails.
         let dropsOk = true;
         if (type === "file") dropsOk = await dropUnlessIndexable(deps, slug, src);
         if (overwritten) dropsOk = (await tryDrop(deps, slug, dst)) && dropsOk;
-        const after = updateLinks ? await listFiles(scope.root) : null;
-        return { type, overwritten, pairs, before, after, dropsOk };
+        const listedBefore = unlisted;
+        const after = updateLinks ? await listFiles(scope.root, "", skipUnlisted) : null;
+        const afterComplete = unlisted === listedBefore;
+        return { type, overwritten, pairs, before, after, dropsOk, pairsComplete, afterComplete };
       },
     );
     // Folder rows are found from the index, after the folder locks are gone.
     const folderDropsOk = moved.type === "folder" ? await dropIndexedUnder(deps, slug, src) : true;
     let links: LinksReport | null = null;
     let rewritten = new Map<string, ReindexOutcome>();
-    if (moved.before !== null && moved.after !== null) {
+    if (moved.after !== null && !moved.afterComplete) {
+      // Rewriting against a partial file set could point links at the wrong
+      // file; leave every note as it is and say so.
+      links = {
+        updated: [],
+        failed: [
+          {
+            path: dst,
+            code: "internal",
+            message: "links were not rewritten: the vault could not be fully listed after the move",
+          },
+        ],
+      };
+    } else if (moved.before !== null && moved.after !== null) {
       const toVault = (p: string): string => (scope.prefix === "" ? p : `${scope.prefix}/${p}`);
       const out = await rewriteLinks({
         deps,
@@ -677,6 +744,7 @@ export async function movePath(
       return done !== undefined ? Promise.resolve(done) : reindexLocked(deps, slug, v.root, to);
     });
     const indexed =
+      moved.pairsComplete &&
       moved.dropsOk &&
       folderDropsOk &&
       outcomes.every((o) => o.ok) &&

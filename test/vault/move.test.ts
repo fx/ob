@@ -10,6 +10,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -456,6 +457,81 @@ describe("movePath: after publication", () => {
   });
 });
 
+describe("movePath: enumeration after publication never fails the move", () => {
+  test("a moved folder that cannot be listed (EACCES) is 200 with indexed false and links.failed", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "f/a.md", "A");
+    put(fx.root, "f/sub/b.md", "B");
+    put(fx.root, "n.md", "[[f/a]]");
+    const deps = stepping(fx, (site) => {
+      if (site === "move.afterPublish") chmodSync(join(fx.root, "g", "sub"), 0o000);
+    });
+    try {
+      const res = await movePath(deps, fx.slug, "f", { destination: "g" });
+      expect(res.type).toBe("folder");
+      expect(res.indexed).toBe(false);
+      expect(res.links).toEqual({
+        updated: [],
+        failed: [
+          {
+            path: "g",
+            code: "internal",
+            message: "links were not rewritten: the vault could not be fully listed after the move",
+          },
+        ],
+      });
+      // The move itself happened; what could be listed was reindexed.
+      expect(existsSync(join(fx.root, "f"))).toBe(false);
+      expect(fx.calls.reindex.map((c) => c.path)).toEqual(["g/a.md"]);
+      expect(read(fx.root, "n.md")).toBe("[[f/a]]");
+      const warns = fx.logCalls.warn.filter((w) => w.msg.includes("could not list a folder"));
+      expect(warns.map((w) => w.fields?.path)).toEqual(["g/sub", "g/sub"]);
+    } finally {
+      chmodSync(join(fx.root, "g", "sub"), 0o755);
+    }
+  });
+
+  test("an unlistable folder elsewhere after a file move: 200, moved note indexed, links not rewritten", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "a.md", "A");
+    put(fx.root, "n.md", "[[a]]");
+    put(fx.root, "locked/x.md", "X");
+    const deps = stepping(fx, (site) => {
+      if (site === "move.afterPublish") chmodSync(join(fx.root, "locked"), 0o000);
+    });
+    try {
+      const res = await movePath(deps, fx.slug, "a.md", { destination: "d/b.md" });
+      expect(res.indexed).toBe(true);
+      expect(res.links?.failed.map((f) => [f.path, f.code])).toEqual([["d/b.md", "internal"]]);
+      expect(read(fx.root, "n.md")).toBe("[[a]]");
+      expect(read(fx.root, "d/b.md")).toBe("A");
+      // Without link updates nothing needs the whole-vault listing.
+      const quiet = await movePath(deps, fx.slug, "d/b.md", {
+        destination: "c.md",
+        updateLinks: false,
+      });
+      expect(quiet).toMatchObject({ indexed: true, links: null });
+    } finally {
+      chmodSync(join(fx.root, "locked"), 0o755);
+    }
+  });
+
+  test("a listing failure before publication still fails the move with nothing changed", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "a.md", "A");
+    put(fx.root, "locked/x.md", "X");
+    chmodSync(join(fx.root, "locked"), 0o000);
+    try {
+      const err = await movePath(fx.deps, fx.slug, "a.md", { destination: "b.md" }).catch((e) => e);
+      expect((err as NodeJS.ErrnoException).code).toBe("EACCES");
+      expect(read(fx.root, "a.md")).toBe("A");
+      expect(existsSync(join(fx.root, "b.md"))).toBe(false);
+    } finally {
+      chmodSync(join(fx.root, "locked"), 0o755);
+    }
+  });
+});
+
 describe("movePath: indexed", () => {
   test("only a PNG, or an empty folder, reports indexed false", async () => {
     const fx = makeVaultFixture();
@@ -661,6 +737,18 @@ describe("movePath: links", () => {
     expect(read(fx.root, "n.md")).toBe("[[a]]");
   });
 
+  test("a target name a wikilink cannot carry fails the note instead of mis-pointing it", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "old.md", "O");
+    put(fx.root, "n.md", "see [[old]] and [o](old.md)");
+    const res = await movePath(fx.deps, fx.slug, "old.md", { destination: "new#part.md" });
+    expect(read(fx.root, "new#part.md")).toBe("O");
+    expect(res.links?.failed).toEqual([
+      { path: "n.md", code: "invalid_path", message: expect.stringContaining("n.md") },
+    ]);
+    expect(read(fx.root, "n.md")).toBe("see [[old]] and [o](old.md)");
+  });
+
   test("a note that is not valid UTF-8 is left alone and not reported", async () => {
     const fx = makeVaultFixture();
     put(fx.root, "a.md", "A");
@@ -713,8 +801,8 @@ describe("movePath: links", () => {
     expect(res.links?.failed.map((f) => [f.path, f.code])).toEqual([["n.md", "not_found"]]);
   });
 
-  test("containment: a symlinked parent planted at the temp creation or the rename writes nothing outside", async () => {
-    for (const site of ["rewrite.openTmp", "rewrite.rename"] as const) {
+  test("containment: a symlinked parent planted at the temp creation, write, or rename writes nothing outside", async () => {
+    for (const site of ["rewrite.openTmp", "rewrite.writeTmp", "rewrite.rename"] as const) {
       const fx = makeVaultFixture();
       const out = outsideDir();
       put(fx.root, "a.md", "A");
@@ -1007,11 +1095,18 @@ describe("movePath: concurrency", () => {
     put(fx.root, "a.md", "A");
     put(fx.root, "b.md", "B");
     put(fx.root, "c.md", "C");
+    // Which one takes the move mutex first is up to the scheduler; record it.
+    const published: string[] = [];
+    const deps = stepping(fx, (site, paths) => {
+      if (site === "move.rename")
+        published.push(read(fx.root, (paths[0] as string).slice(fx.root.length + 1)));
+    });
     await Promise.all([
-      movePath(fx.deps, fx.slug, "a.md", { destination: "c.md", overwrite: true }),
-      movePath(fx.deps, fx.slug, "b.md", { destination: "c.md", overwrite: true }),
+      movePath(deps, fx.slug, "a.md", { destination: "c.md", overwrite: true }),
+      movePath(deps, fx.slug, "b.md", { destination: "c.md", overwrite: true }),
     ]);
-    expect(read(fx.root, "c.md")).toBe("B");
+    expect(read(fx.root, "c.md")).toBe(published[1] as string);
+    expect([...published].sort()).toEqual(["A", "B"]);
     expect(existsSync(join(fx.root, "a.md"))).toBe(false);
     expect(existsSync(join(fx.root, "b.md"))).toBe(false);
   });

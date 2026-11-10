@@ -137,7 +137,7 @@ async function copyFileLocked(
     const handle = await guarded(g, "copy.openTmp", [tmp], () => fs.open(tmp, "wx"));
     try {
       try {
-        await handle.writeFile(bytes);
+        await guarded(g, "copy.writeTmp", [tmp], () => handle.writeFile(bytes));
       } finally {
         await handle.close();
       }

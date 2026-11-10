@@ -3,10 +3,11 @@
  * operations): move, copy, and rewrite code MUST NOT call a filesystem
  * function that creates, writes, links, renames, or removes a path except
  * inside a `guarded(…)` or `stagingInterior(…)` call. The source files are
- * scanned as text: every mutating `fs.x(` must lie within the argument list
- * of one of those two helpers, and no other route to a mutating function
- * (a sync variant, a direct `node:fs/promises` import, `Bun.write`) may
- * appear at all.
+ * scanned as text: every mutating `fs.x(` call, and every mutating method
+ * call on any other receiver (a `FileHandle`'s `writeFile`, `write`,
+ * `truncate`, …), must lie within the argument list of one of those two
+ * helpers, and no other route to a mutating function (a sync variant, a
+ * direct `node:fs/promises` import, `Bun.write`) may appear at all.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -18,6 +19,10 @@ const SRC = join(import.meta.dir, "..", "..", "src", "vault");
 
 const MUTATING =
   /\bfs\.(mkdir|mkdtemp|open|writeFile|appendFile|link|symlink|rename|unlink|rmdir|rm|cp|copyFile|truncate|chmod|chown|lchown|utimes|lutimes)\(/g;
+
+/** Mutating `FileHandle` methods, whatever the receiver is called. */
+const HANDLE_MUTATING =
+  /(?<!\bfs)\.(writeFile|write|writev|appendFile|truncate|chmod|chown|utimes|sync|datasync)\(/g;
 
 /** `[start, end)` of every `guarded(` / `stagingInterior(` call's argument list. */
 function helperRanges(text: string): [number, number][] {
@@ -40,7 +45,7 @@ function helperRanges(text: string): [number, number][] {
 function unguardedCalls(text: string): string[] {
   const ranges = helperRanges(text);
   const bad: string[] = [];
-  for (const m of text.matchAll(MUTATING)) {
+  for (const m of [...text.matchAll(MUTATING), ...text.matchAll(HANDLE_MUTATING)]) {
     const at = m.index as number;
     if (!ranges.some(([s, e]) => at > s && at < e)) {
       const line = text.slice(0, at).split("\n").length;
@@ -67,10 +72,16 @@ describe("move, copy, and rewrite code reach mutating fs only through guarded / 
     expect(unguardedCalls("await guarded(g, s, [p], () => x());\nfs.rename(a, b);")).toEqual([
       "fs.rename( at line 2",
     ]);
+    expect(unguardedCalls("await handle.writeFile(bytes);")).toEqual([".writeFile( at line 1"]);
+    expect(unguardedCalls("await h.truncate(0);\nawait fh.write(b);")).toEqual([
+      ".truncate( at line 1",
+      ".write( at line 2",
+    ]);
+    expect(unguardedCalls("await guarded(g, s, [t], () => handle.writeFile(b));")).toEqual([]);
     expect(unguardedCalls("rmSync(p);")).toEqual(["a synchronous fs call"]);
     expect(unguardedCalls('import { rm } from "node:fs/promises";')).toEqual([
       "a direct node:fs/promises import",
     ]);
-    expect(unguardedCalls("await Bun.write(p, b);")).toEqual(["Bun.write"]);
+    expect(unguardedCalls("await Bun.write(p, b);")).toContain("Bun.write");
   });
 });

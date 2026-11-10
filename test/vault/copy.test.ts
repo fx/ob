@@ -556,8 +556,9 @@ describe("copyPath: containment", () => {
     expect(readdirSync(out)).toEqual(["keep.md"]);
   }
 
-  test("the file copy's temp creation and publish", async () => {
+  test("the file copy's temp creation, temp write, and publish", async () => {
     await expectContained("copy.openTmp", false);
+    await expectContained("copy.writeTmp", false);
     await expectContained("copy.link", false);
   });
 

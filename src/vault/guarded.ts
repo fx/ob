@@ -307,6 +307,7 @@ export type GuardSite =
   | "move.afterPublish"
   | "copy.read"
   | "copy.openTmp"
+  | "copy.writeTmp"
   | "copy.link"
   | "copy.rename"
   | "copy.unlinkTmp"
@@ -316,6 +317,7 @@ export type GuardSite =
   | "copy.rmStaging"
   | "rewrite.read"
   | "rewrite.openTmp"
+  | "rewrite.writeTmp"
   | "rewrite.rename"
   | "rewrite.unlinkTmp";
 

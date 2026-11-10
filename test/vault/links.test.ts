@@ -383,4 +383,43 @@ describe("rewritten text", () => {
     const files2 = ["a.md", "x/a", "n.md", "z/a"];
     expect(rewrite(files2, { "a.md": "x/a.md" }, "n.md", "[[a.md]] [[a]]")).toBe("unresolvable");
   });
+
+  test("a target name a wikilink cannot carry (#, |, ]]) leaves the note unresolvable", () => {
+    for (const name of ["new#part", "new|x", "a]]b", "a[b"]) {
+      const files = ["old.md", "n.md"];
+      // Every wikilink form would be read as a different (or no) link.
+      expect([name, rewrite(files, { "old.md": `${name}.md` }, "n.md", "see [[old]]")]).toEqual([
+        name,
+        "unresolvable",
+      ]);
+      expect([name, rewrite(files, { "old.md": `d/${name}.md` }, "n.md", "![[old|al]]")]).toEqual([
+        name,
+        "unresolvable",
+      ]);
+    }
+  });
+
+  test("the same names are encoded or carried safely in a Markdown link", () => {
+    const files = ["old.md", "n.md"];
+    expect(rewrite(files, { "old.md": "new#part.md" }, "n.md", "[t](old.md)")).toBe(
+      "[t](new%23part.md)",
+    );
+    expect(rewrite(files, { "old.md": "new|x.md" }, "n.md", "[t](old.md#h)")).toBe(
+      "[t](new|x.md#h)",
+    );
+    expect(rewrite(files, { "old.md": "a]]b.md" }, "n.md", '[t](<old.md> "ti")')).toBe(
+      '[t](<a]]b.md> "ti")',
+    );
+  });
+
+  test("only a link whose original linkpath had no extension at all drops .md", () => {
+    const files = ["old.pdf", "my.note.md", "plain.md", "n.md"];
+    const moves = { "old.pdf": "new.md", "my.note.md": "d/your.note.md", "plain.md": "d/p2.md" };
+    expect(rewrite(files, moves, "n.md", "[[old.pdf]] [[my.note]] [[plain]]")).toBe(
+      "[[new.md]] [[your.note.md]] [[p2]]",
+    );
+    expect(rewrite(files, { "old.pdf": "d/new.md" }, "n.md", "[x](old.pdf) ![y](/old.pdf)")).toBe(
+      "[x](d/new.md) ![y](/d/new.md)",
+    );
+  });
 });

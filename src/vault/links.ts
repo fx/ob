@@ -53,6 +53,9 @@ export interface FoundLink {
   readonly end: number;
   /** Markdown only: the destination is written in angle brackets. */
   readonly angle: boolean;
+  /** Raw offsets of the whole link construct (`[[…]]`, or `[…](…)`), for re-parsing a rewrite. */
+  readonly constructStart: number;
+  readonly constructEnd: number;
 }
 
 const parser = remark().use(remarkFrontmatter, ["yaml"]).use(remarkGfm);
@@ -172,17 +175,17 @@ function scanDestination(text: string, i: number): Destination | null {
   return { raw: text.slice(i, j), start: i, angle: false, next: j };
 }
 
-/** After a destination: an optional title, then `)`. Returns whether the link closes properly. */
-function closesLink(text: string, i: number): boolean {
+/** After a destination: an optional title, then `)`. Returns the index of that `)`, or -1. */
+function closingParen(text: string, i: number): number {
   let j = skipSpace(text, i);
   const open = text[j];
   if (j > i && (open === '"' || open === "'" || open === "(")) {
     const close = open === "(" ? ")" : open;
     for (j++; j < text.length && text[j] !== close; j++) if (text[j] === "\\") j++;
-    if (j >= text.length) return false;
+    if (j >= text.length) return -1;
     j = skipSpace(text, j + 1);
   }
-  return text[j] === ")";
+  return text[j] === ")" ? j : -1;
 }
 
 /** A Markdown destination is internal iff it has no scheme and does not start with `#` or `//`. */
@@ -217,6 +220,8 @@ export function findLinks(text: string): FoundLink[] {
       start: innerStart + lead,
       end: innerStart + lead + linkpath.length,
       angle: false,
+      constructStart: at,
+      constructEnd: at + m[0].length,
     });
   }
   for (let i = text.indexOf("]("); i >= 0; i = text.indexOf("](", i + 1)) {
@@ -224,7 +229,8 @@ export function findLinks(text: string): FoundLink[] {
     const open = openingBracket(text, i);
     if (open < 0 || inRanges(open, code)) continue;
     const dest = scanDestination(text, skipSpace(text, i + 2));
-    if (dest === null || !closesLink(text, dest.next)) continue;
+    const close = dest === null ? -1 : closingParen(text, dest.next);
+    if (dest === null || close < 0) continue;
     const hash = dest.raw.indexOf("#");
     const rawPath = hash >= 0 ? dest.raw.slice(0, hash) : dest.raw;
     const processed = unescapeMd(dest.raw);
@@ -235,6 +241,8 @@ export function findLinks(text: string): FoundLink[] {
       start: dest.start,
       end: dest.start + rawPath.length,
       angle: dest.angle,
+      constructStart: open,
+      constructEnd: close + 1,
     });
   }
   return links.sort((a, b) => a.start - b.start);
@@ -360,18 +368,46 @@ function encodeMd(p: string, angle: boolean): string {
   return out;
 }
 
-/** The new linkpath text for `link`, now pointing at `target` from `s1`; `null` if no form resolves there. */
+/** The last segment of `p` carries an extension (`.pdf`, `.md`, `.note`, …). */
+const hasExtension = (p: string): boolean => /\.[^./]+$/.test(p.slice(p.lastIndexOf("/") + 1));
+
+/**
+ * The new linkpath text for `link` (found in `text`), now pointing at
+ * `target` from `s1`; `null` if no form does.
+ *
+ * Every candidate form is checked the way it will be READ: written into a
+ * copy of the link's own construct (`[[…]]` or `[…](…)`, alias, fragment
+ * and all), parsed with `findLinks`, and accepted only when exactly that one
+ * link comes back, its linkpath spans the whole replacement, and that
+ * parsed linkpath resolves to `target`. A target name that the syntax
+ * cannot carry — `#`, `|`, or `]]` in a wikilink — therefore never yields a
+ * rewrite that would be read as a different link.
+ */
 function newLinkpath(
   link: FoundLink,
+  text: string,
   step0: 1 | 2 | 3,
   target: string,
   s1: string,
   after: FileIndex,
 ): string | null {
-  const omitMd = /\.md$/i.test(target) && !/\.md$/i.test(link.linkpath);
-  const strip = (p: string): string => (omitMd ? p.slice(0, -3) : p);
-  const resolves = (p: string): boolean =>
-    resolveLink({ kind: link.kind, linkpath: strip(p) }, s1, after)?.path === target;
+  // `.md` is left off only when the original linkpath had no extension at all.
+  const omitMd = /\.md$/i.test(target) && !hasExtension(link.linkpath);
+  const offset = link.start - link.constructStart;
+  const emit = (p: string): string | null => {
+    const bare = omitMd ? p.slice(0, -3) : p;
+    const raw = link.kind === "md" ? encodeMd(bare, link.angle) : bare;
+    const snippet =
+      text.slice(link.constructStart, link.start) + raw + text.slice(link.end, link.constructEnd);
+    const parsed = findLinks(snippet);
+    const only = parsed.length === 1 ? (parsed[0] as FoundLink) : null;
+    const intact =
+      only !== null &&
+      only.kind === link.kind &&
+      only.start === offset &&
+      only.end === offset + raw.length;
+    return intact && resolveLink(only, s1, after)?.path === target ? raw : null;
+  };
   const relative = isRelativeSyntax(link.linkpath);
   const folder = folderOf(s1);
   let primary: string;
@@ -381,7 +417,7 @@ function newLinkpath(
   ) {
     // By bare name, if the name alone still finds the target.
     const name = basename(target);
-    primary = resolves(name) ? name : target;
+    primary = emit(name) !== null ? name : target;
   } else if (link.kind === "wiki" && !relative) {
     primary = target;
   } else if (relative || step0 === 1) {
@@ -389,11 +425,13 @@ function newLinkpath(
   } else {
     primary = link.linkpath.startsWith("/") ? `/${target}` : target;
   }
-  const fallbacks = [primary, relativeForm(folder, target, true)];
-  fallbacks.push(link.kind === "md" ? `/${target}` : target);
-  const chosen = fallbacks.find(resolves);
-  if (chosen === undefined) return null;
-  return link.kind === "md" ? encodeMd(strip(chosen), link.angle) : strip(chosen);
+  const forms = [primary, relativeForm(folder, target, true)];
+  forms.push(link.kind === "md" ? `/${target}` : target);
+  for (const form of forms) {
+    const raw = emit(form);
+    if (raw !== null) return raw;
+  }
+  return null;
 }
 
 /** The inputs one rewrite pass needs, all vault-relative. */
@@ -425,7 +463,7 @@ export function planRewrite(
     const expected = moved ?? r0.path;
     const r1 = resolveLink(link, s1, input.after);
     if (r1?.path === expected && !(r0.step === 1 && r1.step !== 1)) continue;
-    const replacement = newLinkpath(link, r0.step, expected, s1, input.after);
+    const replacement = newLinkpath(link, text, r0.step, expected, s1, input.after);
     if (replacement === null) return "unresolvable";
     edits.push({ start: link.start, end: link.end, text: replacement });
   }
@@ -551,7 +589,7 @@ async function writeNote(
   const handle = await guarded(g, "rewrite.openTmp", [abs, tmp], () => fs.open(tmp, "wx"));
   try {
     try {
-      await handle.writeFile(bytes);
+      await guarded(g, "rewrite.writeTmp", [abs, tmp], () => handle.writeFile(bytes));
     } finally {
       await handle.close();
     }
