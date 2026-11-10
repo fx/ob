@@ -475,8 +475,6 @@ A concurrent ob operation that writes into a parent folder another call is just 
 
 ### Grep
 
-> Specified by draft change [0022](../../changes/0022-grep.md); not yet implemented.
-
 #### `POST /v1/vaults/:slug/grep`
 
 - Searches the bytes on disk — not the index — for an exact substring or a regular expression, line by line, and returns where it matched. It complements `search`: `search` ranks Markdown by meaning; `grep` finds exact text in any text file.

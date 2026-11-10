@@ -61,7 +61,7 @@ These rules govern the current tool set and every tool added later.
 
 ### Tool surface
 
-> `move` and `copy` and `grep` are specified by draft changes [0020](../../changes/0020-move-and-copy.md) and [0022](../../changes/0022-grep.md) and are not yet implemented; `list` and `delete` ([0019](../../changes/0019-unified-list-and-delete.md)) and `list_tags` ([0021](../../changes/0021-list-tags.md)) are implemented. The table below is the end state once the two drafts have landed; each change adds its own tools, and the registered set in between is whatever the changes landed so far add up to.
+> `move` and `copy` are specified by draft change [0020](../../changes/0020-move-and-copy.md) and are not yet implemented; `list` and `delete` ([0019](../../changes/0019-unified-list-and-delete.md)), `list_tags` ([0021](../../changes/0021-list-tags.md)), and `grep` ([0022](../../changes/0022-grep.md)) are implemented. The table below is the end state once the draft has landed; it adds its own tools, and the registered set until then is whatever the changes landed so far add up to.
 
 The server MUST register exactly these tools. Argument schemas are JSON Schema; every error result MUST set `isError: true` and contain a single text content block with the JSON `{ code, message }`. The read tools (`list_vaults`, `vault_status`, `list`, `read_file`, `search`, `list_tags`, `grep`) MUST advertise `annotations: { readOnlyHint: true }` in `tools/list`, scoped sessions included, so clients can call them without treating them as mutating; no other tool sets it.
 
