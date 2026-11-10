@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { GrepResponse } from "../../src/schemas/index.ts";
-import { GREP_TIME_BUDGET_MS } from "../../src/vault/grep.ts";
+import { GREP_TIME_BUDGET_MS, grepSlots } from "../../src/vault/grep.ts";
 import { type HttpFixture, makeHttpFixture } from "./helpers.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -16,7 +16,18 @@ afterEach(async () => {
     const f = cleanup.pop();
     if (f !== undefined) await f();
   }
+  await drainGrepSlots();
 });
+
+/**
+ * Wait until every abandoned worker has exited (a slot is released only
+ * then), so no cut-off evaluation keeps burning CPU into later tests.
+ */
+async function drainGrepSlots(): Promise<void> {
+  const never = new AbortController().signal;
+  const held = await Promise.all([grepSlots.acquire(never), grepSlots.acquire(never)]);
+  for (const release of held) release();
+}
 
 async function fixture(label: string, files: Record<string, string>): Promise<HttpFixture> {
   const fx = await makeHttpFixture(label);

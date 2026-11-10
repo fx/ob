@@ -12,7 +12,7 @@
  *   manual timer, so no test waits on the wall clock for a cut-off.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   appendFileSync,
   mkdirSync,
@@ -34,6 +34,7 @@ import {
   Semaphore,
   escapeLiteral,
   grep,
+  grepSlots,
   spawnGrepWorker,
 } from "../../src/vault/grep.ts";
 import {
@@ -929,6 +930,14 @@ describe("grep — concurrency and cancellation", () => {
 // ---------------------------------------------------------------------------
 
 describe("grep — real worker", () => {
+  // A slot is released only once its worker exited: wait for both, so the
+  // cut-off evaluation does not keep running into later tests.
+  afterEach(async () => {
+    const never = new AbortController().signal;
+    const held = await Promise.all([grepSlots.acquire(never), grepSlots.acquire(never)]);
+    for (const release of held) release();
+  });
+
   test("a catastrophic regex is cut off at the budget while the event loop keeps serving", async () => {
     // Several 10 000-character lines of `a` followed by `!`: each evaluation
     // of `(a+)+$` backtracks for far longer than the budget.

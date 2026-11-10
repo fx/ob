@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ToolDefinition } from "../../../src/mcp/tool.ts";
+import { grepSlots } from "../../../src/vault/grep.ts";
 import { type McpFixture, makeMcpFixture } from "../helpers.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -16,6 +17,11 @@ afterEach(async () => {
     const f = cleanup.pop();
     if (f !== undefined) await f();
   }
+  // A slot is released only once its worker exited: wait for both, so no
+  // cancelled evaluation keeps running into later tests.
+  const never = new AbortController().signal;
+  const held = await Promise.all([grepSlots.acquire(never), grepSlots.acquire(never)]);
+  for (const release of held) release();
 });
 
 async function fixture(label: string, files: Record<string, string> = {}): Promise<McpFixture> {
