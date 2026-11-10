@@ -20,6 +20,7 @@
  *   - Path operations (list, delete) under `/v1/vaults/:slug/paths`
  *   - Search at `POST /v1/vaults/:slug/search`
  *   - Tag listing at `GET /v1/vaults/:slug/tags`
+ *   - Grep at `POST /v1/vaults/:slug/grep`
  *
  * Errors thrown by routes are translated to JSON envelopes by `app.onError`,
  * driven from the closed-set table in `src/http/errors.ts`. Unmatched URLs
@@ -41,6 +42,7 @@ import { logMiddleware } from "./middleware/log.ts";
 import { getRequestId, requestIdMiddleware } from "./middleware/requestId.ts";
 import { mountFileRoutes } from "./routes/files.ts";
 import { mountFolderRoutes } from "./routes/folders.ts";
+import { mountGrepRoutes } from "./routes/grep.ts";
 import { mountPathRoutes } from "./routes/paths.ts";
 import { mountSearchRoutes } from "./routes/search.ts";
 import { mountTagRoutes } from "./routes/tags.ts";
@@ -64,6 +66,8 @@ export interface HttpAppDeps {
   readonly config?: Config;
   /** Override default logger (tests). */
   readonly logger?: Logger;
+  /** Monotonic clock for request budgets (tests); defaults to `monotonicNow`. */
+  readonly clock?: () => number;
 }
 
 function buildVaultLookup(cfg: Config): (slug: string) => VaultDescriptor | null {
@@ -134,6 +138,7 @@ export function buildHttpApp(deps: HttpAppDeps = {}): Hono {
       vault: lookup,
       indexer,
       logger,
+      ...(deps.clock !== undefined && { clock: deps.clock }),
     };
     const routeDeps: RouteDeps = { ...serviceDeps, supervisor, indexer };
     mountVaultRoutes(app, routeDeps);
@@ -142,6 +147,7 @@ export function buildHttpApp(deps: HttpAppDeps = {}): Hono {
     mountPathRoutes(app, routeDeps);
     mountSearchRoutes(app, routeDeps);
     mountTagRoutes(app, routeDeps);
+    mountGrepRoutes(app, routeDeps);
     // Mount BEFORE the catch-all error handler / notFound below.
     app.route("/mcp", buildMcpRoutes({ ...routeDeps, logger }));
   }

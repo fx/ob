@@ -65,6 +65,8 @@ export interface McpFixture {
 export interface McpFixtureOptions {
   readonly label?: string;
   readonly slugs?: readonly string[];
+  /** Monotonic clock for request budgets (grep). */
+  readonly clock?: () => number;
 }
 
 export async function makeMcpFixture(opts: McpFixtureOptions = {}): Promise<McpFixture> {
@@ -117,7 +119,13 @@ export async function makeMcpFixture(opts: McpFixtureOptions = {}): Promise<McpF
     ),
   );
 
-  const app = buildHttpApp({ supervisor, indexer, config: cfg, logger: silent() });
+  const app = buildHttpApp({
+    supervisor,
+    indexer,
+    config: cfg,
+    logger: silent(),
+    ...(opts.clock !== undefined && { clock: opts.clock }),
+  });
 
   // Pre-build the same VaultServiceDeps used inside the route mount so tests
   // can exercise tools and the registry directly.

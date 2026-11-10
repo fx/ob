@@ -15,7 +15,7 @@ import {
   VAULT_WIDE_COUNTS_NOTE,
   scopeToolDefinition,
 } from "../../src/mcp/scope-tools.ts";
-import { type ToolDefinition, wrapSuccess } from "../../src/mcp/tool.ts";
+import { type ToolCallExtra, type ToolDefinition, wrapSuccess } from "../../src/mcp/tool.ts";
 import { type McpFixture, makeMcpFixture } from "./helpers.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -58,16 +58,20 @@ async function callParsed(
 function recordingTool(inputSchema: Record<string, unknown>): {
   readonly def: ToolDefinition;
   readonly calls: unknown[];
+  readonly extras: (ToolCallExtra | undefined)[];
 } {
   const calls: unknown[] = [];
+  const extras: (ToolCallExtra | undefined)[] = [];
   return {
     calls,
+    extras,
     def: {
       name: "stub",
       description: "stub tool",
       inputSchema,
-      call: async (raw: unknown) => {
+      call: async (raw: unknown, extra?: ToolCallExtra) => {
         calls.push(raw);
+        extras.push(extra);
         return wrapSuccess({ ok: true });
       },
     },
@@ -190,6 +194,21 @@ test("a vault-taking schema with no `required` array yields no `required` key", 
     { path: "a.md", vault: "v" },
     { path: "b.md", vault: "explicit" },
   ]);
+});
+
+test("the call extra (the abort signal) is forwarded unchanged on both call paths", async () => {
+  const stub = recordingTool({
+    type: "object",
+    properties: { vault: { type: "string" } },
+    required: ["vault"],
+  });
+  const scoped = scopeToolDefinition(stub.def, "v");
+  const extra: ToolCallExtra = { signal: new AbortController().signal };
+  await scoped.call({}, extra);
+  await scoped.call({ vault: "v" }, extra);
+  await scoped.call("not an object", extra);
+  expect(stub.extras).toEqual([extra, extra, extra]);
+  expect(stub.extras[0]).toBe(extra);
 });
 
 test("descriptionSuffix is appended when non-empty and ignored otherwise", async () => {

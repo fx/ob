@@ -59,7 +59,7 @@ import { mapErrorToMcpResult } from "./errors.ts";
 import type { McpRoutesDeps } from "./index.ts";
 import { URI_SCHEME, notFound } from "./resources.ts";
 import type { ResourceHandler } from "./resources.ts";
-import type { McpToolResult, ToolDefinition } from "./tool.ts";
+import type { McpToolResult, ToolCallExtra, ToolDefinition } from "./tool.ts";
 
 /** A resolved session scope: one vault, one folder prefix inside it. */
 export interface McpScope {
@@ -226,13 +226,13 @@ export function guardToolDefinition(
 ): ToolDefinition {
   return {
     ...tool,
-    call: async (raw: unknown): Promise<McpToolResult> => {
+    call: async (raw: unknown, extra?: ToolCallExtra): Promise<McpToolResult> => {
       try {
         await check();
       } catch (e) {
         return mapErrorToMcpResult(e);
       }
-      return tool.call(raw);
+      return tool.call(raw, extra);
     },
   };
 }

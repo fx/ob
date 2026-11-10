@@ -78,6 +78,7 @@ import type { ToolDefinition } from "./tool.ts";
 import { appendFileTool } from "./tools/append_file.ts";
 import { createFolderTool } from "./tools/create_folder.ts";
 import { deleteTool } from "./tools/delete.ts";
+import { grepTool } from "./tools/grep.ts";
 import { listTool } from "./tools/list.ts";
 import { listTagsTool } from "./tools/list_tags.ts";
 import { listVaultsTool } from "./tools/list_vaults.ts";
@@ -118,6 +119,7 @@ export function buildToolRegistry(deps: McpRoutesDeps): ToolRegistry {
   registry.register(deleteTool(deps));
   registry.register(searchTool(deps));
   registry.register(listTagsTool(deps));
+  registry.register(grepTool(deps));
   return registry;
 }
 
@@ -359,6 +361,7 @@ export function buildMcpRoutes(deps: McpRoutesDeps): Hono {
     add(deleteTool(scoped));
     add(searchTool(scoped));
     add(listTagsTool(scoped));
+    add(grepTool(scoped));
     return {
       registry: scopedRegistry,
       // A slug provider returning ONLY the scoped slug. The deps wrapper does
@@ -454,7 +457,12 @@ export function buildMcpRoutes(deps: McpRoutesDeps): Hono {
     transport.onerror = (e: Error): void => {
       deps.logger?.warn("mcp transport error", { error: e.message });
     };
-    const server = buildMcpServer(surface.registry, surface.resources, surface.instructions);
+    const server = buildMcpServer(
+      surface.registry,
+      surface.resources,
+      surface.instructions,
+      deps.clock,
+    );
     await server.connect(transport);
     return transport;
   }

@@ -790,6 +790,63 @@ describe("scoped list and delete", () => {
   });
 });
 
+describe("scoped grep", () => {
+  interface GrepPage {
+    matches: { path: string; line: number }[];
+    filesScanned: number;
+  }
+  const paths = (r: ToolCall): string[] => (r.parsed as GrepPage).matches.map((m) => m.path);
+
+  test("grep reads only the scope and returns scope-relative paths", async () => {
+    const fx = await makeScopeFixture("sc-grep");
+    cleanup.push(fx.stop);
+    write(fx.root("v"), "agents/a/one.md", "NEEDLE inside\n");
+    write(fx.root("v"), "agents/a/sub/two.md", "NEEDLE inside\n");
+    write(fx.root("v"), "agents/ab/three.md", "NEEDLE sibling\n");
+    write(fx.root("v"), "top.md", "NEEDLE top\n");
+    // A symlink inside the scope that points out of it is never followed.
+    symlinkSync(join(fx.root("v"), "agents", "ab"), join(fx.root("v"), "agents", "a", "link"));
+    const sid = await openSession(fx.app, "/mcp/v/agents/a");
+
+    const all = await callTool(fx.app, "/mcp/v/agents/a", sid, "grep", { pattern: "NEEDLE" });
+    expect(all.isError).toBe(false);
+    expect(paths(all)).toEqual(["one.md", "sub/two.md"]);
+    expect((all.parsed as GrepPage).filesScanned).toBe(2);
+    expect(JSON.stringify(all.parsed)).not.toContain("agents");
+
+    // `prefix: ""` is the whole scope; the prefix is matched literally
+    // against scope-relative paths, with no translation.
+    const empty = await callTool(fx.app, "/mcp/v/agents/a", sid, "grep", {
+      pattern: "NEEDLE",
+      prefix: "",
+    });
+    expect(paths(empty)).toEqual(["one.md", "sub/two.md"]);
+    const sub = await callTool(fx.app, "/mcp/v/agents/a", sid, "grep", {
+      pattern: "NEEDLE",
+      prefix: "sub/",
+    });
+    expect(paths(sub)).toEqual(["sub/two.md"]);
+    for (const prefix of ["agents/a/", "../", "../ab/", "/"]) {
+      const r = await callTool(fx.app, "/mcp/v/agents/a", sid, "grep", {
+        pattern: "NEEDLE",
+        prefix,
+      });
+      expect(r.isError).toBe(false);
+      expect(paths(r)).toEqual([]);
+    }
+  });
+
+  test("a vault-root scope greps the whole vault", async () => {
+    const fx = await makeScopeFixture("sc-grep-root");
+    cleanup.push(fx.stop);
+    write(fx.root("v"), "agents/a/one.md", "NEEDLE\n");
+    write(fx.root("v"), "top.md", "NEEDLE\n");
+    const sid = await openSession(fx.app, "/mcp/v");
+    const r = await callTool(fx.app, "/mcp/v", sid, "grep", { pattern: "NEEDLE" });
+    expect(paths(r)).toEqual(["agents/a/one.md", "top.md"]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Vault visibility + implicit vault argument
 // ---------------------------------------------------------------------------
@@ -870,6 +927,7 @@ describe("scoped vault visibility", () => {
     const hinted = scoped.tools.filter((t) => t.annotations?.readOnlyHint !== undefined);
     expect(hinted.every((t) => t.annotations?.readOnlyHint === true)).toBe(true);
     expect(hinted.map((t) => t.name).sort()).toEqual([
+      "grep",
       "list",
       "list_tags",
       "list_vaults",
@@ -883,6 +941,7 @@ describe("scoped vault visibility", () => {
         "append_file",
         "create_folder",
         "delete",
+        "grep",
         "list",
         "list_tags",
         "list_vaults",

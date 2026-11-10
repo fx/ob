@@ -46,12 +46,29 @@ export interface GuardedReadOptions {
   readonly beforeOpen?: () => Promise<void>;
   /** Test seam: runs after the descriptor's `fstat`, immediately before the read. */
   readonly afterStat?: () => Promise<void>;
+  /** Told how many bytes a bounded (`maxBytes`) read fetched, before any oversize throw. */
+  readonly onRead?: (bytesRead: number) => void;
+  /**
+   * With `maxBytes`: called with the opened descriptor's `fstat` — after the
+   * regular-file check, before the size check and before any byte is read —
+   * and returns how many bytes the read may fetch at most (capped at
+   * `maxBytes + 1`). It may throw to refuse the read; the error propagates.
+   * A read stopped by a limit below `maxBytes + 1` can be short of the file's
+   * content; the caller compares the bytes with the result's `endStat.size`.
+   */
+  readonly readLimit?: (stat: Stats) => number;
 }
 
 export interface GuardedReadResult {
   readonly bytes: Uint8Array;
   /** `fstat` of the opened descriptor — the file that was actually read. */
   readonly stat: Stats;
+  /**
+   * With `readLimit`: a second `fstat` of the same descriptor, taken after
+   * the read, so a caller can tell a read that stopped at its limit from one
+   * that reached the end of the file.
+   */
+  readonly endStat?: Stats;
 }
 
 /**
@@ -86,10 +103,16 @@ export async function guardedRead(
     const stat = await handle.stat();
     if (!stat.isFile()) throw new InvalidPathError(rel, "not a regular file");
     const max = opts.maxBytes;
-    if (max !== undefined && stat.size > max) throw new OversizeReadError(rel, max);
+    if (max === undefined) {
+      await opts.afterStat?.();
+      return { bytes: await readAll(handle), stat };
+    }
+    const limit = Math.min(max + 1, opts.readLimit?.(stat) ?? max + 1);
+    if (stat.size > max) throw new OversizeReadError(rel, max);
     await opts.afterStat?.();
-    const bytes = max === undefined ? await readAll(handle) : await readBounded(handle, rel, max);
-    return { bytes, stat };
+    const bytes = await readBounded(handle, rel, max, limit, opts.onRead);
+    if (opts.readLimit === undefined) return { bytes, stat };
+    return { bytes, stat, endStat: await handle.stat() };
   } finally {
     await handle.close();
   }
@@ -103,15 +126,25 @@ async function readAll(handle: fs.FileHandle): Promise<Uint8Array> {
   return view;
 }
 
-/** Read at most `max + 1` bytes; the sentinel byte means the file grew past `max`. */
-async function readBounded(handle: fs.FileHandle, rel: string, max: number): Promise<Uint8Array> {
-  const buf = new Uint8Array(max + 1);
+/**
+ * Read at most `limit` (≤ `max + 1`) bytes; reaching `max + 1` — the sentinel
+ * byte — means the file grew past `max`.
+ */
+async function readBounded(
+  handle: fs.FileHandle,
+  rel: string,
+  max: number,
+  limit: number,
+  onRead: ((bytesRead: number) => void) | undefined,
+): Promise<Uint8Array> {
+  const buf = new Uint8Array(limit);
   let total = 0;
   while (total < buf.byteLength) {
     const { bytesRead } = await handle.read(buf, total, buf.byteLength - total, total);
     if (bytesRead === 0) break;
     total += bytesRead;
   }
+  onRead?.(total);
   if (total > max) throw new OversizeReadError(rel, max);
   return buf.slice(0, total);
 }

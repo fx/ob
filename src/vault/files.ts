@@ -66,6 +66,12 @@ export interface VaultServiceDeps {
   >;
   /** Inject `Date.now`-equivalent for deterministic tests. */
   readonly now?: () => number;
+  /**
+   * Monotonic clock (milliseconds) for request budgets — grep's 5-second
+   * budget is measured on it from the request's arrival. Defaults to
+   * `monotonicNow`; tests inject a fake.
+   */
+  readonly clock?: () => number;
   /** Override `crypto.randomUUID` for deterministic tmp-file names in tests. */
   readonly randomUUID?: () => string;
   /**
@@ -149,6 +155,11 @@ export function sha256(bytes: Uint8Array): string {
   // runtime); to keep TS happy under @types/bun's narrow `BinaryLike` we
   // require Uint8Array and rely on Buffer being a subclass at runtime.
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** The default `clock`: monotonic milliseconds since process start. */
+export function monotonicNow(): number {
+  return performance.now();
 }
 
 export function resolveVault(deps: VaultServiceDeps, slug: string): VaultDescriptor {

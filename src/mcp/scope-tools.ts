@@ -33,7 +33,7 @@
  * consumes it lands separately.
  */
 
-import type { McpToolResult, ToolDefinition } from "./tool.ts";
+import type { McpToolResult, ToolCallExtra, ToolDefinition } from "./tool.ts";
 
 /**
  * SDK `instructions` for a scoped per-session `Server`, delivered once at
@@ -111,9 +111,9 @@ export function scopeToolDefinition(
     ...tool,
     description,
     inputSchema,
-    call: (raw: unknown): Promise<McpToolResult> =>
+    call: (raw: unknown, extra?: ToolCallExtra): Promise<McpToolResult> =>
       isPlainObject(raw) && !Object.hasOwn(raw, "vault")
-        ? tool.call({ ...raw, vault: slug })
-        : tool.call(raw),
+        ? tool.call({ ...raw, vault: slug }, extra)
+        : tool.call(raw, extra),
   };
 }

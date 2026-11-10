@@ -539,6 +539,20 @@ function echoTool(seen: unknown[]) {
 }
 
 describe("guardToolDefinition", () => {
+  test("forwards the call extra (the abort signal) to the tool", async () => {
+    const seen: (AbortSignal | undefined)[] = [];
+    const inner = tool("probe", "x", z.object({}).strict(), async (_args, extra) => {
+      seen.push(extra.signal);
+      return {};
+    });
+    const wrapped = guardToolDefinition(inner, async () => undefined);
+    const signal = new AbortController().signal;
+    await wrapped.call({}, { signal });
+    await wrapped.call({});
+    expect(seen).toEqual([signal, undefined]);
+    expect(seen[0]).toBe(signal);
+  });
+
   test("preserves the tool's advertised surface", () => {
     const wrapped = guardToolDefinition(echoTool([]), async () => undefined);
     expect(wrapped.name).toBe("echo");

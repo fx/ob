@@ -50,6 +50,7 @@ export interface HttpFixture {
 export async function makeHttpFixture(
   label = "http",
   status: Partial<VaultStatus> = {},
+  opts: { readonly clock?: () => number } = {},
 ): Promise<HttpFixture> {
   const dataDir = mkdtempSync(join(tmpdir(), `ob-${label}-`));
   const slug = "v";
@@ -77,7 +78,13 @@ export async function makeHttpFixture(
 
   const supervisor = fakeSupervisor([makeVaultStatus({ ...status, slug })]);
 
-  const app = buildHttpApp({ supervisor, indexer, config: cfg, logger: silent() });
+  const app = buildHttpApp({
+    supervisor,
+    indexer,
+    config: cfg,
+    logger: silent(),
+    ...(opts.clock !== undefined && { clock: opts.clock }),
+  });
 
   return {
     app,

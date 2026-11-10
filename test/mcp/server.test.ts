@@ -5,6 +5,8 @@
  */
 
 import { afterEach, expect, test } from "bun:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
 import {
   SERVER_NAME,
@@ -56,6 +58,85 @@ test("createToolRegistry: register/list/get + duplicate-name guard", () => {
   expect(r.get("a")).toBe(t);
   expect(r.get("missing")).toBeUndefined();
   expect(() => r.register(t)).toThrow();
+});
+
+test("tools/call hands the tool the request's abort signal, which a client cancel aborts", async () => {
+  const r = createToolRegistry();
+  let aborted = (): void => {};
+  const sawAbort = new Promise<void>((resolve) => {
+    aborted = resolve;
+  });
+  let entered = (): void => {};
+  const running = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  r.register(
+    tool("probe", "x", z.object({}).strict(), async (_args, extra) => {
+      extra.signal?.addEventListener("abort", () => aborted(), { once: true });
+      entered();
+      await sawAbort;
+      return { ok: true };
+    }),
+  );
+  const server = buildMcpServer(r, {
+    list: async () => ({ resources: [] }),
+    read: async () => ({ contents: [{ uri: "x", mimeType: "text/markdown", text: "" }] }),
+  });
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverSide);
+  const client = new Client({ name: "t", version: "0" });
+  await client.connect(clientSide);
+  cleanup.push(async () => {
+    await client.close();
+    await server.close();
+  });
+  const ctl = new AbortController();
+  const call = client.callTool({ name: "probe", arguments: {} }, undefined, {
+    signal: ctl.signal,
+  });
+  await running;
+  ctl.abort();
+  await expect(call).rejects.toBeDefined();
+  // The server-side signal aborted: the tool saw the cancellation.
+  await sawAbort;
+});
+
+test("tools/call stamps its arrival on the given clock before the tool and its wrappers run", async () => {
+  let t = 100;
+  const seen: (number | undefined)[] = [];
+  const inner = tool("probe", "x", z.object({}).strict(), async (_args, extra) => {
+    seen.push(extra.arrivedAt);
+    return { ok: true };
+  });
+  const r = createToolRegistry();
+  // A wrapper that takes time before delegating, like the scope guard.
+  r.register({
+    ...inner,
+    call: async (raw, extra) => {
+      t += 6_000;
+      return inner.call(raw, extra);
+    },
+  });
+  const server = buildMcpServer(
+    r,
+    {
+      list: async () => ({ resources: [] }),
+      read: async () => ({ contents: [{ uri: "x", mimeType: "text/markdown", text: "" }] }),
+    },
+    undefined,
+    () => t,
+  );
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverSide);
+  const client = new Client({ name: "t", version: "0" });
+  await client.connect(clientSide);
+  cleanup.push(async () => {
+    await client.close();
+    await server.close();
+  });
+  await client.callTool({ name: "probe", arguments: {} });
+  expect(seen).toEqual([100]);
+  expect(t).toBe(6_100);
 });
 
 test("buildMcpServer constructs a Server (smoke; verified via tools/list end-to-end)", () => {
@@ -115,6 +196,7 @@ test("tools/list over HTTP returns every registered tool", async () => {
       "append_file",
       "create_folder",
       "delete",
+      "grep",
       "list",
       "list_tags",
       "list_vaults",
@@ -140,6 +222,7 @@ test("tools/list over HTTP returns every registered tool", async () => {
   const hinted = body.result.tools.filter((t) => t.annotations?.readOnlyHint !== undefined);
   expect(hinted.every((t) => t.annotations?.readOnlyHint === true)).toBe(true);
   expect(hinted.map((t) => t.name).sort()).toEqual([
+    "grep",
     "list",
     "list_tags",
     "list_vaults",
