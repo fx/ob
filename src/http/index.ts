@@ -16,6 +16,8 @@
  * Versioned API:
  *   - `GET /v1/vaults` and `GET /v1/vaults/:slug` — vault listing & status
  *   - File CRUD + patch + append under `/v1/vaults/:slug/files`
+ *   - Folder create under `/v1/vaults/:slug/folders`
+ *   - Path operations (list, delete) under `/v1/vaults/:slug/paths`
  *   - Search at `POST /v1/vaults/:slug/search`
  *   - Tag listing at `GET /v1/vaults/:slug/tags`
  *
@@ -39,6 +41,7 @@ import { logMiddleware } from "./middleware/log.ts";
 import { getRequestId, requestIdMiddleware } from "./middleware/requestId.ts";
 import { mountFileRoutes } from "./routes/files.ts";
 import { mountFolderRoutes } from "./routes/folders.ts";
+import { mountPathRoutes } from "./routes/paths.ts";
 import { mountSearchRoutes } from "./routes/search.ts";
 import { mountTagRoutes } from "./routes/tags.ts";
 import type { RouteDeps } from "./routes/types.ts";
@@ -136,6 +139,7 @@ export function buildHttpApp(deps: HttpAppDeps = {}): Hono {
     mountVaultRoutes(app, routeDeps);
     mountFileRoutes(app, routeDeps);
     mountFolderRoutes(app, routeDeps);
+    mountPathRoutes(app, routeDeps);
     mountSearchRoutes(app, routeDeps);
     mountTagRoutes(app, routeDeps);
     // Mount BEFORE the catch-all error handler / notFound below.

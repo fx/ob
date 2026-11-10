@@ -77,10 +77,8 @@ import { type ToolRegistry, buildMcpServer, createToolRegistry } from "./server.
 import type { ToolDefinition } from "./tool.ts";
 import { appendFileTool } from "./tools/append_file.ts";
 import { createFolderTool } from "./tools/create_folder.ts";
-import { deleteFileTool } from "./tools/delete_file.ts";
-import { deleteFolderTool } from "./tools/delete_folder.ts";
-import { listFilesTool } from "./tools/list_files.ts";
-import { listFoldersTool } from "./tools/list_folders.ts";
+import { deleteTool } from "./tools/delete.ts";
+import { listTool } from "./tools/list.ts";
 import { listTagsTool } from "./tools/list_tags.ts";
 import { listVaultsTool } from "./tools/list_vaults.ts";
 import { patchFileTool } from "./tools/patch_file.ts";
@@ -111,15 +109,13 @@ export function buildToolRegistry(deps: McpRoutesDeps): ToolRegistry {
   const statusDeps = { supervisor: deps.supervisor, indexer: deps.indexer };
   registry.register(listVaultsTool(statusDeps));
   registry.register(vaultStatusTool(statusDeps));
-  registry.register(listFilesTool(deps));
+  registry.register(listTool(deps));
   registry.register(readFileTool(deps));
   registry.register(writeFileTool(deps));
   registry.register(patchFileTool(deps));
   registry.register(appendFileTool(deps));
-  registry.register(deleteFileTool(deps));
-  registry.register(listFoldersTool(deps));
   registry.register(createFolderTool(deps));
-  registry.register(deleteFolderTool(deps));
+  registry.register(deleteTool(deps));
   registry.register(searchTool(deps));
   registry.register(listTagsTool(deps));
   return registry;
@@ -354,15 +350,13 @@ export function buildMcpRoutes(deps: McpRoutesDeps): Hono {
     // `McpRoutesDeps`. Mirrors `buildToolRegistry`, one substitution deeper.
     add(listVaultsTool(statusDeps));
     add(vaultStatusTool(statusDeps), VAULT_WIDE_COUNTS_NOTE);
-    add(listFilesTool(scoped));
+    add(listTool(scoped));
     add(readFileTool(scoped));
     add(writeFileTool(scoped));
     add(patchFileTool(scoped));
     add(appendFileTool(scoped));
-    add(deleteFileTool(scoped));
-    add(listFoldersTool(scoped));
     add(createFolderTool(scoped));
-    add(deleteFolderTool(scoped));
+    add(deleteTool(scoped));
     add(searchTool(scoped));
     add(listTagsTool(scoped));
     return {

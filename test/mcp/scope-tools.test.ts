@@ -100,7 +100,7 @@ test("scoped tools/list schemas differ from the unscoped ones only in `required`
 
 test("scoping does not mutate the shared unscoped inputSchema", async () => {
   const fx = await fixture("scope-tools-pure");
-  const source = toolNamed(fx, "list_files");
+  const source = toolNamed(fx, "list");
   const before = structuredClone(source.inputSchema);
   const scoped = scopeToolDefinition(source, fx.slug);
   expect(source.inputSchema).toEqual(before);
@@ -121,7 +121,7 @@ test("a vault-only `required` array is dropped rather than advertised empty", as
 
 test("omitted `vault` defaults to the scope slug and succeeds", async () => {
   const fx = await fixture("scope-tools-omitted");
-  const scoped = scopeToolDefinition(toolNamed(fx, "list_files"), fx.slug);
+  const scoped = scopeToolDefinition(toolNamed(fx, "list"), fx.slug);
   const res = await callParsed(scoped, {});
   expect(res.isError).toBeUndefined();
   expect((res.parsed as { items: unknown[] }).items).toEqual([]);
@@ -132,7 +132,7 @@ test("omitted `vault` defaults to the scope slug and succeeds", async () => {
 
 test("a matching `vault` argument is accepted, a different one is vault_not_found", async () => {
   const fx = await fixture("scope-tools-explicit");
-  const scoped = scopeToolDefinition(toolNamed(fx, "list_files"), fx.slug);
+  const scoped = scopeToolDefinition(toolNamed(fx, "list"), fx.slug);
 
   const same = await callParsed(scoped, { vault: fx.slug });
   expect(same.isError).toBeUndefined();
@@ -144,7 +144,7 @@ test("a matching `vault` argument is accepted, a different one is vault_not_foun
 
 test("non-object arguments pass through so the existing Zod error is preserved", async () => {
   const fx = await fixture("scope-tools-nonobject");
-  const scoped = scopeToolDefinition(toolNamed(fx, "list_files"), fx.slug);
+  const scoped = scopeToolDefinition(toolNamed(fx, "list"), fx.slug);
   for (const raw of [undefined, "nope", null, [], 7]) {
     const res = await callParsed(scoped, raw);
     expect(res.isError).toBe(true);

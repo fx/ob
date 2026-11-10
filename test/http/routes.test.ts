@@ -246,43 +246,6 @@ describe("file CRUD", () => {
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("invalid_input");
   });
-
-  test("DELETE 204 then 404", async () => {
-    const fx = await makeHttpFixture("del");
-    cleanup.push(fx.stop);
-    await waitFor(() => fx.indexer.status("v")?.state === "ready");
-    await fx.app.request("/v1/vaults/v/files/x.md", {
-      method: "PUT",
-      headers: { "content-type": "text/markdown" },
-      body: "# x",
-    });
-    const del = await fx.app.request("/v1/vaults/v/files/x.md", { method: "DELETE" });
-    expect(del.status).toBe(204);
-    const del2 = await fx.app.request("/v1/vaults/v/files/x.md", { method: "DELETE" });
-    expect(del2.status).toBe(404);
-  });
-});
-
-describe("LIST /v1/vaults/:slug/files", () => {
-  test("lists files with prefix and limit", async () => {
-    const fx = await makeHttpFixture("list");
-    cleanup.push(fx.stop);
-    writeFileSync(join(fx.vaultRoot, "a.md"), "a");
-    writeFileSync(join(fx.vaultRoot, "b.md"), "b");
-    const res = await fx.app.request("/v1/vaults/v/files?prefix=a&limit=10");
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { items: { path: string }[] };
-    expect(body.items.map((i) => i.path)).toEqual(["a.md"]);
-  });
-
-  test("rejects bad limit with 400 invalid_query", async () => {
-    const fx = await makeHttpFixture("list-badq");
-    cleanup.push(fx.stop);
-    const res = await fx.app.request("/v1/vaults/v/files?limit=99999");
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: { code: string } };
-    expect(body.error.code).toBe("invalid_query");
-  });
 });
 
 describe("PATCH /v1/vaults/:slug/files/*path", () => {

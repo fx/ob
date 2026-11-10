@@ -7,7 +7,7 @@
  * cursor returns the first page of the first configured vault; the
  * returned `nextCursor` is opaque and is the base64 encoding of
  * `${slug}\0${innerCursor}`, where `innerCursor` is the service core's own
- * `listFiles` cursor (itself base64 of the last-seen path). The NUL byte
+ * `listPaths` cursor (itself base64 of the last-seen path). The NUL byte
  * is the field separator so a slug containing `:` doesn't break parsing.
  * When a vault is exhausted but more vaults exist, the cursor advances to
  * the next slug with an empty inner cursor. Reads return the document text
@@ -15,17 +15,18 @@
  * result with code `not_found` so the SDK forwards a JSON-RPC error to
  * the client (the mirror behavior to a 404 from `read_file`).
  *
- * The handler is a thin adapter over `listFiles` + `readFile` from
- * `src/vault/files.ts`. It MUST NOT contain any vault-walking logic of its
+ * The handler is a thin adapter over `listPaths({ type: "file" })` from
+ * `src/vault/paths.ts` and `readFile` from `src/vault/files.ts`. It MUST NOT contain any vault-walking logic of its
  * own — that lives in the service core.
  */
 
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import { OBError } from "../errors.ts";
 import { isMarkdownPath } from "../vault/contentType.ts";
-import { type VaultServiceDeps, listFiles, readFile } from "../vault/files.ts";
+import { type VaultServiceDeps, readFile } from "../vault/files.ts";
+import { listPaths } from "../vault/paths.ts";
 
-/** Per-page resource budget. Same default as REST `list_files`. */
+/** Per-page resource budget. Same default as REST `GET /paths`. */
 export const RESOURCE_PAGE_LIMIT = 100;
 
 /** URI scheme advertised by the resource handler. */
@@ -110,7 +111,7 @@ export function parseObVaultUri(uri: string): ParsedUri {
 
 /**
  * Encode the `(slug, innerCursor)` pair as a single opaque token so MCP
- * clients can't peek at the underlying `listFiles` cursor and synthesise
+ * clients can't peek at the underlying `listPaths` cursor and synthesise
  * something that bypasses our prefix check. The token is just the
  * service-core cursor scoped to the slug — the service core's own cursor is
  * already base64 of the last path, so we only need to namespace it.
@@ -165,9 +166,14 @@ export function buildResourceHandler(
       // from, treat the listing as exhausted rather than 500-ing.
       if (!all.includes(startSlug ?? "")) return { resources: [] };
       const slug = startSlug as string;
-      const opts: { limit: number; cursor?: string } = { limit: pageLimit };
-      if (decoded?.innerCursor !== undefined) opts.cursor = decoded.innerCursor;
-      const page = await listFiles(deps, slug, opts);
+      // Files only, all of them, one page of `pageLimit` — then the Markdown
+      // filter below, so a page can hold fewer resources than the limit (even
+      // none) and still carry a cursor.
+      const page = await listPaths(deps, slug, {
+        type: "file",
+        limit: pageLimit,
+        cursor: decoded?.innerCursor,
+      });
       const resources = page.items
         .filter((it) => isMarkdownPath(it.path))
         .map((it) => ({

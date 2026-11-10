@@ -239,7 +239,7 @@ export function guardToolDefinition(
 
 /**
  * Run `check()` before delegating to BOTH `list` and `read`. `list` needs the
- * guard as much as `read` does: `listFiles` walks the root itself, so an
+ * guard as much as `read` does: `listPaths` walks the root itself, so an
  * unguarded `resources/list` would enumerate a swapped-in symlink target.
  *
  * A containment rejection surfaces as the module's canonical `not_found`

@@ -114,10 +114,8 @@ test("tools/list over HTTP returns every registered tool", async () => {
     [
       "append_file",
       "create_folder",
-      "delete_file",
-      "delete_folder",
-      "list_files",
-      "list_folders",
+      "delete",
+      "list",
       "list_tags",
       "list_vaults",
       "patch_file",
@@ -127,6 +125,10 @@ test("tools/list over HTTP returns every registered tool", async () => {
       "write_file",
     ].sort(),
   );
+  // No per-type duplicate of a path tool survives (MCP › Tool design rules).
+  for (const gone of ["list_files", "list_folders", "delete_file", "delete_folder"]) {
+    expect(names).not.toContain(gone);
+  }
   // Every tool advertises `inputSchema` as a JSON Schema object with type=object.
   for (const t of body.result.tools) {
     expect((t.inputSchema as { type: string }).type).toBe("object");
@@ -138,8 +140,7 @@ test("tools/list over HTTP returns every registered tool", async () => {
   const hinted = body.result.tools.filter((t) => t.annotations?.readOnlyHint !== undefined);
   expect(hinted.every((t) => t.annotations?.readOnlyHint === true)).toBe(true);
   expect(hinted.map((t) => t.name).sort()).toEqual([
-    "list_files",
-    "list_folders",
+    "list",
     "list_tags",
     "list_vaults",
     "read_file",

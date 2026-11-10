@@ -9,19 +9,12 @@
 
 import grayMatter from "gray-matter";
 import type { Context, Hono } from "hono";
-import { InvalidBodyError, InvalidQueryError, UnsupportedMediaTypeError } from "../../errors.ts";
-import { AppendBody, ListFilesQuery, PatchFileBody, PutMarkdownBody } from "../../schemas/index.ts";
+import { InvalidBodyError, UnsupportedMediaTypeError } from "../../errors.ts";
+import { AppendBody, PatchFileBody, PutMarkdownBody } from "../../schemas/index.ts";
 import { isMarkdownPath, isPdfPath } from "../../vault/contentType.ts";
-import {
-  appendFile,
-  deleteFile,
-  listFiles,
-  patchFile,
-  readFile,
-  writeFile,
-} from "../../vault/files.ts";
+import { appendFile, patchFile, readFile, writeFile } from "../../vault/files.ts";
 import { extractPdfMarkdown } from "../../vault/pdfText.ts";
-import { buildListOpts, getParam } from "./params.ts";
+import { getParam } from "./params.ts";
 import type { RouteDeps } from "./types.ts";
 import { zodIssuesToInvalidInput } from "./zod.ts";
 
@@ -46,26 +39,13 @@ function frontmatterToObject(fm: unknown): Record<string, unknown> {
 }
 
 /**
- * Mount file routes on `app` under `/v1/vaults/:slug/files`. We register on
+ * Mount file routes on `app` under `/v1/vaults/:slug/files`. Listing and
+ * deleting are path operations (`./paths.ts`), not file routes. We register on
  * the main app (rather than a sub-app via `app.route`) so the `:slug` param
  * is visible to every handler and Hono's path matchers can disambiguate the
  * `:append` suffix from a regular wildcard tail.
  */
 export function mountFileRoutes(app: Hono, deps: RouteDeps): void {
-  // GET /v1/vaults/:slug/files — list.
-  app.get("/v1/vaults/:slug/files", async (c) => {
-    const raw = c.req.query();
-    const parsed = ListFilesQuery.safeParse(raw);
-    if (!parsed.success) {
-      throw new InvalidQueryError("invalid list-files query", {
-        issues: parsed.error.issues,
-      });
-    }
-    const slug = getParam(c, "slug");
-    const result = await listFiles(deps, slug, buildListOpts(parsed.data));
-    return c.json(result);
-  });
-
   // POST /v1/vaults/:slug/files/*path:append — must be matched before the
   // generic PUT/PATCH/GET wildcards. Hono matches in registration order.
   app.post("/v1/vaults/:slug/files/:path{.+:append}", async (c) => {
@@ -193,13 +173,5 @@ export function mountFileRoutes(app: Hono, deps: RouteDeps): void {
     if (!parsed.success) throw zodIssuesToInvalidInput(parsed.error);
     const result = await patchFile(deps, slug, path, parsed.data);
     return c.json(result);
-  });
-
-  // DELETE /v1/vaults/:slug/files/*path.
-  app.delete("/v1/vaults/:slug/files/:path{.+}", async (c) => {
-    const slug = getParam(c, "slug");
-    const path = getParam(c, "path");
-    await deleteFile(deps, slug, path);
-    return new Response(null, { status: 204 });
   });
 }

@@ -41,8 +41,9 @@ import { tool } from "../../src/mcp/tool.ts";
 import { listVaultsTool } from "../../src/mcp/tools/list_vaults.ts";
 import { vaultStatusTool } from "../../src/mcp/tools/vault_status.ts";
 import type { Supervisor, VaultStatus } from "../../src/obsidian/index.ts";
-import { listFiles, readFile, writeFile } from "../../src/vault/files.ts";
+import { readFile, writeFile } from "../../src/vault/files.ts";
 import type { VaultDescriptor } from "../../src/vault/files.ts";
+import { deletePath, listPaths } from "../../src/vault/paths.ts";
 import { type StatusDeps, listVaults, vaultStatus } from "../../src/vault/status.ts";
 import { makeVaultStatus } from "../helpers/vaultStatus.ts";
 
@@ -788,7 +789,7 @@ describe("scopeDeps vault lookup", () => {
 
     // Sibling scopes are mutually invisible, and `agents/ab` is NOT a string
     // prefix match for `agents/a`.
-    const page = await listFiles(scoped, "v", {});
+    const page = await listPaths(scoped, "v", {});
     expect(page.items.map((i) => i.path)).toEqual(["note.md"]);
 
     // Traversal out of the scope is refused by the real `safeJoin`.
@@ -890,6 +891,48 @@ describe("scopeDeps indexer", () => {
     const scoped = scopeDeps(fx.deps, ROOT_SCOPE);
     expect(await scoped.indexer.indexedPaths("v", "f/")).toEqual(["f/x.md"]);
     expect(fx.calls.indexedPaths).toEqual([{ slug: "v", prefix: "f/" }]);
+  });
+
+  test("a scoped recursive delete drops the right vault paths and nothing outside the scope", async () => {
+    const fx = makeScopeFixture();
+    const root = fx.root("v");
+    mkdirSync(join(root, "agents", "a", "f", "sub"), { recursive: true });
+    mkdirSync(join(root, "agents", "ab", "f"), { recursive: true });
+    writeFileSync(join(root, "agents", "a", "f", "x.md"), "x");
+    writeFileSync(join(root, "agents", "a", "f", "sub", "y.md"), "y");
+    writeFileSync(join(root, "agents", "ab", "f", "x.md"), "neighbour");
+    fx.setIndexed(["agents/a/f/x.md", "agents/a/f/sub/y.md", "agents/ab/f/x.md", "f/x.md"]);
+    const scoped = scopeDeps(fx.deps, AGENTS_A);
+    await deletePath(scoped, "v", "f", { recursive: true });
+    expect(fx.calls.indexedPaths).toEqual([{ slug: "v", prefix: "agents/a/f/" }]);
+    expect(fx.calls.drop.map((d) => d.path).sort()).toEqual([
+      "agents/a/f/sub/y.md",
+      "agents/a/f/x.md",
+    ]);
+    expect(Bun.file(join(root, "agents", "ab", "f", "x.md")).size).toBeGreaterThan(0);
+  });
+
+  test("a session scoped under node_modules judges a recreated note non-indexable", async () => {
+    // The scope sees `note.md`; the vault-relative path is
+    // `node_modules/pkg/note.md`, which is never indexable, so the drop guard
+    // drops its rows even though an ordinary Markdown file is back there.
+    const fx = makeScopeFixture();
+    const scopeRoot = join(fx.root("v"), "node_modules", "pkg");
+    mkdirSync(scopeRoot, { recursive: true });
+    writeFileSync(join(scopeRoot, "note.md"), "old");
+    const scoped = scopeDeps(fx.deps, { slug: "v", prefix: "node_modules/pkg" });
+    await deletePath(
+      {
+        ...scoped,
+        hooks: {
+          afterRemove: async () => writeFileSync(join(scopeRoot, "note.md"), "recreated"),
+        },
+      },
+      "v",
+      "note.md",
+    );
+    expect(fx.calls.isIndexable).toEqual([{ slug: "v", path: "node_modules/pkg/note.md" }]);
+    expect(fx.calls.drop).toEqual([{ slug: "v", path: "node_modules/pkg/note.md" }]);
   });
 
   test("forces filter.pathPrefix WITH a trailing slash", async () => {

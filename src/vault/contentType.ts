@@ -2,7 +2,7 @@
  * Content-Type detection by file extension.
  *
  * `detectContentType(path)` returns the MIME type the REST adapter sets on
- * `Content-Type` for `GET` responses (and that `list_files` reports as
+ * `Content-Type` for `GET` responses (and that `GET /paths` reports as
  * `contentType` per the REST spec). Mappings are intentionally limited to the
  * extensions the spec calls out — every other extension falls back to
  * `application/octet-stream`.

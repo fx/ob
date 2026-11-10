@@ -54,7 +54,7 @@ export function safeJoin(root: string, rel: string): string {
   // A path made only of `.` segments (e.g. `.` or `./.`) survives
   // `assertSafeRelativePath` (single-dot segments are legal mid-path) but
   // resolves to the vault root itself. The root is never a valid operation
-  // target — addressing it would let `deleteFolder(root, { recursive })` wipe
+  // target — addressing it would let `deletePath(root, { recursive })` wipe
   // the whole vault. Reject it here so every service-core op is protected.
   if (abs === resolve(root)) {
     throw new InvalidPathError(rel, "resolves to the vault root");
