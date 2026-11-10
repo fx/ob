@@ -71,6 +71,7 @@ function makeFixture(label: string): FolderHttpFixture {
     drop: async (s, p) => {
       drops.push({ slug: s, path: p });
     },
+    tags: async () => ({ items: [], total: 0 }),
     stop: async () => undefined,
   };
 

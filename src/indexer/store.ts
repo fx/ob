@@ -174,6 +174,13 @@ export interface VaultStore {
   ): Promise<SearchHit[]>;
   /** Document count grouped by distinct path. */
   documentCount(): Promise<number>;
+  /**
+   * Distinct-document count per stored inline tag. Only rows whose `path`
+   * starts with `pathPrefix` (a literal prefix, as in `search`'s
+   * `filter.pathPrefix`) are counted when it is given. Tags are keyed
+   * exactly as stored — case-sensitive, nested tags not rolled up.
+   */
+  tagCounts(pathPrefix?: string): Promise<Map<string, number>>;
   /** Total chunks (rows) in the table. */
   chunkCount(): Promise<number>;
   /**
@@ -294,6 +301,17 @@ function hitFromRow(row: Record<string, unknown>): SearchHit {
     links: Array.isArray(row.links) ? (row.links as string[]) : [],
     tags: Array.isArray(row.tags) ? (row.tags as string[]) : [],
   };
+}
+
+/**
+ * Read a `list<string>` column value. LanceDB hands list columns back as
+ * Arrow `Vector`s (iterable, but not `Array.isArray`), so iterate rather
+ * than type-test; a missing value reads as no entries.
+ */
+function stringList(v: unknown): string[] {
+  return Array.from((v ?? []) as Iterable<unknown>).filter(
+    (x): x is string => typeof x === "string",
+  );
 }
 
 /** SQL-escape a value for inclusion in a WHERE filter. */
@@ -727,6 +745,25 @@ export async function openVaultStore(opts: OpenVaultStoreOptions): Promise<Vault
       const seen = new Set<string>();
       for (const r of rows) seen.add(r.path);
       return seen.size;
+    },
+    async tagCounts(pathPrefix?: string): Promise<Map<string, number>> {
+      // Same scan-and-dedupe approach as `documentCount`, for the same
+      // reason: no `COUNT DISTINCT` over a list column in the JS SDK, and
+      // the row count is bounded by vault size. `buildFilterClause` gives
+      // the literal-prefix `starts_with` filter `search` uses.
+      let q = table.query().select(["path", "tags"]);
+      const where = buildFilterClause(pathPrefix === undefined ? undefined : { pathPrefix });
+      if (where !== undefined) q = q.where(where);
+      const rows = (await q.toArray()) as { path: string; tags: unknown }[];
+      const byTag = new Map<string, Set<string>>();
+      for (const r of rows) {
+        for (const tag of stringList(r.tags)) {
+          const paths = byTag.get(tag) ?? new Set<string>();
+          paths.add(r.path);
+          byTag.set(tag, paths);
+        }
+      }
+      return new Map(Array.from(byTag, ([tag, paths]) => [tag, paths.size]));
     },
     chunkCount(): Promise<number> {
       return table.countRows();

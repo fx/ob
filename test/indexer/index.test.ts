@@ -6,9 +6,11 @@ import type { Config } from "../../src/config/index.ts";
 import { buildHashEmbedder, buildMapEmbedder } from "../../src/embeddings/fake.ts";
 import type { Embedder } from "../../src/embeddings/index.ts";
 import {
+  DEFAULT_TAG_LIMIT,
   InvalidPathError,
   PipelineVersionMismatchError,
   StoreDimensionMismatchError,
+  compareCodePoints,
   startIndexer,
 } from "../../src/indexer/index.ts";
 import {
@@ -51,6 +53,115 @@ afterEach(async () => {
     const f = cleanup.pop();
     if (f !== undefined) await f();
   }
+});
+
+/** Start a real indexer over a vault seeded with `files`, waiting for `ready`. */
+async function tagFixture(label: string, files: Record<string, string>) {
+  const dataDir = tmpDataDir(label);
+  const root = join(dataDir, "vaults", "v");
+  for (const [rel, content] of Object.entries(files)) {
+    mkdirSync(join(root, rel, ".."), { recursive: true });
+    writeFileSync(join(root, rel), content);
+  }
+  mkdirSync(root, { recursive: true });
+  const indexer = await startIndexer(makeConfig({ dataDir }), {
+    logger: silent(),
+    embedder: buildHashEmbedder(4),
+  });
+  cleanup.push(async () => indexer.stop());
+  await waitFor(() => indexer.status("v")?.state === "ready");
+  return { indexer, root };
+}
+
+/** The Vault Indexer spec's tag-listing fixture. */
+const SPEC_TAG_VAULT: Record<string, string> = {
+  "a.md": "# One\n\nfirst #todo\n\n# Two\n\nsecond #todo\n",
+  "work/b.md": "# B\n\n#todo and #project/alpha\n",
+  "c.md": "# C\n\n#project here\n",
+};
+
+describe("Indexer.tags", () => {
+  test("scenario: tags counted by distinct document", async () => {
+    const { indexer } = await tagFixture("tags-count", SPEC_TAG_VAULT);
+    expect(await indexer.tags("v")).toEqual({
+      items: [
+        { tag: "todo", count: 2 },
+        { tag: "project", count: 1 },
+        { tag: "project/alpha", count: 1 },
+      ],
+      total: 3,
+    });
+  }, 20_000);
+
+  test("scenario: tags under a path prefix", async () => {
+    const { indexer } = await tagFixture("tags-prefix", SPEC_TAG_VAULT);
+    expect(await indexer.tags("v", { pathPrefix: "work/" })).toEqual({
+      items: [
+        { tag: "project/alpha", count: 1 },
+        { tag: "todo", count: 1 },
+      ],
+      total: 2,
+    });
+  }, 20_000);
+
+  test("limit caps items while total counts every distinct tag", async () => {
+    const { indexer } = await tagFixture("tags-limit", SPEC_TAG_VAULT);
+    const listing = await indexer.tags("v", { limit: 1 });
+    expect(listing).toEqual({ items: [{ tag: "todo", count: 2 }], total: 3 });
+  }, 20_000);
+
+  test("the default limit is 100", async () => {
+    const body = Array.from({ length: 120 }, (_, i) => `#t${String(i).padStart(3, "0")}`).join(" ");
+    const { indexer } = await tagFixture("tags-default", { "many.md": `# M\n\n${body}\n` });
+    const listing = await indexer.tags("v");
+    expect(DEFAULT_TAG_LIMIT).toBe(100);
+    expect(listing.items.length).toBe(100);
+    expect(listing.total).toBe(120);
+    // Equal counts fall back to tag order.
+    expect(listing.items[0]).toEqual({ tag: "t000", count: 1 });
+    expect(listing.items[99]).toEqual({ tag: "t099", count: 1 });
+  }, 20_000);
+
+  test("tags inside code, frontmatter tags, and headings are not reported", async () => {
+    const { indexer } = await tagFixture("tags-code", {
+      "n.md":
+        "---\ntags: [front]\n---\n# Heading\n\nreal #kept and `#inline`\n\n```\n#fenced\n```\n",
+    });
+    expect(await indexer.tags("v")).toEqual({ items: [{ tag: "kept", count: 1 }], total: 1 });
+  }, 20_000);
+
+  test("reflects the index after a drop", async () => {
+    const { indexer } = await tagFixture("tags-drop", SPEC_TAG_VAULT);
+    await indexer.drop("v", "c.md");
+    expect((await indexer.tags("v")).items.map((i) => i.tag)).toEqual(["todo", "project/alpha"]);
+  }, 20_000);
+
+  test("an unknown slug yields an empty listing", async () => {
+    const { indexer } = await tagFixture("tags-unknown", {});
+    expect(await indexer.tags("missing")).toEqual({ items: [], total: 0 });
+  }, 20_000);
+});
+
+describe("compareCodePoints", () => {
+  test("orders by code point, not UTF-16 code unit", () => {
+    // U+FF01 (BMP, above the surrogates) vs U+1F600 (astral, a surrogate
+    // pair starting 0xD83D): code-unit order would put the emoji first.
+    expect(compareCodePoints("\uFF01", "\u{1F600}")).toBeLessThan(0);
+    expect(compareCodePoints("\u{1F600}", "\uFF01")).toBeGreaterThan(0);
+    expect(["\u{1F600}", "\uFF01", "b", "a"].sort(compareCodePoints)).toEqual([
+      "a",
+      "b",
+      "\uFF01",
+      "\u{1F600}",
+    ]);
+  });
+
+  test("equal strings compare equal; a proper prefix sorts first", () => {
+    expect(compareCodePoints("\u{1F600}x", "\u{1F600}x")).toBe(0);
+    expect(compareCodePoints("ab", "abc")).toBeLessThan(0);
+    expect(compareCodePoints("abc", "ab")).toBeGreaterThan(0);
+    expect(compareCodePoints("Z", "a")).toBeLessThan(0);
+  });
 });
 
 describe("startIndexer round-trip", () => {
@@ -553,6 +664,7 @@ describe("startIndexer round-trip", () => {
             search: async () => [],
             searchHybrid: async () => [],
             documentCount: async () => 0,
+            tagCounts: async () => new Map(),
             chunkCount: async () => 0,
             fingerprint: async () => undefined,
             fingerprints: async () => new Map(),
@@ -601,6 +713,7 @@ describe("startIndexer round-trip", () => {
         search: async () => [],
         searchHybrid: async () => [],
         documentCount: async () => 0,
+        tagCounts: async () => new Map(),
         chunkCount: async () => 0,
         fingerprint: async () => undefined,
         fingerprints: async () => new Map(),

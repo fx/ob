@@ -30,7 +30,12 @@ import { Hono } from "hono";
 import type { Config } from "../../src/config/index.ts";
 import { buildHashEmbedder } from "../../src/embeddings/fake.ts";
 import { buildHttpApp } from "../../src/http/index.ts";
-import { type Indexer, type SearchOptions, startIndexer } from "../../src/indexer/index.ts";
+import {
+  type Indexer,
+  type SearchOptions,
+  type TagListingOptions,
+  startIndexer,
+} from "../../src/indexer/index.ts";
 import type { Logger } from "../../src/log.ts";
 import {
   type McpRoutesDeps,
@@ -78,6 +83,7 @@ interface IndexerCalls {
   readonly reindex: { slug: string; path: string }[];
   readonly drop: { slug: string; path: string }[];
   readonly search: { slug: string; query: string; opts: SearchOptions | undefined }[];
+  readonly tags: { slug: string; opts: TagListingOptions | undefined }[];
 }
 
 interface ScopeFixture {
@@ -114,7 +120,7 @@ async function makeScopeFixture(
   };
 
   const real = await startIndexer(cfg, { logger: silent(), embedder: buildHashEmbedder(8) });
-  const calls: IndexerCalls = { reindex: [], drop: [], search: [] };
+  const calls: IndexerCalls = { reindex: [], drop: [], search: [], tags: [] };
   // Pass-through recorder: the adapter sees a full `Indexer`, and every call
   // reaches the real one, so hits and counts are real.
   const indexer: Indexer = {
@@ -132,6 +138,10 @@ async function makeScopeFixture(
     search: async (s, q, opts) => {
       calls.search.push({ slug: s, query: q, opts });
       return real.search(s, q, opts);
+    },
+    tags: async (s, opts) => {
+      calls.tags.push({ slug: s, opts });
+      return real.tags(s, opts);
     },
   };
 
@@ -152,6 +162,7 @@ async function makeScopeFixture(
       calls.reindex.length = 0;
       calls.drop.length = 0;
       calls.search.length = 0;
+      calls.tags.length = 0;
     },
     stop: async () => {
       await real.stop();
@@ -1036,6 +1047,7 @@ describe("per-scope surface memo", () => {
       search: async () => [],
       reindex: async () => undefined,
       drop: async () => undefined,
+      tags: async () => ({ items: [], total: 0 }),
       stop: async () => undefined,
     };
     const deps: McpRoutesDeps = {

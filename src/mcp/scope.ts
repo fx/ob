@@ -42,7 +42,13 @@
 
 import { join } from "node:path";
 import { InvalidPathError, assertSafeRelativePath } from "../errors.ts";
-import type { Indexer, SearchHit, SearchOptions } from "../indexer/index.ts";
+import type {
+  Indexer,
+  SearchHit,
+  SearchOptions,
+  TagListing,
+  TagListingOptions,
+} from "../indexer/index.ts";
 import type { Logger } from "../log.ts";
 import { assertNotSymlinkEscape } from "../vault/path.ts";
 import type { StatusDeps } from "../vault/status.ts";
@@ -299,6 +305,29 @@ function withScopedFilter(opts: SearchOptions | undefined, scope: McpScope): Sea
 }
 
 /**
+ * Build the tag-listing options the underlying indexer actually receives.
+ *
+ * Same rules as `withScopedFilter`: in a folder scope the forced prefix is
+ * `<scope>/` (trailing slash, so `agents/a` never matches `agents/ab/…`), and
+ * a caller prefix is validated and nested under it, never passed through
+ * unnested. An empty caller prefix — which REST accepts and which matches
+ * every path — is treated as absent rather than handed to
+ * `assertSafeRelativePath`, which rejects the empty string.
+ */
+function withScopedTagPrefix(
+  opts: TagListingOptions | undefined,
+  scope: McpScope,
+): TagListingOptions {
+  const { pathPrefix: raw, ...rest } = opts ?? {};
+  const caller = raw === "" ? undefined : raw;
+  // A throw here is the caller's `invalid_path`, mapped by the tool wrapper.
+  if (caller !== undefined) assertSafeRelativePath(caller);
+  if (scope.prefix === "") return caller === undefined ? rest : { ...rest, pathPrefix: caller };
+  const pathPrefix = caller === undefined ? `${scope.prefix}/` : `${scope.prefix}/${caller}`;
+  return { ...rest, pathPrefix };
+}
+
+/**
  * Wrap the path-addressing dependencies so every operation is confined to
  * (and expressed relative to) `scope`.
  */
@@ -338,6 +367,11 @@ export function scopeDeps(deps: McpRoutesDeps, scope: McpScope): McpRoutesDeps {
         return path === null ? [] : [{ ...h, path }];
       });
     },
+    // Input-only translation: a listing carries tag names and counts, never
+    // paths, so there is nothing to strip on the way back. `async` so an
+    // invalid caller prefix rejects the promise rather than throwing.
+    tags: async (s, opts): Promise<TagListing> =>
+      deps.indexer.tags(s, withScopedTagPrefix(opts, scope)),
   };
 
   return {
