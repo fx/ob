@@ -14,7 +14,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { InvalidPathError, MAX_PATH_BYTES, OBError } from "../../src/errors.ts";
-import type { Indexer, IndexerStatus, SearchHit, SearchOptions } from "../../src/indexer/index.ts";
+import type {
+  Indexer,
+  IndexerStatus,
+  SearchHit,
+  SearchOptions,
+  TagListing,
+  TagListingOptions,
+} from "../../src/indexer/index.ts";
 import type { McpRoutesDeps } from "../../src/mcp/index.ts";
 import type { ResourceHandler } from "../../src/mcp/resources.ts";
 import {
@@ -46,13 +53,14 @@ interface IndexerCalls {
   readonly reindex: { slug: string; path: string }[];
   readonly drop: { slug: string; path: string }[];
   readonly search: { slug: string; query: string; opts: SearchOptions | undefined }[];
+  readonly tags: { slug: string; opts: TagListingOptions | undefined }[];
   readonly status: string[];
   readonly list: number[];
   readonly stop: number[];
 }
 
 function emptyCalls(): IndexerCalls {
-  return { reindex: [], drop: [], search: [], status: [], list: [], stop: [] };
+  return { reindex: [], drop: [], search: [], tags: [], status: [], list: [], stop: [] };
 }
 
 function idxStatus(slug: string): IndexerStatus {
@@ -93,6 +101,7 @@ interface ScopeFixture {
   /** Absolute root of a configured vault. */
   root(slug: string): string;
   setHits(hits: readonly SearchHit[]): void;
+  setTags(listing: TagListing): void;
 }
 
 /**
@@ -106,6 +115,7 @@ function makeScopeFixture(slugs: readonly string[] = ["v"]): ScopeFixture {
 
   const calls = emptyCalls();
   let hits: readonly SearchHit[] = [];
+  let tagListing: TagListing = { items: [], total: 0 };
 
   const indexer: Indexer = {
     status: (s) => {
@@ -128,6 +138,10 @@ function makeScopeFixture(slugs: readonly string[] = ["v"]): ScopeFixture {
     search: async (s, q, opts) => {
       calls.search.push({ slug: s, query: q, opts });
       return hits.slice();
+    },
+    tags: async (s, opts) => {
+      calls.tags.push({ slug: s, opts });
+      return tagListing;
     },
   };
 
@@ -152,6 +166,9 @@ function makeScopeFixture(slugs: readonly string[] = ["v"]): ScopeFixture {
     root,
     setHits: (h): void => {
       hits = h;
+    },
+    setTags: (listing): void => {
+      tagListing = listing;
     },
   };
 }
@@ -914,6 +931,72 @@ describe("scopeDeps indexer", () => {
     fx.setHits([hit("agents/a/coffee.md"), hit("notes/coffee.md")]);
     const hits = await scopeDeps(fx.deps, ROOT_SCOPE).indexer.search("v", "coffee");
     expect(hits.map((h) => h.path)).toEqual(["agents/a/coffee.md", "notes/coffee.md"]);
+  });
+});
+
+describe("scopeDeps indexer tags", () => {
+  test("a folder scope forces pathPrefix `<scope>/`, with the trailing slash", async () => {
+    const fx = makeScopeFixture();
+    await scopeDeps(fx.deps, AGENTS_A).indexer.tags("v");
+    expect(fx.calls.tags).toEqual([{ slug: "v", opts: { pathPrefix: "agents/a/" } }]);
+  });
+
+  test("a folder scope keeps limit and nests a caller prefix under the scope", async () => {
+    const fx = makeScopeFixture();
+    const opts = { pathPrefix: "journal/", limit: 5 };
+    await scopeDeps(fx.deps, AGENTS_A).indexer.tags("v", opts);
+    expect(fx.calls.tags[0]?.opts).toEqual({ pathPrefix: "agents/a/journal/", limit: 5 });
+    // The caller's object is not mutated.
+    expect(opts).toEqual({ pathPrefix: "journal/", limit: 5 });
+  });
+
+  test("a folder scope treats an empty caller prefix as absent", async () => {
+    const fx = makeScopeFixture();
+    await scopeDeps(fx.deps, AGENTS_A).indexer.tags("v", { pathPrefix: "", limit: 3 });
+    expect(fx.calls.tags[0]?.opts).toEqual({ pathPrefix: "agents/a/", limit: 3 });
+  });
+
+  test("a folder scope rejects an invalid caller prefix before the indexer is called", async () => {
+    const fx = makeScopeFixture();
+    const scoped = scopeDeps(fx.deps, AGENTS_A);
+    for (const bad of ["../b", "/etc", ".hidden/x", "a\0b"]) {
+      await expect(scoped.indexer.tags("v", { pathPrefix: bad })).rejects.toBeInstanceOf(
+        InvalidPathError,
+      );
+    }
+    expect(fx.calls.tags).toEqual([]);
+  });
+
+  test("the vault-root scope forces no prefix", async () => {
+    const fx = makeScopeFixture();
+    await scopeDeps(fx.deps, ROOT_SCOPE).indexer.tags("v");
+    expect(fx.calls.tags).toEqual([{ slug: "v", opts: {} }]);
+  });
+
+  test("the vault-root scope validates and passes a caller prefix through unchanged", async () => {
+    const fx = makeScopeFixture();
+    const scoped = scopeDeps(fx.deps, ROOT_SCOPE);
+    await scoped.indexer.tags("v", { pathPrefix: "work/", limit: 7 });
+    expect(fx.calls.tags[0]?.opts).toEqual({ pathPrefix: "work/", limit: 7 });
+    await expect(scoped.indexer.tags("v", { pathPrefix: "../b" })).rejects.toBeInstanceOf(
+      InvalidPathError,
+    );
+    expect(fx.calls.tags.length).toBe(1);
+  });
+
+  test("the vault-root scope treats an empty caller prefix as absent", async () => {
+    const fx = makeScopeFixture();
+    await scopeDeps(fx.deps, ROOT_SCOPE).indexer.tags("v", { pathPrefix: "" });
+    expect(fx.calls.tags).toEqual([{ slug: "v", opts: {} }]);
+  });
+
+  test("returns the indexer's listing untranslated", async () => {
+    const fx = makeScopeFixture();
+    const listing = { items: [{ tag: "agents/a", count: 2 }], total: 4 };
+    fx.setTags(listing);
+    // Tag names are note content, not paths: a tag that happens to spell the
+    // scope prefix passes through verbatim.
+    expect(await scopeDeps(fx.deps, AGENTS_A).indexer.tags("v")).toEqual(listing);
   });
 });
 

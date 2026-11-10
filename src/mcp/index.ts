@@ -81,6 +81,7 @@ import { deleteFileTool } from "./tools/delete_file.ts";
 import { deleteFolderTool } from "./tools/delete_folder.ts";
 import { listFilesTool } from "./tools/list_files.ts";
 import { listFoldersTool } from "./tools/list_folders.ts";
+import { listTagsTool } from "./tools/list_tags.ts";
 import { listVaultsTool } from "./tools/list_vaults.ts";
 import { patchFileTool } from "./tools/patch_file.ts";
 import { readFileTool } from "./tools/read_file.ts";
@@ -120,6 +121,7 @@ export function buildToolRegistry(deps: McpRoutesDeps): ToolRegistry {
   registry.register(createFolderTool(deps));
   registry.register(deleteFolderTool(deps));
   registry.register(searchTool(deps));
+  registry.register(listTagsTool(deps));
   return registry;
 }
 
@@ -362,6 +364,7 @@ export function buildMcpRoutes(deps: McpRoutesDeps): Hono {
     add(createFolderTool(scoped));
     add(deleteFolderTool(scoped));
     add(searchTool(scoped));
+    add(listTagsTool(scoped));
     return {
       registry: scopedRegistry,
       // A slug provider returning ONLY the scoped slug. The deps wrapper does

@@ -340,6 +340,80 @@ describe("openVaultStore", () => {
   });
 });
 
+describe("tagCounts", () => {
+  test("counts distinct documents per tag across multi-chunk documents", async () => {
+    const dir = tmpDir("store-tags");
+    const store = await openVaultStore({ dataDir: dir, slug: "v", dim: 4 });
+    // a.md carries `todo` in two chunks — it still counts once.
+    await store.upsert("a.md", [
+      row({ chunkIndex: 0, tags: ["todo"] }),
+      row({ chunkIndex: 1, tags: ["todo"] }),
+      row({ chunkIndex: 2, tags: [] }),
+    ]);
+    await store.upsert("work/b.md", [
+      row({ path: "work/b.md", chunkIndex: 0, tags: ["todo", "project/alpha"] }),
+    ]);
+    await store.upsert("c.md", [row({ path: "c.md", tags: ["project", "Project"] })]);
+    const counts = await store.tagCounts();
+    // As stored: case-sensitive, nested tags not rolled up into parents.
+    expect(Object.fromEntries(counts)).toEqual({
+      todo: 2,
+      "project/alpha": 1,
+      project: 1,
+      Project: 1,
+    });
+    store.close();
+  });
+
+  test("a path prefix counts only documents under it", async () => {
+    const dir = tmpDir("store-tags-prefix");
+    const store = await openVaultStore({ dataDir: dir, slug: "v", dim: 4 });
+    await store.upsert("a.md", [row({ tags: ["todo"] })]);
+    await store.upsert("work/b.md", [row({ path: "work/b.md", tags: ["todo", "project/alpha"] })]);
+    await store.upsert("c.md", [row({ path: "c.md", tags: ["project"] })]);
+    expect(Object.fromEntries(await store.tagCounts("work/"))).toEqual({
+      todo: 1,
+      "project/alpha": 1,
+    });
+    // An empty prefix matches every path.
+    expect((await store.tagCounts("")).size).toBe(3);
+    expect((await store.tagCounts("nowhere/")).size).toBe(0);
+    store.close();
+  });
+
+  test("the prefix is literal — `_`, `%`, and `'` are ordinary characters", async () => {
+    const dir = tmpDir("store-tags-literal");
+    const store = await openVaultStore({ dataDir: dir, slug: "v", dim: 4 });
+    await store.upsert("notes_2026/a.md", [row({ path: "notes_2026/a.md", tags: ["under"] })]);
+    await store.upsert("notesA2026/b.md", [row({ path: "notesA2026/b.md", tags: ["letter"] })]);
+    await store.upsert("100%/c.md", [row({ path: "100%/c.md", tags: ["percent"] })]);
+    await store.upsert("1000/d.md", [row({ path: "1000/d.md", tags: ["digits"] })]);
+    await store.upsert("it's/e.md", [row({ path: "it's/e.md", tags: ["quote"] })]);
+    expect([...(await store.tagCounts("notes_2026/")).keys()]).toEqual(["under"]);
+    expect([...(await store.tagCounts("100%/")).keys()]).toEqual(["percent"]);
+    expect([...(await store.tagCounts("it's/")).keys()]).toEqual(["quote"]);
+    store.close();
+  });
+
+  test("an empty table has no tags", async () => {
+    const dir = tmpDir("store-tags-empty");
+    const store = await openVaultStore({ dataDir: dir, slug: "v", dim: 4 });
+    expect((await store.tagCounts()).size).toBe(0);
+    expect((await store.tagCounts("x/")).size).toBe(0);
+    store.close();
+  });
+
+  test("a dropped document's tags are no longer counted", async () => {
+    const dir = tmpDir("store-tags-drop");
+    const store = await openVaultStore({ dataDir: dir, slug: "v", dim: 4 });
+    await store.upsert("a.md", [row({ tags: ["gone"] })]);
+    await store.upsert("b.md", [row({ path: "b.md", tags: ["kept"] })]);
+    await store.drop("a.md");
+    expect(Object.fromEntries(await store.tagCounts())).toEqual({ kept: 1 });
+    store.close();
+  });
+});
+
 describe("auto-build vector index", () => {
   test("creating ≥ 256 rows triggers createIndex; reopening sees it as built", async () => {
     const dir = tmpDir("store-idx");

@@ -45,6 +45,7 @@ function fakeIndexer(
     search: async (): Promise<SearchHit[]> => [],
     reindex: async () => undefined,
     drop: async () => undefined,
+    tags: async () => ({ items: [], total: 0 }),
     stop,
   };
 }
@@ -923,6 +924,7 @@ describe("main", () => {
       search: async (): Promise<SearchHit[]> => [],
       reindex: async () => undefined,
       drop: async () => undefined,
+      tags: async () => ({ items: [], total: 0 }),
       stop: () => new Promise<void>(() => undefined),
     };
     let exitCode: number | undefined;

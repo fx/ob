@@ -24,12 +24,16 @@ provision on the server:
 Scoping confines a cooperating client and is not an access control; see
 [Scoped MCP sessions](#scoped-mcp-sessions) for the details and caveats.
 
-**Twelve MCP tools**, with the same names in every scope:
+**Thirteen MCP tools**, with the same names in every scope:
 
 - Files: `list_files`, `read_file`, `write_file`, `append_file`, `patch_file`,
   `delete_file`
 - Folders: `list_folders`, `create_folder`, `delete_folder`
 - Vaults and search: `list_vaults`, `vault_status`, `search`
+- Tags: `list_tags` — the inline tags in the search index with how many
+  notes carry each, so an agent can reuse the vault's tag vocabulary; every
+  listed tag works as `search`'s `filter.tag`. REST:
+  `GET /v1/vaults/:slug/tags?prefix=&limit=`.
 
 ## Run
 
@@ -247,7 +251,8 @@ is described in one of these documents:
 - [Vault Indexer](docs/specs/vault-indexer/index.md) — chokidar watcher,
   Markdown chunker, embedding providers, and per-vault LanceDB store.
 - [REST API](docs/specs/rest-api/index.md) — vault-scoped HTTP CRUD over
-  arbitrary files plus natural-language search over Markdown.
+  arbitrary files plus natural-language search over Markdown and tag
+  listing.
 - [MCP Server](docs/specs/mcp-server/index.md) — Streamable HTTP/SSE MCP
   server mirroring the REST surface as MCP tools and resources.
 

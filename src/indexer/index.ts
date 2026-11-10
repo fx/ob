@@ -10,6 +10,8 @@
  *     so a restart with no fs changes still reports the right document /
  *     chunk totals.
  *   - `search(slug, query, opts)` — embed query → vector search.
+ *   - `tags(slug, opts)` — stored inline tags with distinct-document
+ *     counts, for `GET /v1/vaults/:slug/tags` and `list_tags`.
  *   - `reindex(slug, path)` / `drop(slug, path)` — REST hooks bypassing the
  *     watcher debounce when the API itself is the writer. Both validate
  *     `path` via `assertSafeRelativePath` (rejects `..`, hidden segments,
@@ -76,13 +78,53 @@ export interface SearchOptions {
   readonly maxPerPath?: number;
 }
 
+export interface TagListingOptions {
+  /** Count only documents whose path starts with this literal prefix. */
+  readonly pathPrefix?: string;
+  /** Maximum items returned, 1–1000. Default `DEFAULT_TAG_LIMIT`. */
+  readonly limit?: number;
+}
+
+export interface TagListing {
+  readonly items: { readonly tag: string; readonly count: number }[];
+  /** Distinct tags before `limit` was applied. */
+  readonly total: number;
+}
+
+/** Default `limit` for `Indexer.tags`. */
+export const DEFAULT_TAG_LIMIT = 100;
+
 export interface Indexer {
   status(slug: string): IndexerStatus | null;
   list(): IndexerStatus[];
   search(slug: string, query: string, opts?: SearchOptions): Promise<SearchHit[]>;
   reindex(slug: string, path: string): Promise<void>;
   drop(slug: string, path: string): Promise<void>;
+  /**
+   * Stored inline tags with distinct-document counts, ordered by count
+   * descending then tag in code-point order. An unknown slug yields an
+   * empty listing, as `search` yields no hits; the service core turns it
+   * into `vault_not_found`.
+   */
+  tags(slug: string, opts?: TagListingOptions): Promise<TagListing>;
   stop(): Promise<void>;
+}
+
+/**
+ * Order two strings by Unicode code point. Plain `<` compares UTF-16 code
+ * units, which puts an astral character (a surrogate pair, U+D800..) before
+ * a BMP character above the surrogate range such as U+FF01.
+ */
+export function compareCodePoints(a: string, b: string): number {
+  let i = 0;
+  while (i < a.length && i < b.length) {
+    const ca = a.codePointAt(i) as number;
+    const cb = b.codePointAt(i) as number;
+    if (ca !== cb) return ca - cb;
+    // Equal code points have equal UTF-16 widths, so one index serves both.
+    i += ca > 0xffff ? 2 : 1;
+  }
+  return a.length - b.length;
 }
 
 export interface IndexerDeps {
@@ -368,6 +410,14 @@ export async function startIndexer(cfg: Config, deps: IndexerDeps): Promise<Inde
       if (rt === undefined) return;
       const { rel } = resolveVaultPath(slug, path);
       await rt.pipeline.remove(rel);
+    },
+    async tags(slug: string, opts: TagListingOptions = {}): Promise<TagListing> {
+      const rt = runtimes.get(slug);
+      if (rt === undefined) return { items: [], total: 0 };
+      const counts = await rt.store.tagCounts(opts.pathPrefix);
+      const items = Array.from(counts, ([tag, count]) => ({ tag, count }));
+      items.sort((a, b) => b.count - a.count || compareCodePoints(a.tag, b.tag));
+      return { items: items.slice(0, opts.limit ?? DEFAULT_TAG_LIMIT), total: items.length };
     },
     stop(): Promise<void> {
       if (stopPromise !== undefined) return stopPromise;

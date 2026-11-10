@@ -17,6 +17,7 @@
  *   - `GET /v1/vaults` and `GET /v1/vaults/:slug` — vault listing & status
  *   - File CRUD + patch + append under `/v1/vaults/:slug/files`
  *   - Search at `POST /v1/vaults/:slug/search`
+ *   - Tag listing at `GET /v1/vaults/:slug/tags`
  *
  * Errors thrown by routes are translated to JSON envelopes by `app.onError`,
  * driven from the closed-set table in `src/http/errors.ts`. Unmatched URLs
@@ -39,6 +40,7 @@ import { getRequestId, requestIdMiddleware } from "./middleware/requestId.ts";
 import { mountFileRoutes } from "./routes/files.ts";
 import { mountFolderRoutes } from "./routes/folders.ts";
 import { mountSearchRoutes } from "./routes/search.ts";
+import { mountTagRoutes } from "./routes/tags.ts";
 import type { RouteDeps } from "./routes/types.ts";
 import { mountVaultRoutes } from "./routes/vaults.ts";
 
@@ -135,6 +137,7 @@ export function buildHttpApp(deps: HttpAppDeps = {}): Hono {
     mountFileRoutes(app, routeDeps);
     mountFolderRoutes(app, routeDeps);
     mountSearchRoutes(app, routeDeps);
+    mountTagRoutes(app, routeDeps);
     // Mount BEFORE the catch-all error handler / notFound below.
     app.route("/mcp", buildMcpRoutes({ ...routeDeps, logger }));
   }

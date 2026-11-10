@@ -35,5 +35,5 @@
 | 0018 | [mcp-read-only-annotations](changes/0018-mcp-read-only-annotations.md) | [mcp-server](specs/mcp-server/) | complete | 0005 |
 | 0019 | [unified-list-and-delete](changes/0019-unified-list-and-delete.md) | [rest-api](specs/rest-api/) | draft | 0012, 0014, 0018 |
 | 0020 | [move-and-copy](changes/0020-move-and-copy.md) | [rest-api](specs/rest-api/) | draft | 0019 |
-| 0021 | [list-tags](changes/0021-list-tags.md) | [vault-indexer](specs/vault-indexer/) | draft | 0008, 0014, 0018 |
+| 0021 | [list-tags](changes/0021-list-tags.md) | [vault-indexer](specs/vault-indexer/) | complete | 0008, 0014, 0018 |
 | 0022 | [grep](changes/0022-grep.md) | [rest-api](specs/rest-api/) | draft | 0014, 0018, 0019 |

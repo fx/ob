@@ -468,8 +468,6 @@ A concurrent ob operation that writes into a parent folder another call is just 
 
 ### Tags
 
-> Specified by draft change [0021](../../changes/0021-list-tags.md); not yet implemented.
-
 #### `GET /v1/vaults/:slug/tags`
 
 - Lists the tags present in the vault's index with the number of documents carrying each. Query params: `prefix` (string, ≤ 1024 bytes; only documents whose path starts with it are counted), `limit` (int, 1–1000, default 100). Any other parameter or value MUST yield `400 invalid_query`.

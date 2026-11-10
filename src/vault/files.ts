@@ -61,8 +61,8 @@ export interface VaultDescriptor {
 export interface VaultServiceDeps {
   /** Resolve a slug to its descriptor (including absolute root). */
   vault(slug: string): VaultDescriptor | null;
-  /** Indexer surface for `reindex`/`drop`. */
-  readonly indexer: Pick<Indexer, "reindex" | "drop" | "search">;
+  /** Indexer surface for `reindex`/`drop`, `search`, and `tags`. */
+  readonly indexer: Pick<Indexer, "reindex" | "drop" | "search" | "tags">;
   /** Inject `Date.now`-equivalent for deterministic tests. */
   readonly now?: () => number;
   /** Override `crypto.randomUUID` for deterministic tmp-file names in tests. */

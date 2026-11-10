@@ -2,7 +2,7 @@
  * Test helpers for the vault service core.
  *
  * Builds a fake `VaultServiceDeps` rooted at a `Bun.tmpdirSync()` directory,
- * exposing the indexer hooks (`reindex`, `drop`, `search`) so tests can
+ * exposing the indexer hooks (`reindex`, `drop`, `search`, `tags`) so tests can
  * assert that markdown writes call the indexer once and binary writes don't.
  * Also captures `logger.warn` calls so tests can assert that indexer
  * failures are reported via the structured-log channel.
@@ -11,7 +11,7 @@
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SearchHit } from "../../src/indexer/index.ts";
+import type { SearchHit, TagListing, TagListingOptions } from "../../src/indexer/index.ts";
 import type { LogFields, Logger } from "../../src/log.ts";
 import type { VaultDescriptor, VaultServiceDeps } from "../../src/vault/files.ts";
 
@@ -19,6 +19,7 @@ export interface FakeIndexerCalls {
   readonly reindex: { slug: string; path: string }[];
   readonly drop: { slug: string; path: string }[];
   readonly search: { slug: string; query: string }[];
+  readonly tags: { slug: string; opts: TagListingOptions | undefined }[];
 }
 
 export interface LogCall {
@@ -42,6 +43,8 @@ export interface VaultFixture {
   readonly logCalls: CapturedLogs;
   /** Override what `indexer.search` returns for the next call(s). */
   setHits(hits: SearchHit[]): void;
+  /** Override what `indexer.tags` returns for the next call(s). */
+  setTags(listing: TagListing): void;
   /** Make `indexer.reindex` reject once. */
   failNextReindex(error: unknown): void;
   /** Make `indexer.drop` reject once. */
@@ -54,8 +57,9 @@ export function makeVaultFixture(): VaultFixture {
   const root = join(dir, "vaults", slug);
   mkdirSync(root, { recursive: true });
 
-  const calls: FakeIndexerCalls = { reindex: [], drop: [], search: [] };
+  const calls: FakeIndexerCalls = { reindex: [], drop: [], search: [], tags: [] };
   let nextHits: SearchHit[] = [];
+  let nextTags: TagListing = { items: [], total: 0 };
   let nextReindexError: unknown = null;
   let reindexErrorPending = false;
   let nextDropError: unknown = null;
@@ -106,6 +110,10 @@ export function makeVaultFixture(): VaultFixture {
         calls.search.push({ slug: s, query: q });
         return nextHits;
       },
+      tags: async (s, opts): Promise<TagListing> => {
+        calls.tags.push({ slug: s, opts });
+        return nextTags;
+      },
     },
     logger,
   };
@@ -118,6 +126,9 @@ export function makeVaultFixture(): VaultFixture {
     logCalls,
     setHits(hits): void {
       nextHits = hits;
+    },
+    setTags(listing): void {
+      nextTags = listing;
     },
     failNextReindex(err): void {
       nextReindexError = err;

@@ -648,6 +648,7 @@ describe("server-error logging branch", () => {
       },
       reindex: async () => undefined,
       drop: async () => undefined,
+      tags: async () => ({ items: [], total: 0 }),
       stop: async () => undefined,
     };
     const calls: { msg: string; fields?: Record<string, unknown> }[] = [];
