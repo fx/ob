@@ -7,4 +7,5 @@
 export * from "./files.ts";
 export * from "./folders.ts";
 export * from "./search.ts";
+export * from "./tags.ts";
 export * from "./vaults.ts";
