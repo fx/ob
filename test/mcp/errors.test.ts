@@ -6,7 +6,7 @@
 
 import { expect, test } from "bun:test";
 import { EmbedderError } from "../../src/embeddings/index.ts";
-import { InvalidInputError } from "../../src/errors.ts";
+import { AlreadyExistsError, InvalidInputError } from "../../src/errors.ts";
 import { mapErrorToMcpResult } from "../../src/mcp/errors.ts";
 
 function parse(r: ReturnType<typeof mapErrorToMcpResult>): Record<string, unknown> {
@@ -48,4 +48,10 @@ test("OBError without details emits no details key", () => {
   const body = parse(r);
   expect(body.code).toBe("invalid_input");
   expect(body.details).toBeUndefined();
+});
+
+test("AlreadyExistsError → already_exists with the conflicting path", () => {
+  const body = parse(mapErrorToMcpResult(new AlreadyExistsError("c.md")));
+  expect(body.code).toBe("already_exists");
+  expect(body.details).toEqual({ path: "c.md" });
 });
