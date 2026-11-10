@@ -5,6 +5,8 @@
  */
 
 import { afterEach, expect, test } from "bun:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
 import {
   SERVER_NAME,
@@ -56,6 +58,47 @@ test("createToolRegistry: register/list/get + duplicate-name guard", () => {
   expect(r.get("a")).toBe(t);
   expect(r.get("missing")).toBeUndefined();
   expect(() => r.register(t)).toThrow();
+});
+
+test("tools/call hands the tool the request's abort signal, which a client cancel aborts", async () => {
+  const r = createToolRegistry();
+  let aborted = (): void => {};
+  const sawAbort = new Promise<void>((resolve) => {
+    aborted = resolve;
+  });
+  let entered = (): void => {};
+  const running = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  r.register(
+    tool("probe", "x", z.object({}).strict(), async (_args, extra) => {
+      extra.signal?.addEventListener("abort", () => aborted(), { once: true });
+      entered();
+      await sawAbort;
+      return { ok: true };
+    }),
+  );
+  const server = buildMcpServer(r, {
+    list: async () => ({ resources: [] }),
+    read: async () => ({ contents: [{ uri: "x", mimeType: "text/markdown", text: "" }] }),
+  });
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverSide);
+  const client = new Client({ name: "t", version: "0" });
+  await client.connect(clientSide);
+  cleanup.push(async () => {
+    await client.close();
+    await server.close();
+  });
+  const ctl = new AbortController();
+  const call = client.callTool({ name: "probe", arguments: {} }, undefined, {
+    signal: ctl.signal,
+  });
+  await running;
+  ctl.abort();
+  await expect(call).rejects.toBeDefined();
+  // The server-side signal aborted: the tool saw the cancellation.
+  await sawAbort;
 });
 
 test("buildMcpServer constructs a Server (smoke; verified via tools/list end-to-end)", () => {
@@ -115,6 +158,7 @@ test("tools/list over HTTP returns every registered tool", async () => {
       "append_file",
       "create_folder",
       "delete",
+      "grep",
       "list",
       "list_tags",
       "list_vaults",
@@ -140,6 +184,7 @@ test("tools/list over HTTP returns every registered tool", async () => {
   const hinted = body.result.tools.filter((t) => t.annotations?.readOnlyHint !== undefined);
   expect(hinted.every((t) => t.annotations?.readOnlyHint === true)).toBe(true);
   expect(hinted.map((t) => t.name).sort()).toEqual([
+    "grep",
     "list",
     "list_tags",
     "list_vaults",

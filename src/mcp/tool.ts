@@ -32,6 +32,12 @@ export interface McpSuccessResult {
   readonly content: readonly [{ readonly type: "text"; readonly text: string }];
 }
 
+/** Per-call context the transport supplies alongside the arguments. */
+export interface ToolCallExtra {
+  /** Aborts when the client cancels the call or the session goes away. */
+  readonly signal?: AbortSignal;
+}
+
 /** Either an MCP success or the failure shape from `mapErrorToMcpResult`. */
 export type McpToolResult = McpSuccessResult | ReturnType<typeof mapErrorToMcpResult>;
 
@@ -61,9 +67,10 @@ export interface ToolDefinition {
   readonly annotations?: ToolAnnotations;
   /**
    * Validates `raw` and runs the bound service-core function. Returns either
-   * the success shape or the `isError` failure shape — never throws.
+   * the success shape or the `isError` failure shape — never throws. `extra`
+   * is handed to the handler unchanged; wrappers MUST forward it.
    */
-  readonly call: (raw: unknown) => Promise<McpToolResult>;
+  readonly call: (raw: unknown, extra?: ToolCallExtra) => Promise<McpToolResult>;
 }
 
 /**
@@ -76,7 +83,7 @@ export function tool<S extends ZodType, O>(
   name: string,
   description: string,
   schema: S,
-  handler: (args: z.infer<S>) => Promise<O>,
+  handler: (args: z.infer<S>, extra: ToolCallExtra) => Promise<O>,
   annotations?: ToolAnnotations,
 ): ToolDefinition {
   // `io: "input"` describes what a caller may SEND: a field with a
@@ -93,7 +100,7 @@ export function tool<S extends ZodType, O>(
     description,
     inputSchema: json,
     ...(annotations && { annotations }),
-    call: async (raw: unknown): Promise<McpToolResult> => {
+    call: async (raw: unknown, extra: ToolCallExtra = {}): Promise<McpToolResult> => {
       // Step 1: validate. ZodError → typed `InvalidInputError` so the same
       // error mapper that handles the service-core's typed errors handles
       // schema failures too.
@@ -107,7 +114,7 @@ export function tool<S extends ZodType, O>(
       }
       // Step 2: invoke the service-core function. Step 3: wrap.
       try {
-        const output = await handler(parsed.data as z.infer<S>);
+        const output = await handler(parsed.data as z.infer<S>, extra);
         return wrapSuccess(output);
       } catch (e) {
         return mapErrorToMcpResult(e);

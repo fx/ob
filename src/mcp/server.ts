@@ -125,7 +125,7 @@ export function buildMcpServer(
   server.setRequestHandler(
     CallToolRequestSchema,
     // biome-ignore lint/suspicious/noExplicitAny: SDK's `ServerResult` union resolves to a sampling `Result` here; the actual `CallToolResult` shape is enforced by the SDK's outgoing Zod parser.
-    async (req): Promise<any> => {
+    async (req, extra): Promise<any> => {
       const tool = registry.get(req.params.name);
       if (tool === undefined) {
         // Unknown tool name → emit the canonical `isError` shape directly.
@@ -146,7 +146,9 @@ export function buildMcpServer(
           ],
         };
       }
-      return tool.call(req.params.arguments ?? {});
+      // The SDK aborts `extra.signal` on `notifications/cancelled` and on
+      // transport teardown; tools that can stop early (grep) honor it.
+      return tool.call(req.params.arguments ?? {}, { signal: extra.signal });
     },
   );
 
