@@ -156,6 +156,43 @@ describe("guardedRead", () => {
     expect(fetched).toEqual([9, 105]);
   });
 
+  test("readLimit: sees the fstat before any read, bounds the read, and may refuse it", async () => {
+    const root = tree(); // a/x.md is "hello" (5 bytes)
+    const sizes: number[] = [];
+    const fetched: number[] = [];
+    const short = await guardedRead(root, "a/x.md", {
+      maxBytes: 100,
+      readLimit: (stat) => {
+        sizes.push(stat.size);
+        return 3;
+      },
+      onRead: (n) => fetched.push(n),
+    });
+    expect(new TextDecoder().decode(short.bytes)).toBe("hel");
+    expect(short.stat.size).toBe(5);
+    // A limit above `maxBytes + 1` is capped there.
+    const capped = await guardedRead(root, "a/x.md", { maxBytes: 4, readLimit: () => 1_000 }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(capped).toBeInstanceOf(OversizeReadError);
+    // Called before the size check: an oversize file reaches it, then is refused.
+    const refused = await guardedRead(root, "a/x.md", {
+      maxBytes: 2,
+      readLimit: (stat) => {
+        sizes.push(stat.size);
+        throw new Error("no budget");
+      },
+      onRead: (n) => fetched.push(n),
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect((refused as Error).message).toBe("no budget");
+    expect(sizes).toEqual([5, 5]);
+    expect(fetched).toEqual([3]);
+  });
+
   test("maxBytes: growth that stays within the cap is returned, never beyond it", async () => {
     const root = tree();
     const r = await guardedRead(root, "a/x.md", {

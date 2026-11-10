@@ -550,6 +550,121 @@ describe.each(MODES)("grep — limits and counters (%s)", (_mode, spawn) => {
 });
 
 // ---------------------------------------------------------------------------
+// The byte budget bounds bytes read
+// ---------------------------------------------------------------------------
+
+describe("grep — the byte budget bounds bytes read", () => {
+  /** Run in-process, recording every bounded read's byte count by path. */
+  async function reads(
+    files: Record<string, string>,
+    rt: GrepRuntime,
+    hooks: ScanHooks = {},
+  ): Promise<{ r: GrepResult; fetched: string[] }> {
+    const { deps } = vault(files);
+    const fetched: string[] = [];
+    const fake = inProcess({ ...hooks, onRead: (path, n) => fetched.push(`${path}:${n}`) });
+    const r = await grep(deps, "v", { pattern: "N" }, { spawn: fake.spawn, ...rt });
+    return { r, fetched };
+  }
+
+  test("a file just over the remaining budget is never read", async () => {
+    const { r, fetched } = await reads(
+      { "a.md": "N 456789\n", "b.md": "N 456789\n" }, // 9 bytes each
+      { byteBudget: 17 },
+    );
+    expect(fetched).toEqual(["a.md:9"]);
+    expect(at(r.matches)).toEqual(["a.md:1:1"]);
+    expect(r).toMatchObject({ truncated: true, reason: "bytes", filesScanned: 1, filesSkipped: 0 });
+  });
+
+  test("bytes read from a file then skipped for a NUL byte count", async () => {
+    const { r, fetched } = await reads(
+      { "a.md": "N\0 4567890", "b.md": "N 456789\n" }, // 10 and 9 bytes
+      { byteBudget: 15 },
+    );
+    expect(fetched).toEqual(["a.md:10"]);
+    expect(r).toMatchObject({ matches: [], reason: "bytes", filesScanned: 0, filesSkipped: 1 });
+  });
+
+  test("bytes read from a file that grew past the size cap count", async () => {
+    const { deps, root } = vault({ "a.md": "N 456789\n", "b.md": "N 456789\n" });
+    const run = async (byteBudget: number): Promise<{ r: GrepResult; fetched: string[] }> => {
+      writeFileSync(join(root, "a.md"), "N 456789\n");
+      const fetched: string[] = [];
+      const fake = inProcess({
+        afterStat: async (path) => {
+          if (path === "a.md") appendFileSync(join(root, "a.md"), "x".repeat(100));
+        },
+        onRead: (path, n) => fetched.push(`${path}:${n}`),
+      });
+      const r = await grep(
+        deps,
+        "v",
+        { pattern: "N" },
+        { spawn: fake.spawn, byteBudget, maxFileBytes: 16 },
+      );
+      return { r, fetched };
+    };
+    // a.md is read to the sentinel (17 bytes) and skipped; 13 bytes remain for b.md.
+    const room = await run(30);
+    expect(room.fetched).toEqual(["a.md:17", "b.md:9"]);
+    expect(room.r).toMatchObject({ reason: null, filesScanned: 1, filesSkipped: 1 });
+    // With 8 left, b.md is never read.
+    const tight = await run(25);
+    expect(tight.fetched).toEqual(["a.md:17"]);
+    expect(tight.r).toMatchObject({ reason: "bytes", filesScanned: 0, filesSkipped: 1 });
+  });
+
+  test("an oversize file costs the size cap plus one against the budget, unread", async () => {
+    const { r, fetched } = await reads(
+      { "a.md": "N 456789\n", "big.txt": "N".repeat(30) },
+      { byteBudget: 20, maxFileBytes: 16 },
+    );
+    // 11 left < min(30, 16 + 1): a cut-off before big.txt is opened for reading.
+    expect(fetched).toEqual(["a.md:9"]);
+    expect(r).toMatchObject({ reason: "bytes", filesScanned: 1, filesSkipped: 0 });
+    // With room for it, the oversize file is skipped at its fstat, nothing read.
+    const roomy = await reads(
+      { "a.md": "N 456789\n", "big.txt": "N".repeat(30) },
+      { byteBudget: 40, maxFileBytes: 16 },
+    );
+    expect(roomy.fetched).toEqual(["a.md:9"]);
+    expect(roomy.r).toMatchObject({ reason: null, filesScanned: 1, filesSkipped: 1 });
+  });
+
+  test("a file that grows past what is left is read only up to the budget", async () => {
+    const files = { "a.md": "N 456789\n", "b.md": "N 456789\n" };
+    const grow = (root: string): ScanHooks => ({
+      afterStat: async (path) => {
+        if (path === "b.md") appendFileSync(join(root, "b.md"), "y".repeat(100));
+      },
+    });
+    const { deps, root } = vault(files);
+    const fetched: string[] = [];
+    const fake = inProcess({ ...grow(root), onRead: (path, n) => fetched.push(`${path}:${n}`) });
+    const r = await grep(deps, "v", { pattern: "N" }, { spawn: fake.spawn, byteBudget: 20 });
+    // 11 bytes were left: the read stopped there, so the budget is never passed.
+    expect(fetched).toEqual(["a.md:9", "b.md:11"]);
+    expect(at(r.matches)).toEqual(["a.md:1:1"]);
+    expect(r).toMatchObject({ reason: "bytes", filesScanned: 1, filesSkipped: 0 });
+    // Growth that still fits is searched.
+    const { deps: d2, root: r2 } = vault(files);
+    const roomy = await grep(
+      d2,
+      "v",
+      { pattern: "N" },
+      { spawn: inProcess(grow(r2)).spawn, byteBudget: 1_000 },
+    );
+    expect(roomy).toMatchObject({ reason: null, filesScanned: 2 });
+  });
+
+  test("an empty file fits even an exhausted budget", async () => {
+    const { r } = await reads({ "a.md": "N 456789\n", "b.md": "" }, { byteBudget: 9 });
+    expect(r).toMatchObject({ reason: null, filesScanned: 2 });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Checkpoints
 // ---------------------------------------------------------------------------
 

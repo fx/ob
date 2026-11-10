@@ -57,7 +57,7 @@ export interface ScanParams {
   readonly flags: string;
   readonly limit: number;
   readonly context: number;
-  /** Total file content searched before a `"bytes"` stop. */
+  /** File bytes read in total before a `"bytes"` stop. */
   readonly byteBudget: number;
   /** Larger text files are skipped. */
   readonly maxFileBytes: number;
@@ -189,16 +189,14 @@ export async function scan(
 
   for await (const ent of walkVaultEntries(p.root, "", descend)) {
     if (ent.type !== "file" || !ent.rel.startsWith(p.prefix) || !isTextPath(ent.rel)) continue;
-    const bytes = await readForScan(p, ent.rel, hooks);
+    const bytes = await readForScan(p, st, ent.rel, hooks);
     if (bytes === null) continue; // vanished since the walk: neither scanned nor skipped
+    if (bytes === "bytes") return checkpoint("bytes"); // the file is not counted
     if (bytes === "skip" || bytes.includes(0)) {
       st.skipped++;
       checkpoint();
       continue;
     }
-    // Stop before this file would take the total past the budget; it is not counted.
-    if (st.bytes + bytes.byteLength > p.byteBudget) return checkpoint("bytes");
-    st.bytes += bytes.byteLength;
     const lines = splitLines(new TextDecoder().decode(bytes));
     const limited = await searchLines(p, re, ent.rel, lines, st, checkpoint, hooks);
     st.scanned++;
@@ -208,25 +206,56 @@ export async function scan(
   checkpoint(null);
 }
 
+/** Thrown from `readLimit` to refuse a read the byte budget cannot cover. */
+class ByteBudgetExceeded extends Error {
+  constructor() {
+    super("byte budget exceeded");
+  }
+}
+
 /**
  * The guarded read: the file's bytes, `"skip"` for the containment and size
- * rules, `null` when it vanished.
+ * rules, `"bytes"` when reading it would pass the byte budget, `null` when it
+ * vanished.
+ *
+ * The byte budget bounds bytes READ: every byte a read fetches counts,
+ * including a file then skipped for a NUL byte or for growing past the size
+ * cap. Before any byte is read, the opened file's size — as much of it as a
+ * read could fetch, `maxFileBytes + 1` at most — must fit in what is left of
+ * the budget, and the read itself is bounded by what is left, so no call ever
+ * reads past it. A file that grows after its size was taken, until the read
+ * fills what was left, may hold more than the budget covers: that is a
+ * `"bytes"` stop too.
  */
 async function readForScan(
   p: ScanParams,
+  st: ScanState,
   rel: string,
   hooks: ScanHooks,
-): Promise<Uint8Array | "skip" | null> {
+): Promise<Uint8Array | "skip" | "bytes" | null> {
   await hooks.beforeRead?.(rel);
   const { afterStat, onRead } = hooks;
+  let limit = 0;
   try {
     const read = await guardedRead(p.root, rel, {
       maxBytes: p.maxFileBytes,
+      readLimit: (stat) => {
+        const remaining = p.byteBudget - st.bytes;
+        if (Math.min(stat.size, p.maxFileBytes + 1) > remaining) throw new ByteBudgetExceeded();
+        limit = Math.min(p.maxFileBytes + 1, remaining);
+        return limit;
+      },
+      onRead: (n: number) => {
+        st.bytes += n;
+        onRead?.(rel, n);
+      },
       ...(afterStat !== undefined && { afterStat: () => afterStat(rel) }),
-      ...(onRead !== undefined && { onRead: (n: number) => onRead(rel, n) }),
     });
+    // Filled the budget-bounded read with a file that grew since its fstat.
+    if (read.bytes.byteLength === limit && limit > read.stat.size) return "bytes";
     return read.bytes;
   } catch (e) {
+    if (e instanceof ByteBudgetExceeded) return "bytes";
     if (e instanceof DocNotFoundError) return null;
     if (e instanceof InvalidPathError || e instanceof OversizeReadError) return "skip";
     throw e;
