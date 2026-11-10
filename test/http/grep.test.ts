@@ -196,6 +196,47 @@ describe("POST /v1/vaults/:slug/grep", () => {
     GREP_TIME_BUDGET_MS + 10_000,
   );
 
+  test("time spent receiving a slow body counts against the budget", async () => {
+    // The clock moves only while the body is being read: `elapsed` stands in
+    // for a client that streams the body that long after the request arrived.
+    async function lateBody(label: string, elapsed: number): Promise<unknown> {
+      let t = 0;
+      const fx = await makeHttpFixture(label, {}, { clock: () => t });
+      cleanup.push(fx.stop);
+      writeFileSync(join(fx.vaultRoot, "a.md"), "NEEDLE\n");
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(ctrl): void {
+            t += elapsed;
+            ctrl.enqueue(new TextEncoder().encode(JSON.stringify({ pattern: "NEEDLE" })));
+            ctrl.close();
+          },
+        },
+        // Pull only when the handler reads the body, never at construction.
+        { highWaterMark: 0 },
+      );
+      const res = await fx.app.request("/v1/vaults/v/grep", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        duplex: "half",
+      } as RequestInit);
+      expect(res.status).toBe(200);
+      return res.json();
+    }
+    expect(await lateBody("grep-late-body", GREP_TIME_BUDGET_MS + 1_000)).toEqual({
+      matches: [],
+      truncated: true,
+      reason: "time",
+      filesScanned: 0,
+      filesSkipped: 0,
+    });
+    expect(await lateBody("grep-early-body", GREP_TIME_BUDGET_MS - 1_000)).toMatchObject({
+      truncated: false,
+      filesScanned: 1,
+    });
+  });
+
   test("a client that disconnects stops the grep", async () => {
     const fx = await fixture("grep-abort", { "cat.txt": CATASTROPHIC });
     const ctl = new AbortController();

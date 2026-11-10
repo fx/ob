@@ -926,6 +926,87 @@ describe("grep — concurrency and cancellation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Arrival deadline
+// ---------------------------------------------------------------------------
+
+describe("grep — the budget runs from arrival", () => {
+  /** A deadline timer that records the delay it was asked for. */
+  function recordingTimer(): { set: NonNullable<GrepRuntime["setTimer"]>; delays: number[] } {
+    const delays: number[] = [];
+    return {
+      delays,
+      set: (ms) => {
+        delays.push(ms);
+        return () => {};
+      },
+    };
+  }
+
+  test("time already spent before the call shortens the deadline", async () => {
+    const { deps } = vault({ "a.md": "N\n" });
+    const timer = recordingTimer();
+    const fake = inProcess();
+    const r = await grep(
+      { ...deps, clock: () => 11_500 },
+      "v",
+      { pattern: "N", arrivedAt: 10_000 },
+      { spawn: fake.spawn, setTimer: timer.set },
+    );
+    expect(timer.delays).toEqual([3_500]);
+    expect(at(r.matches)).toEqual(["a.md:1:1"]);
+  });
+
+  test("without an arrival time the call itself is the arrival", async () => {
+    const { deps } = vault({ "a.md": "N\n" });
+    const timer = recordingTimer();
+    const fake = inProcess();
+    await grep(
+      { ...deps, clock: () => 99_999 },
+      "v",
+      { pattern: "N" },
+      { spawn: fake.spawn, setTimer: timer.set, timeBudgetMs: 1_234 },
+    );
+    expect(timer.delays).toEqual([1_234]);
+  });
+
+  test("a call that arrives at or past its deadline never takes a slot or starts a worker", async () => {
+    const { deps } = vault({ "a.md": "N\n" });
+    for (const elapsed of [5_000, 6_000]) {
+      const timer = recordingTimer();
+      const slots = new Semaphore(2);
+      const fake = inProcess();
+      const r = await grep(
+        { ...deps, clock: () => elapsed },
+        "v",
+        { pattern: "N", arrivedAt: 0 },
+        { slots, spawn: fake.spawn, setTimer: timer.set },
+      );
+      expect(r).toEqual({
+        matches: [],
+        truncated: true,
+        reason: "time",
+        filesScanned: 0,
+        filesSkipped: 0,
+      });
+      expect(timer.delays).toEqual([]);
+      expect(fake.workers).toHaveLength(0);
+      expect(slots.available).toBe(2);
+    }
+  });
+
+  test("validation still runs for a call past its deadline", async () => {
+    const { deps } = vault();
+    const late = { ...deps, clock: () => 10_000 };
+    await expect(
+      grep(late, "v", { pattern: "([", regex: true, arrivedAt: 0 }),
+    ).rejects.toBeInstanceOf(InvalidInputError);
+    await expect(grep(late, "ghost", { pattern: "x", arrivedAt: 0 })).rejects.toBeInstanceOf(
+      VaultNotFoundError,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The real worker
 // ---------------------------------------------------------------------------
 

@@ -457,7 +457,12 @@ export function buildMcpRoutes(deps: McpRoutesDeps): Hono {
     transport.onerror = (e: Error): void => {
       deps.logger?.warn("mcp transport error", { error: e.message });
     };
-    const server = buildMcpServer(surface.registry, surface.resources, surface.instructions);
+    const server = buildMcpServer(
+      surface.registry,
+      surface.resources,
+      surface.instructions,
+      deps.clock,
+    );
     await server.connect(transport);
     return transport;
   }

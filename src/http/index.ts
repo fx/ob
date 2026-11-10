@@ -66,6 +66,8 @@ export interface HttpAppDeps {
   readonly config?: Config;
   /** Override default logger (tests). */
   readonly logger?: Logger;
+  /** Monotonic clock for request budgets (tests); defaults to `monotonicNow`. */
+  readonly clock?: () => number;
 }
 
 function buildVaultLookup(cfg: Config): (slug: string) => VaultDescriptor | null {
@@ -136,6 +138,7 @@ export function buildHttpApp(deps: HttpAppDeps = {}): Hono {
       vault: lookup,
       indexer,
       logger,
+      ...(deps.clock !== undefined && { clock: deps.clock }),
     };
     const routeDeps: RouteDeps = { ...serviceDeps, supervisor, indexer };
     mountVaultRoutes(app, routeDeps);

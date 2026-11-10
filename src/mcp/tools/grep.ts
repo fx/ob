@@ -1,7 +1,8 @@
 /**
  * MCP tool: `grep`. Mirrors `POST /v1/vaults/:slug/grep`. The call's abort
  * signal (MCP cancellation) is passed through, so a cancelled grep leaves the
- * queue or terminates its worker.
+ * queue or terminates its worker. The call's arrival time is passed through
+ * too, so time spent in the scope guard counts against grep's budget.
  */
 
 import { GrepInput } from "../../schemas/index.ts";
@@ -31,7 +32,8 @@ export function grepTool(deps: VaultServiceDeps): ToolDefinition {
     "grep",
     DESCRIPTION,
     GrepInput,
-    async ({ vault, ...args }, extra) => grep(deps, vault, { ...args, signal: extra.signal }),
+    async ({ vault, ...args }, extra) =>
+      grep(deps, vault, { ...args, signal: extra.signal, arrivedAt: extra.arrivedAt }),
     { readOnlyHint: true },
   );
 }

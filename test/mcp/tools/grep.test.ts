@@ -8,7 +8,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ToolDefinition } from "../../../src/mcp/tool.ts";
-import { grepSlots } from "../../../src/vault/grep.ts";
+import { GREP_TIME_BUDGET_MS, grepSlots } from "../../../src/vault/grep.ts";
 import { type McpFixture, makeMcpFixture } from "../helpers.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -33,6 +33,51 @@ async function fixture(label: string, files: Record<string, string> = {}): Promi
     writeFileSync(abs, content);
   }
   return fx;
+}
+
+const ACCEPT = "application/json, text/event-stream";
+
+async function rpc(fx: McpFixture, path: string, body: unknown, sid?: string): Promise<Response> {
+  return fx.app.request(path, {
+    method: "POST",
+    headers: {
+      accept: ACCEPT,
+      "content-type": "application/json",
+      ...(sid !== undefined && { "mcp-session-id": sid }),
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+async function initialize(fx: McpFixture, path: string): Promise<string> {
+  const res = await rpc(fx, path, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "t", version: "0" },
+    },
+  });
+  return res.headers.get("mcp-session-id") ?? "";
+}
+
+/** `tools/call grep` over the real HTTP transport; returns the parsed payload. */
+async function callOverHttp(
+  fx: McpFixture,
+  path: string,
+  sid: string,
+  args: unknown,
+): Promise<unknown> {
+  const res = await rpc(
+    fx,
+    path,
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "grep", arguments: args } },
+    sid,
+  );
+  const body = (await res.json()) as { result: { content: { text: string }[] } };
+  return JSON.parse(body.result.content[0]?.text ?? "null");
 }
 
 function code(parsed: unknown): string {
@@ -87,6 +132,45 @@ describe("grep", () => {
     }
     const r = await fx.callTool("grep", { vault: "ghost", pattern: "x" });
     expect(code(r.parsed)).toBe("vault_not_found");
+  });
+
+  test("the budget runs from the tools/call arrival, scope guard included", async () => {
+    // The first clock read is the server's ingress for the call; every later
+    // one (inside grep) is past the deadline. Had grep taken its own arrival,
+    // it would see no time elapsed and search normally.
+    let reads = 0;
+    const clock = (): number => (reads++ === 0 ? 0 : GREP_TIME_BUDGET_MS + 1);
+    const fx = await makeMcpFixture({ label: "tool-grep-arrival", clock });
+    cleanup.push(fx.stop);
+    writeFileSync(join(fx.vaultRoot, "a.md"), "NEEDLE\n");
+    for (const path of ["/mcp/v", "/mcp"]) {
+      reads = 0;
+      const sid = await initialize(fx, path);
+      const r = await callOverHttp(fx, path, sid, { vault: "v", pattern: "NEEDLE" });
+      expect(r).toEqual({
+        matches: [],
+        truncated: true,
+        reason: "time",
+        filesScanned: 0,
+        filesSkipped: 0,
+      });
+      expect(reads).toBe(2);
+    }
+  });
+
+  test("a call extra's arrival time reaches grep", async () => {
+    const fx = await fixture("tool-grep-extra", { "a.md": "NEEDLE\n" });
+    const t = fx.registry.get("grep") as ToolDefinition;
+    const late = (await t.call(
+      { vault: "v", pattern: "NEEDLE" },
+      { arrivedAt: performance.now() - GREP_TIME_BUDGET_MS },
+    )) as { content: readonly { text: string }[] };
+    expect(JSON.parse(late.content[0]?.text ?? "")).toMatchObject({ matches: [], reason: "time" });
+    const fresh = (await t.call(
+      { vault: "v", pattern: "NEEDLE" },
+      { arrivedAt: performance.now() },
+    )) as { content: readonly { text: string }[] };
+    expect(JSON.parse(fresh.content[0]?.text ?? "")).toMatchObject({ truncated: false });
   });
 
   test("a cancelled call stops its worker instead of running to the budget", async () => {

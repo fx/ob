@@ -29,6 +29,7 @@ import {
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import pkg from "../../package.json" with { type: "json" };
+import { monotonicNow } from "../vault/files.ts";
 import type { ResourceHandler } from "./resources.ts";
 import type { ToolDefinition } from "./tool.ts";
 
@@ -89,6 +90,7 @@ export function buildMcpServer(
   registry: ToolRegistry,
   resources: ResourceHandler,
   instructions?: string,
+  clock: () => number = monotonicNow,
 ): Server {
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -126,6 +128,8 @@ export function buildMcpServer(
     CallToolRequestSchema,
     // biome-ignore lint/suspicious/noExplicitAny: SDK's `ServerResult` union resolves to a sampling `Result` here; the actual `CallToolResult` shape is enforced by the SDK's outgoing Zod parser.
     async (req, extra): Promise<any> => {
+      // Ingress: taken before the tool and every wrapper around it run.
+      const arrivedAt = clock();
       const tool = registry.get(req.params.name);
       if (tool === undefined) {
         // Unknown tool name → emit the canonical `isError` shape directly.
@@ -148,7 +152,7 @@ export function buildMcpServer(
       }
       // The SDK aborts `extra.signal` on `notifications/cancelled` and on
       // transport teardown; tools that can stop early (grep) honor it.
-      return tool.call(req.params.arguments ?? {}, { signal: extra.signal });
+      return tool.call(req.params.arguments ?? {}, { signal: extra.signal, arrivedAt });
     },
   );
 

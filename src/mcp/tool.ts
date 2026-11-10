@@ -36,6 +36,11 @@ export interface McpSuccessResult {
 export interface ToolCallExtra {
   /** Aborts when the client cancels the call or the session goes away. */
   readonly signal?: AbortSignal;
+  /**
+   * When the `tools/call` arrived, on the deps' `clock`, taken before any
+   * wrapper (the scope guard included) runs.
+   */
+  readonly arrivedAt?: number;
 }
 
 /** Either an MCP success or the failure shape from `mapErrorToMcpResult`. */

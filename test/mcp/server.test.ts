@@ -101,6 +101,44 @@ test("tools/call hands the tool the request's abort signal, which a client cance
   await sawAbort;
 });
 
+test("tools/call stamps its arrival on the given clock before the tool and its wrappers run", async () => {
+  let t = 100;
+  const seen: (number | undefined)[] = [];
+  const inner = tool("probe", "x", z.object({}).strict(), async (_args, extra) => {
+    seen.push(extra.arrivedAt);
+    return { ok: true };
+  });
+  const r = createToolRegistry();
+  // A wrapper that takes time before delegating, like the scope guard.
+  r.register({
+    ...inner,
+    call: async (raw, extra) => {
+      t += 6_000;
+      return inner.call(raw, extra);
+    },
+  });
+  const server = buildMcpServer(
+    r,
+    {
+      list: async () => ({ resources: [] }),
+      read: async () => ({ contents: [{ uri: "x", mimeType: "text/markdown", text: "" }] }),
+    },
+    undefined,
+    () => t,
+  );
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverSide);
+  const client = new Client({ name: "t", version: "0" });
+  await client.connect(clientSide);
+  cleanup.push(async () => {
+    await client.close();
+    await server.close();
+  });
+  await client.callTool({ name: "probe", arguments: {} });
+  expect(seen).toEqual([100]);
+  expect(t).toBe(6_100);
+});
+
 test("buildMcpServer constructs a Server (smoke; verified via tools/list end-to-end)", () => {
   const r = createToolRegistry();
   const s = buildMcpServer(r, {

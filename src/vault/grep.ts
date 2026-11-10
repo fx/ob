@@ -9,8 +9,11 @@
  *
  * Isolation. The scan runs in a `Worker` (`grepWorker.ts`), so a
  * pathological regex never evaluates on the request-serving event loop. The
- * main thread races the worker's checkpoints against a deadline set when the
- * call starts; at the deadline it terminates the worker and answers with the
+ * main thread races the worker's checkpoints against an absolute deadline:
+ * the budget runs from `args.arrivedAt`, which the adapters take at ingress
+ * (before the REST body is read, before the MCP scope guard runs), on
+ * `deps.clock`; a direct call without it starts the budget on entry. At the
+ * deadline the main thread terminates the worker and answers with the
  * matches of every checkpoint received so far and the last one's counters.
  * The regex is compiled here first, so a syntax error is an immediate
  * `invalid_input`; a literal pattern is escaped into an equivalent regex so
@@ -32,7 +35,7 @@
  */
 
 import { InvalidInputError } from "../errors.ts";
-import { type VaultServiceDeps, resolveVault } from "./files.ts";
+import { type VaultServiceDeps, monotonicNow, resolveVault } from "./files.ts";
 import type { GrepMatch, ScanParams, WorkerMessage } from "./grepWorker.ts";
 
 export type { GrepMatch } from "./grepWorker.ts";
@@ -58,6 +61,12 @@ export interface GrepArgs {
   readonly context?: number | undefined;
   /** Aborts when the caller goes away. */
   readonly signal?: AbortSignal | undefined;
+  /**
+   * When the request arrived, on `deps.clock`. Adapters take it at ingress,
+   * before reading the body or running any guard, so that time counts against
+   * the budget. Omitted: the call itself is the arrival.
+   */
+  readonly arrivedAt?: number | undefined;
 }
 
 export interface GrepResult {
@@ -221,11 +230,16 @@ export async function grep(
   args: GrepArgs,
   rt: GrepRuntime = {},
 ): Promise<GrepResult> {
-  // The budget starts now, before validation and any queue wait.
+  // The budget runs from the request's arrival — before body parsing, any
+  // adapter guard, validation, and the queue wait — to an absolute deadline.
   const stop = new AbortController();
-  const cancelTimer = (rt.setTimer ?? setTimer)(rt.timeBudgetMs ?? GREP_TIME_BUDGET_MS, () =>
-    stop.abort(),
-  );
+  const now = deps.clock ?? monotonicNow;
+  const elapsed = args.arrivedAt === undefined ? 0 : now() - args.arrivedAt;
+  const remaining = (rt.timeBudgetMs ?? GREP_TIME_BUDGET_MS) - elapsed;
+  let cancelTimer = (): void => {};
+  // Already past the deadline: never take a slot or start a worker.
+  if (remaining <= 0) stop.abort();
+  else cancelTimer = (rt.setTimer ?? setTimer)(remaining, () => stop.abort());
   const unsubscribe =
     args.signal === undefined ? () => {} : onAbort(args.signal, () => stop.abort());
   try {
