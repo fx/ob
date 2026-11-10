@@ -530,6 +530,25 @@ describe("deletePath on a file", () => {
     expect(fx.indexed.has("x.md")).toBe(false);
   });
 
+  test("a parent swapped for a symlink just before the unlink removes nothing", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "a/b/x.md", "inside");
+    fx.indexed.add("a/b/x.md");
+    const outside = outsideDir();
+    put(outside, "b/x.md", "OUTSIDE");
+    const deps = withHooks(fx, {
+      beforeRemove: async () => {
+        renameSync(join(fx.root, "a"), join(fx.root, "a-real"));
+        symlinkSync(outside, join(fx.root, "a"));
+      },
+    });
+    await expect(deletePath(deps, fx.slug, "a/b/x.md")).rejects.toBeInstanceOf(InvalidPathError);
+    expect(existsSync(join(outside, "b/x.md"))).toBe(true);
+    expect(existsSync(join(fx.root, "a-real/b/x.md"))).toBe(true);
+    expect(fx.calls.drop).toEqual([]);
+    expect(fx.indexed.has("a/b/x.md")).toBe(true);
+  });
+
   test("a drop failure is logged and does not fail the delete", async () => {
     const fx = makeVaultFixture();
     put(fx.root, "a.md");
@@ -683,6 +702,31 @@ describe("deletePath on a folder", () => {
     });
     await deletePath(deps, fx.slug, "folder", { recursive: true });
     expect(fx.indexed.has("folder/a.md")).toBe(false);
+  });
+
+  test("a parent swapped for a symlink just before the removal removes nothing outside", async () => {
+    for (const recursive of [true, false]) {
+      const fx = makeVaultFixture();
+      const target = recursive ? "a/b" : "a/e";
+      if (recursive) put(fx.root, "a/b/x.md");
+      else mkdirSync(join(fx.root, "a", "e"), { recursive: true });
+      const outside = outsideDir();
+      put(outside, "b/x.md", "OUTSIDE");
+      mkdirSync(join(outside, "e"));
+      const deps = withHooks(fx, {
+        beforeRemove: async () => {
+          renameSync(join(fx.root, "a"), join(fx.root, "a-real"));
+          symlinkSync(outside, join(fx.root, "a"));
+        },
+      });
+      await expect(deletePath(deps, fx.slug, target, { recursive })).rejects.toBeInstanceOf(
+        InvalidPathError,
+      );
+      expect(existsSync(join(outside, "b/x.md"))).toBe(true);
+      expect(existsSync(join(outside, "e"))).toBe(true);
+      expect(existsSync(join(fx.root, "a-real", target.slice(2)))).toBe(true);
+      expect(fx.calls.indexedPaths).toEqual([]);
+    }
   });
 
   test("a failed recursive removal leaves every index entry in place", async () => {

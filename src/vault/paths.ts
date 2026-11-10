@@ -18,7 +18,8 @@
  * `a-b.md` and never return it.
  *
  * Delete. The target is `lstat`ed under its write lock, so the type it acts
- * on is the type it checked. Index rows are dropped only AFTER the removal
+ * on is the type it checked, and the parent chain is re-checked for symlinks
+ * immediately before each removal call (`unlink`, `rmdir`, `rm`). Index rows are dropped only AFTER the removal
  * succeeded — a failed removal leaves the files on disk and so must leave
  * their rows — and every drop goes through the drop guard (`dropGuarded`).
  * A folder's rows are found by asking the INDEX (`indexedPaths`) after the
@@ -296,11 +297,12 @@ export async function deletePath(
       throw isGone(e) ? new DocNotFoundError(rel) : e;
     }
     if (st.isDirectory()) {
-      await removeFolder(deps, abs, rel, opts.recursive === true);
+      await removeFolder(deps, v.root, abs, rel, opts.recursive === true);
       return true;
     }
     // A file is removed whatever `recursive` says (`rm -r` on a file).
     await deps.hooks?.beforeRemove?.(rel);
+    await assertNotSymlinkEscape(abs, v.root);
     try {
       await fs.unlink(abs);
     } catch (e) {
@@ -332,13 +334,17 @@ export async function deletePath(
 }
 
 /**
- * Remove the folder at `abs`. Non-recursive: refuse a folder with children,
+ * Remove the folder at `abs`. Every removal call is immediately preceded by
+ * the full parent-chain containment check, so a parent swapped for a symlink
+ * after validation is `invalid_path` with nothing removed (REST API › Path
+ * operations, containment precondition). Non-recursive: refuse a folder with children,
  * then `rmdir` (never `rm -r`), so a child that appears after the emptiness
  * check makes the removal fail as `folder_not_empty` instead of being wiped.
  * Recursive: `fs.rm` with `force: false`, so a failure surfaces.
  */
 async function removeFolder(
   deps: VaultServiceDeps,
+  root: string,
   abs: string,
   rel: string,
   recursive: boolean,
@@ -346,6 +352,7 @@ async function removeFolder(
   if (!recursive) {
     if ((await fs.readdir(abs)).length > 0) throw new FolderNotEmptyError(rel);
     await deps.hooks?.beforeRemove?.(rel);
+    await assertNotSymlinkEscape(abs, root);
     try {
       await fs.rmdir(abs);
     } catch (e) {
@@ -356,6 +363,7 @@ async function removeFolder(
     }
   } else {
     await deps.hooks?.beforeRemove?.(rel);
+    await assertNotSymlinkEscape(abs, root);
     await fs.rm(abs, { recursive: true, force: false });
   }
   await deps.hooks?.afterRemove?.(rel);
