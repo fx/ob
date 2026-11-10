@@ -519,6 +519,8 @@ A concurrent ob operation that writes into a parent folder another call is just 
 - Every request is bounded. The search stops, returning the complete matches it has with `truncated: true`, when it has `limit` matches and finds one more (`reason: "limit"`; that extra match only proves more exist — it is never returned, and the file it was found in counts as scanned because the search stopped in it on `limit`), when it has read 64 MiB of file content (`"bytes"`), or when 5 seconds have passed since the request arrived (`"time"`). At most two greps run at once process-wide; time spent waiting for a free slot counts against the same 5 seconds, and a request whose budget runs out while it waits returns `matches: []` with `truncated: true` and `reason: "time"`. A request whose client disconnects or cancels stops waiting or running. Because files and lines are searched in a fixed order, `matches` is always a prefix of the untruncated result, and the matches kept by a cut-off are exact: a `"limit"` or `"bytes"` stop keeps every complete match found before it, and a `"time"` cut-off keeps every complete match carried by any checkpoint received up to the last one before it — including complete matches earlier in the file being searched, if a received checkpoint carried them. A match the search had found but not yet reported in a received checkpoint is not returned.
 - A grep MUST NOT stall the server: other requests are served normally while it runs, including while a pathological regular expression is being evaluated, and such an evaluation is abandoned at the time limit.
 
+> **Known limit.** Bun's regex engine (JavaScriptCore) aborts a runaway backtracking evaluation after roughly 0.7 seconds and reports no match. A line whose evaluation hits that limit is therefore silently not matched, and grep cannot tell it apart from a genuine non-match. `worker.terminate()` does not interrupt a running evaluation, so a terminated worker can outlive the deadline by up to that limit. The response is still sent at the deadline.
+
 #### Scenario: Literal grep finds exact text with line numbers
 
 - **GIVEN** vault `v` containing `notes/a.md` whose third line is `TODO: call the plumber` and `img/logo.png`
@@ -534,9 +536,9 @@ A concurrent ob operation that writes into a parent folder another call is just 
 
 #### Scenario: Catastrophic regex is cut off without stalling the server
 
-- **GIVEN** vault `v` containing a text file with a 10 000-character line of `a` followed by `!`
+- **GIVEN** vault `v` containing a text file of 50 lines, each 10 000 characters of `a` followed by `!` — each line's evaluation runs until the engine's backtracking limit (see the Known limit above), so together they take far longer than the 5-second budget
 - **WHEN** the client greps `{ "pattern": "(a+)+$", "regex": true }`
-- **THEN** the response arrives within the time budget with `truncated: true` and `reason: "time"`
+- **THEN** the response is sent at the 5-second deadline with `matches: []`, `truncated: true`, and `reason: "time"`
 - **AND** a `GET /healthz` sent while the grep runs is answered promptly
 
 #### Scenario: Invalid regex rejected
@@ -683,3 +685,4 @@ function safeJoin(root: string, rel: string): string {
 | 2026-11-09 | New `GET /v1/vaults/:slug/tags`: tags in the index with distinct-document counts, a thin pass-through over the indexer's tag listing. | [Change 0021](../../changes/0021-list-tags.md) |
 | 2026-11-09 | New `POST /v1/vaults/:slug/grep`: literal or regex line search over text files on disk, with hard limits on pattern length, file size, bytes read, and time, a `truncated` flag, and a guarantee that a pathological regex cannot stall the server. | [Change 0022](../../changes/0022-grep.md) |
 | 2026-11-09 | Move and copy index sets follow the vault indexer's new indexable-path rule (so `node_modules` and symlinked notes are never indexed), and `indexed` on every write, patch, append, move, and copy now turns `false` when the index update failed rather than only when the reindex call threw. Grep matches gain `textStart` for windowed lines. | [Change 0020](../../changes/0020-move-and-copy.md), [Change 0022](../../changes/0022-grep.md) |
+| 2026-11-10 | Grep records the regex engine's backtracking limit as a known limit (a line whose evaluation hits it is silently unmatched, and a terminated worker can outlive the deadline by up to that limit), and the catastrophic-regex scenario uses enough such lines to exceed the 5-second budget. | [Change 0022](../../changes/0022-grep.md) |
