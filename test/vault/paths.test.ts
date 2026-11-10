@@ -898,10 +898,42 @@ describe("canonical lock keys", () => {
         }),
     );
     const settled: string[] = [];
-    const write = writeFile(fx.deps, fx.slug, "notes//x.md", {
+    // Start the delete only once the write has JOINED the lock queue, so the
+    // queue order is the call order. The write reads its descriptor's `root`
+    // synchronously before its one pre-lock await (path validation), and
+    // again after it, for the lock key, immediately before joining the queue
+    // in the same synchronous step; a microtask scheduled from that later
+    // read therefore runs only once the write is queued.
+    let startDelete!: () => void;
+    const deleteStarted = new Promise<void>((r) => {
+      startDelete = r;
+    });
+    const descriptor = fx.deps.vault(fx.slug) as NonNullable<ReturnType<VaultServiceDeps["vault"]>>;
+    let inFirstTick = false;
+    let firstRead = true;
+    const writeDeps: VaultServiceDeps = {
+      ...fx.deps,
+      vault: () => ({
+        ...descriptor,
+        get root(): string {
+          if (firstRead) {
+            firstRead = false;
+            inFirstTick = true;
+            queueMicrotask(() => {
+              inFirstTick = false;
+            });
+          } else if (!inFirstTick) {
+            queueMicrotask(startDelete);
+          }
+          return descriptor.root;
+        },
+      }),
+    };
+    const write = writeFile(writeDeps, fx.slug, "notes//x.md", {
       kind: "markdown",
       content: "# x",
     }).then(() => void settled.push("write"));
+    await deleteStarted;
     const del = deletePath(fx.deps, fx.slug, "./notes/x.md/").then(
       () => void settled.push("delete"),
     );
