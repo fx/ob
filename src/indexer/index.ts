@@ -20,7 +20,13 @@
  *     pipeline, on the real vault root): it resolves `{ indexed: true }` for
  *     an indexed path and `{ indexed: false }` after dropping the rows of any
  *     other, and REJECTS when the rows could not be brought to the file's
- *     content. `drop` rejects on a store failure.
+ *     content. `drop` rejects on a store failure; it is unconditional (the
+ *     overwritten-destination drop) unless `unlessIndexable` asks for the
+ *     drop guard. Every guarded drop re-checks the rule under the path's
+ *     pipeline lock, never relies on an earlier check: the service core's
+ *     drop guard through `drop(…, { unlessIndexable: true })`, and the
+ *     startup sweep, the watcher, and `dropHidden` through
+ *     `pipeline.upsert`, which drops only a path still not indexable.
  *   - `dropHidden(slug, path)` — drop the rows of an indexed path with a
  *     hidden segment, which `drop`'s validation refuses. Such a path can
  *     never be indexable, so the drop guard always drops it; a folder move
@@ -52,7 +58,7 @@ import type { Config, VaultConfig } from "../config/index.ts";
 import { type Embedder, buildEmbedder } from "../embeddings/index.ts";
 import { InvalidPathError, assertSafeRelativePath } from "../errors.ts";
 import type { Logger } from "../log.ts";
-import { type Pipeline, buildPipeline } from "./pipeline.ts";
+import { type DropOptions, type Pipeline, buildPipeline } from "./pipeline.ts";
 import {
   DEFAULT_LAMBDA,
   DEFAULT_MAX_PER_PATH,
@@ -118,7 +124,12 @@ export interface Indexer {
   search(slug: string, query: string, opts?: SearchOptions): Promise<SearchHit[]>;
   /** Index `path`, or drop its rows when it is not indexable (`indexed: false`). */
   reindex(slug: string, path: string): Promise<{ indexed: boolean }>;
-  drop(slug: string, path: string): Promise<void>;
+  /**
+   * Drop `path`'s rows. With `unlessIndexable` this is the drop guard: the
+   * rule is re-checked under the path's pipeline lock and the rows are kept
+   * if an indexable note exists there. Without it, unconditional.
+   */
+  drop(slug: string, path: string, opts?: DropOptions): Promise<void>;
   /** Drop the rows of an indexed path that has a hidden segment (never indexable). */
   dropHidden(slug: string, path: string): Promise<void>;
   /**
@@ -256,7 +267,10 @@ async function sweepUnindexable(
   }
   for (const path of paths) {
     if (await isIndexablePath(root, path)) continue;
-    await track(pipeline.remove(path).catch(() => undefined));
+    // Not dropped directly: `upsert` re-checks the rule under the path's
+    // pipeline lock and drops only if the path is STILL not indexable, so a
+    // note recreated since the check above keeps (and refreshes) its rows.
+    await track(pipeline.upsert(join(root, path), path).catch(() => undefined));
   }
 }
 
@@ -360,10 +374,12 @@ export async function startIndexer(cfg: Config, deps: IndexerDeps): Promise<Inde
         root,
         (ev) => {
           runtime.pending++;
-          const task =
-            ev.kind === "upsert"
-              ? pipeline.upsert(ev.absPath, ev.relPath)
-              : pipeline.remove(ev.relPath);
+          // Both kinds go through `upsert`, which re-applies the rule under the
+          // path's pipeline lock: a `remove` classified before a writer
+          // recreated the note must not delete the rows that writer just
+          // created. `upsert` drops the path's rows only if it is still not
+          // indexable when it runs.
+          const task = pipeline.upsert(ev.absPath, ev.relPath);
           // A failure was already counted and logged by the pipeline; the
           // watcher carries on with the next event.
           trackInFlight(task.catch(() => undefined)).finally(() => {
@@ -489,16 +505,19 @@ export async function startIndexer(cfg: Config, deps: IndexerDeps): Promise<Inde
       const { abs, rel } = resolveVaultPath(slug, path);
       return rt.pipeline.upsert(abs, rel);
     },
-    async drop(slug: string, path: string): Promise<void> {
+    async drop(slug: string, path: string, opts?: DropOptions): Promise<void> {
       const rt = runtimes.get(slug);
       if (rt === undefined) return;
       const { rel } = resolveVaultPath(slug, path);
-      await rt.pipeline.remove(rel);
+      await rt.pipeline.remove(rel, opts);
     },
     async dropHidden(slug: string, path: string): Promise<void> {
       const rt = runtimes.get(slug);
       if (rt === undefined) return;
-      await rt.pipeline.remove(assertHiddenRowPath(path));
+      // Through `upsert` like every guarded drop: a hidden path is never
+      // indexable, so its re-check always drops.
+      const rel = assertHiddenRowPath(path);
+      await rt.pipeline.upsert(join(cfg.dataDir, "vaults", slug, rel), rel);
     },
     async tags(slug: string, opts: TagListingOptions = {}): Promise<TagListing> {
       const rt = runtimes.get(slug);
@@ -549,6 +568,7 @@ export async function startIndexer(cfg: Config, deps: IndexerDeps): Promise<Inde
   return indexer;
 }
 
+export type { DropOptions } from "./pipeline.ts";
 export type { SearchHit } from "./store.ts";
 export {
   PipelineVersionMismatchError,

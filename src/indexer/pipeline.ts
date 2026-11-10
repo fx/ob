@@ -144,6 +144,12 @@ async function withStoreRetry<T>(
   throw lastErr;
 }
 
+/** Options for a drop. */
+export interface DropOptions {
+  /** Keep the rows if an indexable note exists at the path when the drop runs. */
+  readonly unlessIndexable?: boolean;
+}
+
 /** Outcome of an upsert: `indexed: false` means not indexable, rows dropped. */
 export interface UpsertResult {
   readonly indexed: boolean;
@@ -156,8 +162,13 @@ export interface Pipeline {
    * a read, chunk, embed, or store step fails.
    */
   upsert(absPath: string, relPath: string): Promise<UpsertResult>;
-  /** Drop a file's chunks (watcher unlink or REST delete). Rejects on a store failure. */
-  remove(relPath: string): Promise<void>;
+  /**
+   * Drop a file's chunks. Rejects on a store failure. With
+   * `unlessIndexable`, the indexable-path rule is re-checked under the
+   * path's lock first and the rows are kept if an indexable note is there
+   * (the drop guard, atomic with every other pipeline write to the path).
+   */
+  remove(relPath: string, opts?: DropOptions): Promise<void>;
   /** Counter snapshot for `IndexerStatus`. */
   readonly counters: PipelineCounters;
   /**
@@ -474,8 +485,16 @@ export function buildPipeline(deps: PipelineDeps, opts: BuildPipelineOptions = {
 
   const upsert = (absPath: string, relPath: string): Promise<UpsertResult> =>
     runLocked(relPath, lockTails, () => upsertImpl(absPath, relPath));
-  const remove = (relPath: string): Promise<void> =>
-    runLocked(relPath, lockTails, () => removeImpl(relPath));
+  const remove = (relPath: string, opts: DropOptions = {}): Promise<void> =>
+    runLocked(relPath, lockTails, async () => {
+      // The guard's check runs under the same per-path lock as every upsert,
+      // so a writer's fresh rows can never be dropped by a stale decision.
+      const keep =
+        opts.unlessIndexable === true &&
+        deps.root !== undefined &&
+        (await isIndexablePath(deps.root, relPath));
+      if (!keep) await removeImpl(relPath);
+    });
 
   return {
     upsert,

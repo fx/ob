@@ -11,10 +11,11 @@
  *   `maxBytes` of content.
  * - `dropGuarded` / `dropUnlessIndexable` implement the drop guard (Vault
  *   Indexer › Indexable paths): a removed path's rows are dropped unless an
- *   indexable note exists at the path when the drop runs. Indexability is
- *   asked of the INDEXER (`deps.indexer.isIndexable`), which evaluates it on
- *   the real vault root — never on `vault(slug).root`, which in a scoped MCP
- *   session is the scope root. A drop failure is logged and swallowed: the
+ *   indexable note exists at the path when the drop runs. The check and the
+ *   drop are ONE indexer call (`drop(…, { unlessIndexable: true })`), atomic
+ *   under the indexer's per-path pipeline lock and evaluated on the real
+ *   vault root — never on `vault(slug).root`, which in a scoped MCP session
+ *   is the scope root. A drop failure is logged and swallowed: the
  *   removal already happened, and the watcher's `unlink` event reconciles.
  *   Both report whether the guard completed (`false` = the drop failed), so
  *   a move or copy can turn its `indexed` to `false`.
@@ -174,8 +175,11 @@ export async function dropUnlessIndexable(
   path: string,
 ): Promise<boolean> {
   try {
-    if (await deps.indexer.isIndexable(slug, path)) return true;
-    await deps.indexer.drop(slug, path);
+    // One indexer call, not a check then a drop: the indexer re-checks the
+    // rule under the path's pipeline lock, so a note recreated between an
+    // earlier check and the drop (an outside writer, then the watcher's
+    // reindex) never loses the rows just written for it.
+    await deps.indexer.drop(slug, path, { unlessIndexable: true });
     return true;
   } catch (e) {
     logDropFailure(deps, slug, path, e);

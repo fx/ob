@@ -150,7 +150,12 @@ function makeScopeFixture(slugs: readonly string[] = ["v"]): ScopeFixture {
       calls.reindex.push({ slug: s, path: p });
       return { indexed: true };
     },
-    drop: async (s, p) => {
+    // The drop guard is re-checked inside the drop, on the REAL vault root.
+    drop: async (s, p, opts) => {
+      if (opts?.unlessIndexable === true) {
+        calls.isIndexable.push({ slug: s, path: p });
+        if (await isIndexablePath(root(s), p)) return;
+      }
       calls.drop.push({ slug: s, path: p });
     },
     dropHidden: async (s, p) => {

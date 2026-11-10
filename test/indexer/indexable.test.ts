@@ -24,6 +24,7 @@ import {
   assertHiddenRowPath,
   startIndexer,
 } from "../../src/indexer/index.ts";
+import { buildPipeline } from "../../src/indexer/pipeline.ts";
 import { scanVault } from "../../src/indexer/scanner.ts";
 import {
   PIPELINE_VERSION,
@@ -31,7 +32,7 @@ import {
   openVaultStore,
   writePipelineVersion,
 } from "../../src/indexer/store.ts";
-import { type WatcherEvent, startWatcher } from "../../src/indexer/watcher.ts";
+import { type WatcherEvent, type WatcherHandle, startWatcher } from "../../src/indexer/watcher.ts";
 import { type LogFields, type Logger, createLogger } from "../../src/log.ts";
 import { TEST_SYNC_HEALTH, TEST_WATCHDOG_OFF } from "../helpers/vaultStatus.ts";
 
@@ -140,12 +141,20 @@ async function seedRows(dataDir: string, paths: readonly string[]): Promise<void
 
 async function start(
   dataDir: string,
-  extra: { embedder?: Embedder; logger?: Logger; openStore?: () => Promise<VaultStore> } = {},
+  extra: {
+    embedder?: Embedder;
+    logger?: Logger;
+    openStore?: () => Promise<VaultStore>;
+    buildPipeline?: typeof buildPipeline;
+    startWatcher?: typeof startWatcher;
+  } = {},
 ): Promise<Indexer> {
   const indexer = await startIndexer(makeConfig(dataDir), {
     logger: extra.logger ?? silent(),
     embedder: extra.embedder ?? buildHashEmbedder(DIM),
     ...(extra.openStore !== undefined ? { openStore: extra.openStore } : {}),
+    ...(extra.buildPipeline !== undefined ? { buildPipeline: extra.buildPipeline } : {}),
+    ...(extra.startWatcher !== undefined ? { startWatcher: extra.startWatcher } : {}),
   });
   cleanup.push(() => indexer.stop());
   return indexer;
@@ -491,5 +500,97 @@ describe("the real watcher drops rows when a note becomes non-indexable", () => 
     await new Promise<void>((r) => setTimeout(r, 400));
     expect(await indexer.indexedPaths("v", "")).toEqual(["moved/real.md"]);
     expect(embedder.texts.some((t) => t.includes("OUTSIDE-CONTENT"))).toBe(false);
+  }, 20_000);
+});
+
+describe("a drop decided from an earlier check never deletes fresh rows", () => {
+  test("startup sweep: a note recreated as indexable between the sweep's check and its drop keeps its rows", async () => {
+    const { dataDir, root } = fixtureDirs("race-sweep");
+    // Rows for a note deleted while ob was stopped: the sweep's check finds
+    // nothing there and decides to drop.
+    await seedRows(dataDir, ["notes/a.md"]);
+    let recreated = false;
+    const sweepCalls: string[] = [];
+    const indexer = await start(dataDir, {
+      // The seam between the sweep's check and its pipeline call: a writer
+      // recreates the note right then. The sweep runs before the scan, so
+      // what its own call did is recorded here (the scan would re-add rows
+      // either way, which is why rows at ready alone would prove nothing).
+      buildPipeline: (deps, opts) => {
+        const real = buildPipeline(deps, opts);
+        return {
+          ...real,
+          upsert: async (abs, rel) => {
+            if (rel === "notes/a.md" && !recreated) {
+              recreated = true;
+              mkdirSync(join(root, "notes"), { recursive: true });
+              writeFileSync(join(root, "notes", "a.md"), "# A\n\nRECREATED");
+              const r = await real.upsert(abs, rel);
+              sweepCalls.push(`upsert:${r.indexed}`);
+              return r;
+            }
+            return real.upsert(abs, rel);
+          },
+          remove: async (rel, o) => {
+            sweepCalls.push(`remove:${rel}`);
+            return real.remove(rel, o);
+          },
+        };
+      },
+    });
+    await waitFor(() => indexer.status("v")?.state === "ready");
+    // The drop re-checked under the pipeline lock and kept (indexed) the note;
+    // nothing dropped it on the strength of the earlier check.
+    expect(sweepCalls).toEqual(["upsert:true"]);
+    expect(await indexer.indexedPaths("v", "")).toEqual(["notes/a.md"]);
+    const hits = await indexer.search("v", "RECREATED", { filter: { pathPrefix: "notes/a.md" } });
+    expect(hits.map((h) => h.text).join("\n")).toContain("RECREATED");
+  }, 20_000);
+
+  test("watcher: a remove classified before a writer recreated and indexed the note keeps its rows", async () => {
+    const { dataDir, root } = fixtureDirs("race-watch");
+    let emit: ((ev: WatcherEvent) => void) | undefined;
+    const indexer = await start(dataDir, {
+      // A watcher we drive: it reports `a.md` as removed (its classification
+      // ran while the note was gone) only after a writer recreated it.
+      startWatcher: (_root, onEvent): WatcherHandle => {
+        emit = onEvent;
+        return { ready: async () => undefined, lastError: () => null, stop: async () => undefined };
+      },
+    });
+    await waitFor(() => indexer.status("v")?.state === "ready");
+    writeFileSync(join(root, "a.md"), "# A\n\nFRESH");
+    expect(await indexer.reindex("v", "a.md")).toEqual({ indexed: true });
+    (emit as (ev: WatcherEvent) => void)({
+      kind: "remove",
+      absPath: join(root, "a.md"),
+      relPath: "a.md",
+    });
+    await waitFor(() => indexer.status("v")?.pending === 0);
+    expect(await indexer.indexedPaths("v", "")).toEqual(["a.md"]);
+    // A remove for a path that really is gone still drops.
+    rmSync(join(root, "a.md"));
+    (emit as (ev: WatcherEvent) => void)({
+      kind: "remove",
+      absPath: join(root, "a.md"),
+      relPath: "a.md",
+    });
+    await waitFor(async () => (await indexer.indexedPaths("v", "")).length === 0);
+  }, 20_000);
+
+  test("drop with unlessIndexable is the drop guard under the pipeline lock; without it, unconditional", async () => {
+    const { dataDir, root } = fixtureDirs("guard-drop");
+    const indexer = await start(dataDir);
+    await waitFor(() => indexer.status("v")?.state === "ready");
+    writeFileSync(join(root, "a.md"), "# A\n\nbody");
+    await indexer.reindex("v", "a.md");
+    await indexer.drop("v", "a.md", { unlessIndexable: true });
+    expect(await indexer.indexedPaths("v", "")).toEqual(["a.md"]);
+    await indexer.drop("v", "a.md");
+    expect(await indexer.indexedPaths("v", "")).toEqual([]);
+    await indexer.reindex("v", "a.md");
+    rmSync(join(root, "a.md"));
+    await indexer.drop("v", "a.md", { unlessIndexable: true });
+    expect(await indexer.indexedPaths("v", "")).toEqual([]);
   }, 20_000);
 });

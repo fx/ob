@@ -133,7 +133,14 @@ export function makeVaultFixture(): VaultFixture {
         indexed.delete(p);
         return { indexed: false };
       },
-      drop: async (s, p): Promise<void> => {
+      // Like the real indexer: with `unlessIndexable` the rule is re-checked
+      // inside the drop, and the rows are kept for an indexable note.
+      drop: async (s, p, opts): Promise<void> => {
+        if (opts?.unlessIndexable === true) {
+          calls.isIndexable.push({ slug: s, path: p });
+          events.push(`isIndexable:${p}`);
+          if (await isIndexablePath(root, p)) return;
+        }
         calls.drop.push({ slug: s, path: p });
         events.push(`drop:${p}`);
         if (dropErrorPending) {
