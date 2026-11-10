@@ -18,6 +18,8 @@ In v1 the indexer covers Markdown only (`.md` / `.markdown`). Binary files (imag
 
 > The `isIndexablePath` predicate and the drop guard below are introduced by draft change [0019](../../changes/0019-unified-list-and-delete.md), whose deletes use both. Draft change [0020](../../changes/0020-move-and-copy.md) adopts the predicate in the scan, the watcher, the pipeline, and every direct reindex, and adds the startup sweep; until 0020 lands those routes keep today's predicates, which agree on segments and extensions but not on symlinks.
 
+Indexability is always evaluated against the real vault root with the vault-relative path, never against a scoped root: a session scoped to `node_modules/pkg` sees `note.md`, but the path that is judged is `node_modules/pkg/note.md`, which is not indexable. The predicate is therefore reached through the indexer, which already deals in vault-relative paths, as `Indexer.isIndexable(slug, path)`; service code never calls it with its own (possibly scoped) root, and a scoped session's wrapper prefixes the path exactly as it does for `reindex` and `drop`.
+
 One predicate, `isIndexablePath`, decides what the index may hold, and the initial scan, the watcher, the pipeline, and every direct `reindex` (writes, moves, copies, link rewrites) MUST all apply it, so no route into the index admits a path another route would refuse. A vault-relative path is indexable iff all of these hold:
 
 - its extension is `.md` or `.markdown`, case-insensitively;
@@ -259,6 +261,7 @@ interface Indexer {
   reindex(slug: string, path: string): Promise<void>;
   drop(slug: string, path: string): Promise<void>;
   indexedPaths(slug: string, prefix: string): Promise<string[]>;   // distinct indexed paths starting with prefix
+  isIndexable(slug: string, path: string): Promise<boolean>;      // isIndexablePath on the real vault root
   tags(slug: string, opts?: { pathPrefix?: string; limit?: number }): Promise<TagListing>;
   stop(): Promise<void>;
 }
