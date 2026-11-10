@@ -62,6 +62,24 @@ describe("guardedRead", () => {
     await expect(guardedRead(root, "dir/x.md")).rejects.toBeInstanceOf(InvalidPathError);
   });
 
+  test("a `..` path is invalid_path and nothing is opened", async () => {
+    const root = tree();
+    writeFileSync(join(root, "..", "outside.md"), "OUTSIDE");
+    let opened = false;
+    for (const rel of ["../outside.md", "a/../../outside.md", "/etc/passwd", "."]) {
+      const err = await guardedRead(root, rel, {
+        beforeOpen: async () => {
+          opened = true;
+        },
+      }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(InvalidPathError);
+    }
+    expect(opened).toBe(false);
+  });
+
   test("a directory is not a regular file", async () => {
     await expect(guardedRead(tree(), "a")).rejects.toBeInstanceOf(InvalidPathError);
   });
@@ -184,6 +202,18 @@ describe("drop guard", () => {
     release();
     await Promise.all([held, guarded]);
     expect(fx.calls.drop).toEqual([{ slug: fx.slug, path: "x.md" }]);
+  });
+
+  test("an unsafe path is refused before any lock, check, or drop", async () => {
+    const fx = makeVaultFixture();
+    for (const p of ["../x.md", "/abs.md", ".hidden/x.md"]) {
+      await dropGuarded(fx.deps, fx.slug, p);
+    }
+    expect(fx.calls.isIndexable).toEqual([]);
+    expect(fx.calls.drop).toEqual([]);
+    expect(
+      fx.logCalls.warn.filter((c) => c.msg === "drop guard refused an unsafe path"),
+    ).toHaveLength(3);
   });
 
   test("dropUnlessIndexable never throws: a failing drop is logged", async () => {

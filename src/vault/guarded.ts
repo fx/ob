@@ -20,11 +20,10 @@
 
 import type { Stats } from "node:fs";
 import { constants, promises as fs } from "node:fs";
-import { join } from "node:path";
-import { DocNotFoundError, InvalidPathError } from "../errors.ts";
+import { DocNotFoundError, InvalidPathError, assertSafeRelativePath } from "../errors.ts";
 import { type VaultServiceDeps, resolveVault } from "./files.ts";
 import { pathLockKey, withPathLock } from "./lock.ts";
-import { assertNotSymlinkEscape } from "./path.ts";
+import { assertNotSymlinkEscape, safeJoin } from "./path.ts";
 
 /** Thrown by `guardedRead` when the file exceeds `maxBytes` (at `fstat` or while reading). */
 export class OversizeReadError extends Error {
@@ -59,8 +58,8 @@ export interface GuardedReadResult {
  * Read `rel` (relative to `root`) under the containment precondition.
  *
  * Throws `DocNotFoundError` when the path does not exist, `InvalidPathError`
- * when a component is a symlink or not a directory, or the opened entry is
- * not a regular file, and `OversizeReadError` past `maxBytes`. Anything else
+ * when `rel` is not a safe vault-relative path (`safeJoin`), a component is a
+ * symlink or not a directory, or the opened entry is not a regular file, and `OversizeReadError` past `maxBytes`. Anything else
  * propagates unchanged.
  */
 export async function guardedRead(
@@ -68,7 +67,9 @@ export async function guardedRead(
   rel: string,
   opts: GuardedReadOptions = {},
 ): Promise<GuardedReadResult> {
-  const abs = join(root, rel);
+  // Lexical validation first (`..`, absolute, NUL, hidden, the root itself):
+  // the helper is safe by itself, whatever the caller passes.
+  const abs = safeJoin(root, rel);
   await assertNotSymlinkEscape(abs, root);
   await opts.beforeOpen?.();
   let handle: fs.FileHandle;
@@ -138,6 +139,9 @@ export async function dropUnlessIndexable(
 
 /**
  * The drop guard, taking `path`'s write lock for the check and the drop.
+ * A path that is not a safe vault-relative path (`..`, absolute, NUL, hidden)
+ * is refused before any lock key is formed or the indexer is asked anything —
+ * logged, never dropped (the indexer's own `drop` rejects such a path too).
  * Never throws for a configured vault.
  */
 export async function dropGuarded(
@@ -145,6 +149,16 @@ export async function dropGuarded(
   slug: string,
   path: string,
 ): Promise<void> {
+  try {
+    assertSafeRelativePath(path);
+  } catch (e) {
+    deps.logger?.warn("drop guard refused an unsafe path", {
+      vault: slug,
+      path,
+      error: (e as Error).message,
+    });
+    return;
+  }
   const key = pathLockKey(resolveVault(deps, slug).root, path);
   await withPathLock(key, () => dropUnlessIndexable(deps, slug, path));
 }
