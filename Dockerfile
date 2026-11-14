@@ -12,8 +12,9 @@
 # app source. Source edits invalidate only the cheap final layers.
 #
 # The toolchain versions (Node, Bun, obsidian-headless) are captured as build
-# ARGs below. Bumps are one-edit changes, and a historical toolchain
-# reproduces exactly via `docker build --build-arg ...`. The runtime stage's
+# ARGs below, and each base image is pinned by digest. A historical toolchain
+# reproduces exactly via `docker build --build-arg ...`, overriding each
+# *_VERSION together with its *_DIGEST. The runtime stage's
 # apt packages are deliberately NOT pinned — see the note above that
 # `RUN apt-get`. ARGs declared before the first FROM are "global" — each
 # stage that wants to read one must redeclare it.
@@ -21,10 +22,16 @@
 # Node 22 toolchain (must remain at the same major as `mise.toml`'s
 # `node = "22.X.Y"`). Latest 22-bookworm-slim patch at PR time.
 ARG NODE_VERSION=22.22.2
+# Multi-arch index digest of node:${NODE_VERSION}-bookworm-slim. The digest,
+# not the tag, selects the image; bump or override it with NODE_VERSION.
+ARG NODE_DIGEST=sha256:9f6d5975c7dca860947d3915877f85607946403fc55349f39b4bc3688448bb6e
 
 # Bun runtime — MUST match `mise.toml`'s `bun = "X.Y.Z"` so dev/CI/Docker
 # share an identical toolchain.
 ARG BUN_VERSION=1.3.13
+# Multi-arch index digest of oven/bun:${BUN_VERSION}. The digest, not the
+# tag, selects the image; bump or override it with BUN_VERSION.
+ARG BUN_DIGEST=sha256:87416c977a612a204eb54ab9f3927023c2a3c971f4f345a01da08ea6262ae30e
 
 # obsidian-headless is pre-1.0; lock the exact patch and bump deliberately,
 # per change 0006's "Open Questions".
@@ -40,7 +47,7 @@ ARG GIT_SHA=dev
 # ── Stage 1: node-tools ──────────────────────────────────────────────────────
 # Embed Node 22 + obsidian-headless globally so the runtime stage can copy a
 # single tidy directory tree.
-FROM node:${NODE_VERSION}-bookworm-slim AS node-tools
+FROM node:${NODE_VERSION}-bookworm-slim@${NODE_DIGEST} AS node-tools
 ARG OBSIDIAN_HEADLESS_VERSION
 
 # `npm config set prefix` keeps the global install under one directory we can
@@ -51,7 +58,7 @@ RUN npm config set prefix /opt/node-globals \
 
 # ── Stage 2: bun-deps ────────────────────────────────────────────────────────
 # Resolve Bun deps with a frozen lockfile.
-FROM oven/bun:${BUN_VERSION} AS bun-deps
+FROM oven/bun:${BUN_VERSION}@${BUN_DIGEST} AS bun-deps
 WORKDIR /app
 COPY package.json bun.lock ./
 # `--production` skips devDependencies (biome, typescript, @types/bun) which
@@ -80,7 +87,7 @@ RUN bun install --frozen-lockfile --production \
 
 # ── Stage 3: runtime ─────────────────────────────────────────────────────────
 # Final stage. Same Bun base as bun-deps so the embedded glibc matches.
-FROM oven/bun:${BUN_VERSION} AS runtime
+FROM oven/bun:${BUN_VERSION}@${BUN_DIGEST} AS runtime
 ARG GIT_SHA
 
 # OCI image metadata. `docker/metadata-action` writes its own labels in CI;
