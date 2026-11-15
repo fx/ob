@@ -24,6 +24,9 @@ jobs:
     # A job-level `if` keeps the check reported as skipped (not absent); there is no branch
     # protection on this repo, so a skipped check blocks nothing. Still runs on push to main.
     if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please--') }}
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,8 +70,9 @@ jobs:
 
       - name: Upload coverage reports to Codecov
         if: always()
-        continue-on-error: true
         uses: codecov/codecov-action@v5
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          slug: fx/ob
+          # OIDC needs id-token, which GitHub withholds from fork PRs; those
+          # fall back to Codecov's tokenless upload for public repos.
+          use_oidc: ${{ !github.event.pull_request.head.repo.fork }}
+          fail_ci_if_error: true

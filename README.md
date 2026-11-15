@@ -337,7 +337,6 @@ are not part of the release path.
 
 | Secret | Required | Purpose |
 |--------|----------|---------|
-| `CODECOV_TOKEN` | yes | Codecov upload from `ci.yml`. |
 | `RELEASE_PLEASE_TOKEN` | recommended | A user PAT or GitHub App token used by `release-please.yml`. The default `GITHUB_TOKEN` cannot trigger downstream `pull_request` / `push` workflows, so without this secret the release PR will not get CI and the `vX.Y.Z` tag release-please cuts will not trigger `docker.yml` (and therefore the semver image tags `:X.Y.Z` / `:X.Y` / `:X` / `:latest` will not be published). With it provisioned, the full chain is automated. The workflow falls back to `GITHUB_TOKEN` if the secret is unset, so `release-please.yml` will still maintain the release PR — just not chain into CI / Docker. |
 
 `bun run lint` runs Biome and `hadolint Dockerfile`. Hadolint is preinstalled
