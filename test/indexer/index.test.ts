@@ -710,6 +710,61 @@ describe("startIndexer round-trip", () => {
     expect(firstStoreClosed).toBe(true);
   });
 
+  test("partial init failure tolerates a throwing store.close", async () => {
+    // Covers the try/catch around store.close() in teardownAll: a close
+    // that throws must not mask the original init error.
+    const dataDir = tmpDataDir("partial-close-throw");
+    const cfg = makeConfig({
+      dataDir,
+      vaults: [
+        { name: "first", slug: "first" },
+        { name: "second", slug: "second" },
+      ],
+    });
+    mkdirSync(join(dataDir, "vaults", "first"), { recursive: true });
+    mkdirSync(join(dataDir, "vaults", "second"), { recursive: true });
+
+    let closeCalls = 0;
+    let err: unknown;
+    try {
+      await startIndexer(cfg, {
+        logger: silent(),
+        embedder: buildHashEmbedder(4),
+        openStore: async (_cfg, vault) => {
+          if (vault.slug === "second") throw new Error("second store fails");
+          return {
+            dim: 4,
+            upsert: async () => undefined,
+            drop: async () => undefined,
+            search: async () => [],
+            searchHybrid: async () => [],
+            documentCount: async () => 0,
+            tagCounts: async () => new Map(),
+            chunkCount: async () => 0,
+            fingerprint: async () => undefined,
+            fingerprints: async () => new Map(),
+            indexedPaths: async () => [],
+            hasRows: async () => true,
+            close: () => {
+              closeCalls++;
+              throw new Error("store close failed");
+            },
+          };
+        },
+        startWatcher: () => ({
+          ready: () => Promise.resolve(),
+          lastError: () => null,
+          stop: async () => undefined,
+        }),
+        scanVault: async () => ({ scanned: 0, skipped: 0, errors: 0 }),
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect((err as Error)?.message).toBe("second store fails");
+    expect(closeCalls).toBe(1);
+  });
+
   test("partial init failure tears down already-started vaults (LDKv)", async () => {
     const dataDir = tmpDataDir("partial");
     const cfg = makeConfig({

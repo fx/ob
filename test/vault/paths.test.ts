@@ -11,6 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import { writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -29,6 +30,8 @@ import {
   deletePath,
   encodeCursor,
   listPaths,
+  lstatDestination,
+  lstatOrNull,
   walkVaultEntries,
 } from "../../src/vault/paths.ts";
 import { type VaultFixture, makeVaultFixture } from "./helpers.ts";
@@ -397,6 +400,26 @@ describe("listPaths", () => {
       },
     });
     expect((await listPaths(deps, fx.slug)).items.map((i) => i.path)).toEqual(["z.md"]);
+  });
+
+  test("an operational read failure mid-walk fails the listing", async () => {
+    const fx = makeVaultFixture();
+    put(fx.root, "f.md");
+    // Opening a Unix socket fails ENXIO for every user: neither vanished nor
+    // a containment failure, so it must propagate rather than be skipped.
+    const server = createServer();
+    try {
+      const deps = withHooks(fx, {
+        beforeListRead: async (p) => {
+          if (p !== "f.md") return;
+          rmSync(join(fx.root, "f.md"));
+          await new Promise<void>((r) => server.listen(join(fx.root, "f.md"), r));
+        },
+      });
+      await expect(listPaths(deps, fx.slug)).rejects.toMatchObject({ code: "ENXIO" });
+    } finally {
+      server.close();
+    }
   });
 
   test("a folder swapped for an outside symlink before its descent is skipped", async () => {
@@ -947,5 +970,21 @@ describe("canonical lock keys", () => {
     // removes it (had they not serialized, the delete would be not_found).
     expect(settled).toEqual(["write", "delete"]);
     expect(existsSync(join(fx.root, "notes/x.md"))).toBe(false);
+  });
+});
+
+describe("lstat helpers", () => {
+  // A component past NAME_MAX fails ENAMETOOLONG for every user, standing in
+  // for the EACCES / EIO family that a chmod fixture cannot produce as root.
+  const tooLong = (): string => join(makeVaultFixture().root, "a".repeat(300));
+
+  test("lstatOrNull rethrows anything but a vanished path", async () => {
+    await expect(lstatOrNull(tooLong())).rejects.toMatchObject({ code: "ENAMETOOLONG" });
+  });
+
+  test("lstatDestination rethrows anything but ENOENT and ENOTDIR", async () => {
+    await expect(lstatDestination(tooLong(), "dst.md")).rejects.toMatchObject({
+      code: "ENAMETOOLONG",
+    });
   });
 });

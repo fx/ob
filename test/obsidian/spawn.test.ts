@@ -108,13 +108,21 @@ describe("realSpawner", () => {
     expect(() => handle.kill("SIGTERM")).not.toThrow();
   });
 
-  test("kill is a no-op after exit and does not throw (covers proc.kill throw branch)", async () => {
+  test("kill is a no-op after exit and does not throw", async () => {
     const handle = realSpawner.run("true", []);
     await handle.exited;
-    // Bun.spawn throws on kill of an already-exited process; the wrapper swallows it.
     expect(() => handle.kill("SIGTERM")).not.toThrow();
-    // Calling again hits the same swallow path.
     expect(() => handle.kill("SIGKILL")).not.toThrow();
+  });
+
+  test("kill swallows a throwing proc.kill (covers the catch branch)", async () => {
+    const handle = realSpawner.run("sleep", ["5"]);
+    // Bun's proc.kill throws on a signal it does not know.
+    expect(() => handle.kill("SIGBOGUS" as NodeJS.Signals)).not.toThrow();
+    handle.kill("SIGKILL");
+    await handle.exited;
+    await readAll(handle.stdout);
+    await readAll(handle.stderr);
   });
 
   test("kill while running terminates the child", async () => {
