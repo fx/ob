@@ -413,7 +413,10 @@ describe("listPaths", () => {
         beforeListRead: async (p) => {
           if (p !== "f.md") return;
           rmSync(join(fx.root, "f.md"));
-          await new Promise<void>((r) => server.listen(join(fx.root, "f.md"), r));
+          await new Promise<void>((resolve, reject) => {
+            server.once("error", reject);
+            server.listen(join(fx.root, "f.md"), resolve);
+          });
         },
       });
       await expect(listPaths(deps, fx.slug)).rejects.toMatchObject({ code: "ENXIO" });
