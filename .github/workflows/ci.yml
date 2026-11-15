@@ -65,10 +65,42 @@ jobs:
       - name: Test (with coverage)
         run: bun run test:cov
 
-      - name: Upload coverage reports to Codecov
+      - name: Save coverage report
+        # Handed to the `coverage` job, so this job (which runs project code)
+        # never holds an id-token.
         if: always()
-        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/lcov.info
+          if-no-files-found: error
+          retention-days: 1
+
+  coverage:
+    # Runs no project code, so the id-token is reachable only by the upload.
+    # Still uploads partial coverage when tests failed; skipped with `ci`.
+    needs: ci
+    if: ${{ !cancelled() && needs.ci.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Codecov maps report paths onto the source tree.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage
+          path: coverage
+
+      - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          slug: fx/ob
+          files: coverage/lcov.info
+          # GitHub withholds id-token from fork PRs; those fall back to
+          # Codecov's tokenless upload for public repos.
+          use_oidc: ${{ !github.event.pull_request || github.event.pull_request.head.repo.full_name == github.repository }}
+          fail_ci_if_error: true
