@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Embedder } from "../../src/embeddings/index.ts";
-import { buildPipeline } from "../../src/indexer/pipeline.ts";
+import type { Chunk } from "../../src/indexer/chunker.ts";
+import { EmbedBatcher, buildPipeline } from "../../src/indexer/pipeline.ts";
 import { readRegularNoFollow } from "../../src/indexer/scanner.ts";
 import { type StoreRow, type VaultStore, openVaultStore } from "../../src/indexer/store.ts";
 import { type Logger, createLogger } from "../../src/log.ts";
@@ -679,6 +680,37 @@ describe("EmbedBatcher coalescing (LDKK)", () => {
     await pipe.upsert("/abs/a.md", "a.md");
     expect(embedCalls).toBeGreaterThanOrEqual(1);
     store.close();
+  });
+
+  test("reaching the cap while the window timer is pending flushes at once", async () => {
+    const batches: string[][] = [];
+    const counting: Embedder = {
+      dim: 4,
+      async embed(texts) {
+        batches.push(texts);
+        return texts.map(() => Float32Array.from([1, 0, 0, 0]));
+      },
+    };
+    const chunk = (embedText: string): Chunk => ({
+      index: 0,
+      headingPath: [],
+      text: embedText,
+      embedText,
+      frontmatter: {},
+      links: [],
+      tags: [],
+    });
+    // A window far longer than the test timeout: only the cap can flush.
+    const batcher = new EmbedBatcher(counting, 60_000, 2);
+    const first = batcher.submit([chunk("a")]);
+    const second = batcher.submit([chunk("b")]);
+    const [va, vb] = await Promise.all([first, second]);
+    expect(va.length).toBe(1);
+    expect(vb.length).toBe(1);
+    expect(batches).toEqual([["a", "b"]]);
+    // The cleared timer must not fire a second (empty) flush later.
+    await batcher.drain();
+    expect(batches.length).toBe(1);
   });
 });
 

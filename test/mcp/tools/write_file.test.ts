@@ -74,3 +74,29 @@ test("write_file with frontmatter on Markdown", async () => {
   const onDisk = readFileSync(join(fx.vaultRoot, "n.md"), "utf8");
   expect(onDisk).toContain('title: "hi"');
 });
+
+test("write_file Markdown with base64 encoding decodes to UTF-8 text", async () => {
+  const fx = await makeMcpFixture({ label: "tool-wf-md-b64" });
+  cleanup.push(fx.stop);
+  const r = await fx.callTool("write_file", {
+    vault: "v",
+    path: "n.md",
+    content: Buffer.from("# héllo", "utf8").toString("base64"),
+    encoding: "base64",
+  });
+  expect(r.isError).toBeUndefined();
+  expect(readFileSync(join(fx.vaultRoot, "n.md"), "utf8")).toContain("# héllo");
+});
+
+test("write_file raw text on a non-Markdown path is written as UTF-8 bytes", async () => {
+  const fx = await makeMcpFixture({ label: "tool-wf-raw" });
+  cleanup.push(fx.stop);
+  const r = await fx.callTool("write_file", {
+    vault: "v",
+    path: "notes.txt",
+    content: "plain ✓",
+    contentType: "text/plain",
+  });
+  expect(r.isError).toBeUndefined();
+  expect(readFileSync(join(fx.vaultRoot, "notes.txt"), "utf8")).toBe("plain ✓");
+});

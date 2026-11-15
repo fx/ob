@@ -21,17 +21,17 @@
 
 # Node 22 toolchain (must remain at the same major as `mise.toml`'s
 # `node = "22.X.Y"`). Latest 22-bookworm-slim patch at PR time.
-ARG NODE_VERSION=22.22.2
+ARG NODE_VERSION=22.23.5
 # Multi-arch index digest of node:${NODE_VERSION}-bookworm-slim. The digest,
 # not the tag, selects the image; bump or override it with NODE_VERSION.
-ARG NODE_DIGEST=sha256:9f6d5975c7dca860947d3915877f85607946403fc55349f39b4bc3688448bb6e
+ARG NODE_DIGEST=sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee
 
 # Bun runtime — MUST match `mise.toml`'s `bun = "X.Y.Z"` so dev/CI/Docker
 # share an identical toolchain.
-ARG BUN_VERSION=1.3.13
+ARG BUN_VERSION=1.4.4
 # Multi-arch index digest of oven/bun:${BUN_VERSION}. The digest, not the
 # tag, selects the image; bump or override it with BUN_VERSION.
-ARG BUN_DIGEST=sha256:87416c977a612a204eb54ab9f3927023c2a3c971f4f345a01da08ea6262ae30e
+ARG BUN_DIGEST=sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d
 
 # obsidian-headless is pre-1.0; lock the exact patch and bump deliberately,
 # per change 0006's "Open Questions".

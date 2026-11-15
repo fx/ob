@@ -273,4 +273,19 @@ describe("resources/read", () => {
     // file) gets caught here.
     expect(((err as McpError).data as { code: string }).code).toBe("not_found");
   });
+
+  test("an untyped read failure propagates instead of becoming not_found", async () => {
+    const fx = await makeMcpFixture({ label: "res-untyped" });
+    cleanup.push(fx.stop);
+    // A component past NAME_MAX fails `lstat` ENAMETOOLONG: an operational
+    // error, not an OBError, so it must not be relabelled as not_found.
+    let err: unknown;
+    try {
+      await fx.resources.read(`obvault://v/${"a".repeat(300)}.md`);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).not.toBeInstanceOf(McpError);
+    expect((err as NodeJS.ErrnoException).code).toBe("ENAMETOOLONG");
+  });
 });

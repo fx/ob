@@ -490,24 +490,17 @@ export async function openVaultStore(opts: OpenVaultStoreOptions): Promise<Vault
   let indexBuildChain: Promise<void> = Promise.resolve();
 
   async function buildIndexSerialised(work: () => Promise<void>): Promise<void> {
-    // Wait for the prior build (if any) to settle — fulfilled or
-    // rejected — before starting our own. Using `await` with try/catch
-    // lets a transiently-failed prior build still let us run, while
-    // surfacing OUR own failure to the caller (the upsert retry loop).
-    // The chain is saved as the awaited-and-swallowed shape so two
-    // concurrent callers observe the same serialisation point without
-    // a dedicated catch handler.
+    // Wait for the prior build (if any) to finish before starting our
+    // own. Each chain slot is resolved in a `finally` and never rejects,
+    // so a failed prior build still lets us run, while OUR own failure
+    // surfaces to the caller (the upsert retry loop).
     const prev = indexBuildChain;
     let resolveSlot!: () => void;
     indexBuildChain = new Promise<void>((res) => {
       resolveSlot = res;
     });
     try {
-      try {
-        await prev;
-      } catch {
-        // Prior build failed; that's its caller's problem, not ours.
-      }
+      await prev;
       await work();
     } finally {
       resolveSlot();

@@ -279,9 +279,9 @@ export class EmbedBatcher {
  */
 /**
  * Per-path serialisation. Each `runLocked(path, tails, fn)` waits for the
- * previous caller for the same `path` to settle before invoking `fn`. We
- * use `await` rather than chained `.then` so the rejection-tolerance and
- * scheduling are obvious top-to-bottom.
+ * previous caller for the same `path` to settle before invoking `fn`. The
+ * tail stored in `tails` is resolved in a `finally` and never rejects, so a
+ * failed predecessor cannot poison the chain and awaiting it needs no catch.
  *
  * Implemented as a free function rather than a class to keep the
  * function-coverage surface tight: the implicit class constructor would
@@ -299,14 +299,7 @@ async function runLocked<T>(
     resolveTail = r;
   });
   tails.set(path, tail);
-  if (prev !== undefined) {
-    try {
-      await prev;
-    } catch {
-      // Intentionally swallowed — failed predecessors must not poison
-      // the chain.
-    }
-  }
+  if (prev !== undefined) await prev;
   try {
     return await fn();
   } finally {

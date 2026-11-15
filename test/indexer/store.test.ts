@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as lancedb from "@lancedb/lancedb";
 import {
   FTS_INDEX_THRESHOLD,
   PIPELINE_VERSION,
@@ -36,6 +37,59 @@ function row(over: Partial<StoreRow> = {}): StoreRow {
     sha256: "x",
     vector: Float32Array.from([1, 0, 0, 0]),
     ...over,
+  };
+}
+
+type Row = Record<string, unknown>;
+
+/**
+ * `connect` seam that hands back the real LanceDB tables with `decorate`
+ * applied, so a test can steer what the store reads back.
+ */
+function decoratingConnect(decorate: (table: lancedb.Table) => void): typeof lancedb.connect {
+  return (async (...args: Parameters<typeof lancedb.connect>) => {
+    const db = await lancedb.connect(...args);
+    const opened = db as unknown as Record<
+      "openTable" | "createEmptyTable",
+      (...a: unknown[]) => Promise<lancedb.Table>
+    >;
+    for (const name of ["openTable", "createEmptyTable"] as const) {
+      const orig = opened[name].bind(db);
+      opened[name] = async (...a) => {
+        const table = await orig(...a);
+        decorate(table);
+        return table;
+      };
+    }
+    return db;
+  }) as typeof lancedb.connect;
+}
+
+/**
+ * Decorator that hands the store plain copies of every row the table
+ * returns, after `rewrite` has had its way with each (Arrow rows are
+ * read-only proxies, so they are copied first).
+ */
+function rewritingRows(rewrite: (row: Row, index: number) => void): (table: lancedb.Table) => void {
+  const wrap = <Q extends { toArray: lancedb.Query["toArray"] }>(q: Q): Q => {
+    const toArray = q.toArray.bind(q);
+    q.toArray = async (...a) => {
+      const rows = (await toArray(...a)) as Row[];
+      return rows.map((r, i) => {
+        const copy = { ...r };
+        rewrite(copy, i);
+        return copy;
+      });
+    };
+    return q;
+  };
+  return (table) => {
+    const query = table.query.bind(table);
+    const vectorSearch = table.vectorSearch.bind(table);
+    const search = table.search.bind(table);
+    table.query = () => wrap(query());
+    table.vectorSearch = (...a) => wrap(vectorSearch(...a));
+    table.search = (...a) => wrap(search(...a));
   };
 }
 
@@ -345,27 +399,29 @@ describe("openVaultStore", () => {
   });
 
   test("opens an existing store missing a vector field as a corrupt-table mismatch", async () => {
-    // Arrange: open a vault, then forcefully recreate just the dir layout
-    // with an empty table created via createEmptyTable + a different schema.
-    // Easier: open with dim=4, then nuke the table dir and re-open with a
-    // synthetic schema-less table by hand. This path is hard to drive in TS
-    // without internal LanceDB hooks, so we exercise getTableDim's null
-    // branch indirectly via the dim mismatch above. Verify the
-    // tableDim=0 → mismatch path by deleting the lance internals — out of
-    // scope for a unit test. Skip explicitly so coverage tooling sees the
-    // remaining branch is documented as non-reachable from JS.
     const dir = tmpDir("store-corrupt");
     const s1 = await openVaultStore({ dataDir: dir, slug: "v", dim: 4 });
     s1.close();
-    // Sanity: re-opening with mismatched dim hits the mismatch branch we
-    // already cover.
+    // Re-open through the connect seam with the `vector` field stripped
+    // from the schema the store reads back.
+    const connect = decoratingConnect((table) => {
+      const schema = table.schema.bind(table);
+      table.schema = async () => {
+        const real = await schema();
+        return Object.assign(Object.create(real), {
+          fields: real.fields.filter((f) => f.name !== "vector"),
+        });
+      };
+    });
     let err: unknown;
     try {
-      await openVaultStore({ dataDir: dir, slug: "v", dim: 99 });
+      await openVaultStore({ dataDir: dir, slug: "v", dim: 4, connect });
     } catch (e) {
       err = e;
     }
     expect(err).toBeInstanceOf(StoreDimensionMismatchError);
+    expect((err as StoreDimensionMismatchError).tableDim).toBe(0);
+    expect((err as StoreDimensionMismatchError).providerDim).toBe(4);
   });
 });
 
@@ -1139,6 +1195,71 @@ describe("searchHybrid (change 0008)", () => {
       limit: 10,
     });
     expect(again.map((h) => h.path)).toEqual(hits.map((h) => h.path));
+    store.close();
+  });
+});
+
+describe("defensive handling of rows read back from LanceDB", () => {
+  async function openRewriting(label: string, rewrite: (row: Row, index: number) => void) {
+    return openVaultStore({
+      dataDir: tmpDir(label),
+      slug: "v",
+      dim: 4,
+      connect: decoratingConnect(rewritingRows(rewrite)),
+    });
+  }
+
+  test("unparseable frontmatter JSON maps to an empty object", async () => {
+    const store = await openRewriting("store-bad-fm", (r) => {
+      if ("frontmatter" in r) r.frontmatter = "{not json";
+    });
+    await store.upsert("a.md", [row({ frontmatter: { k: "v" } })]);
+    const hits = await store.search(Float32Array.from([1, 0, 0, 0]), { limit: 5 });
+    expect(hits.length).toBe(1);
+    expect(hits[0]?.frontmatter).toEqual({});
+    store.close();
+  });
+
+  test("number and non-numeric row ids are keyed by their string form", async () => {
+    const store = await openRewriting("store-rowid", (r, i) => {
+      if (typeof r._rowid !== "bigint") return;
+      r._rowid = i === 0 ? Number(r._rowid) : `rid-${r._rowid}`;
+    });
+    await store.upsert("a.md", [row({ path: "a.md" })]);
+    await store.upsert("b.md", [row({ path: "b.md", vector: Float32Array.from([0, 1, 0, 0]) })]);
+    const hits = await store.searchHybrid(Float32Array.from([1, 0, 0, 0]), "hello", {
+      mode: "vector",
+      limit: 5,
+    });
+    expect(hits.map((h) => h.path).sort()).toEqual(["a.md", "b.md"]);
+    store.close();
+  });
+
+  test("fts mode without a usable _score falls back to a rank-derived score", async () => {
+    const store = await openRewriting("store-no-score", (r) => {
+      r._score = undefined;
+    });
+    await store.upsert("a.md", [row({ path: "a.md", embedText: "a.md\n\ncoffee beans" })]);
+    const k = 60;
+    const hits = await store.searchHybrid(Float32Array.from([1, 0, 0, 0]), "coffee", {
+      mode: "fts",
+      limit: 5,
+      rrfK: k,
+    });
+    expect(hits.length).toBe(1);
+    // Rank 1: rrf = 1 / (k + 1), saturated as rrf / (1 + rrf).
+    const rrf = 1 / (k + 1);
+    expect(hits[0]?.score).toBeCloseTo(rrf / (1 + rrf), 10);
+    store.close();
+  });
+
+  test("a non-numeric mtime_ms yields no fingerprint", async () => {
+    const store = await openRewriting("store-bad-mtime", (r) => {
+      if ("mtime_ms" in r) r.mtime_ms = null;
+    });
+    await store.upsert("a.md", [row()]);
+    expect(await store.fingerprint("a.md")).toBeUndefined();
+    expect((await store.fingerprints()).size).toBe(0);
     store.close();
   });
 });

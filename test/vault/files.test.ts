@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { promises as fs, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { describe, expect, spyOn, test } from "bun:test";
+import { promises as fs, existsSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   DocNotFoundError,
@@ -58,6 +58,29 @@ describe("writeFile", () => {
     expect(result.indexed).toBe(true);
     expect(fx.calls.reindex).toEqual([{ slug: fx.slug, path: "notes/n.md" }]);
     expect(readFileSync(join(fx.root, "notes/n.md"), "utf8")).toBe("# hello");
+  });
+
+  test("a failing existence probe other than ENOENT propagates and writes nothing", async () => {
+    const fx = makeVaultFixture();
+    const abs = join(fx.root, "n.md");
+    const realStat = fs.stat.bind(fs);
+    // No on-disk fixture fails `stat` but not the preceding `lstat` for every
+    // user, so inject an EIO for the target alone.
+    const stat = spyOn(fs, "stat").mockImplementation(((p: Parameters<typeof fs.stat>[0]) => {
+      if (p === abs) {
+        return Promise.reject(Object.assign(new Error("EIO: i/o error"), { code: "EIO" }));
+      }
+      return realStat(p);
+    }) as typeof fs.stat);
+    try {
+      await expect(
+        writeFile(fx.deps, fx.slug, "n.md", { kind: "markdown", content: "x" }),
+      ).rejects.toMatchObject({ code: "EIO" });
+    } finally {
+      stat.mockRestore();
+    }
+    expect(existsSync(abs)).toBe(false);
+    expect(fx.calls.reindex).toEqual([]);
   });
 
   test("Markdown PUT serialises frontmatter as YAML", async () => {

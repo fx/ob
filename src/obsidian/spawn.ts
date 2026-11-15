@@ -119,8 +119,8 @@ export function buildRealSpawner(opts: RealSpawnerOptions = {}): Spawner {
           try {
             proc.kill(signal);
           } catch {
-            // Bun throws when the process has already exited; for our supervisor
-            // semantics that's a no-op.
+            // Bun throws on a signal it does not recognise; for our supervisor
+            // semantics a failed signal is a no-op.
           }
         },
       };
