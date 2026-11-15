@@ -28,13 +28,21 @@ describe("buildTransformersEmbedder (unit)", () => {
   const originalCache = process.env.TRANSFORMERS_CACHE;
   const originalHfHome = process.env.HF_HOME;
 
+  // Env vars must be removed entirely: assigning `undefined` stores the
+  // string "undefined", which the code under test reads as already set.
   beforeEach(() => {
-    process.env.TRANSFORMERS_CACHE = undefined;
-    process.env.HF_HOME = undefined;
+    // biome-ignore lint/performance/noDelete: assigning undefined would store the string "undefined".
+    delete process.env.TRANSFORMERS_CACHE;
+    // biome-ignore lint/performance/noDelete: assigning undefined would store the string "undefined".
+    delete process.env.HF_HOME;
   });
   afterEach(() => {
-    process.env.TRANSFORMERS_CACHE = originalCache;
-    process.env.HF_HOME = originalHfHome;
+    // biome-ignore lint/performance/noDelete: assigning undefined would store the string "undefined".
+    if (originalCache === undefined) delete process.env.TRANSFORMERS_CACHE;
+    else process.env.TRANSFORMERS_CACHE = originalCache;
+    // biome-ignore lint/performance/noDelete: assigning undefined would store the string "undefined".
+    if (originalHfHome === undefined) delete process.env.HF_HOME;
+    else process.env.HF_HOME = originalHfHome;
   });
 
   test("lazy-loads pipeline on first embed call", async () => {
