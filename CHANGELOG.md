@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.0.0](https://github.com/fx/ob/compare/v1.5.0...v2.0.0) (2026-11-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api:** the MCP tools list_files, list_folders, delete_file and delete_folder are removed, replaced by list and delete. The REST routes GET /v1/vaults/:slug/files, GET /v1/vaults/:slug/folders, DELETE /v1/vaults/:slug/files/*path and DELETE /v1/vaults/:slug/folders/*path are removed and now return the JSON 404, replaced by GET /v1/vaults/:slug/paths and DELETE /v1/vaults/:slug/paths/*path. No aliases are kept.
+
+### Features
+
+* **api:** add move and copy for files and folders ([#40](https://github.com/fx/ob/issues/40)) ([6748d23](https://github.com/fx/ob/commit/6748d23a01df36e177c1e77e0420372cb043b76e))
+* **api:** replace per-type list and delete with unified path tools ([#38](https://github.com/fx/ob/issues/38)) ([958a9dc](https://github.com/fx/ob/commit/958a9dcabd6760dc36abc36120b3f460c6879cbf))
+* **mcp:** add read-only grep tool and route ([#39](https://github.com/fx/ob/issues/39)) ([282e7cc](https://github.com/fx/ob/commit/282e7ccbd5339d9e603432b20cd0e89eae153252))
+* **mcp:** add read-only list_tags tool and tags route ([#36](https://github.com/fx/ob/issues/36)) ([761f79a](https://github.com/fx/ob/commit/761f79a71d5577effdf741f05456d4db424422ae))
+
+
+### Bug Fixes
+
+* **deps:** bump bun to 1.4.4 and node to 22.23.5 ([#42](https://github.com/fx/ob/issues/42)) ([955b423](https://github.com/fx/ob/commit/955b4232c5f821bcf74fe0337b2d61b5dfaa3e91))
+* **deps:** refresh transitive deps and pin base image digests ([#41](https://github.com/fx/ob/issues/41)) ([7d1cde8](https://github.com/fx/ob/commit/7d1cde80cd2290131b4de0d8577ccafef8d8aced))
+
 ## [1.5.0](https://github.com/fx/ob/compare/v1.4.0...v1.5.0) (2026-11-04)
 
 
