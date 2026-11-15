@@ -1,7 +1,7 @@
 [tools]
 # Pin to exact versions so dev/CI/Docker share the same toolchain. Bumps
 # happen via PR.
-node = "22.18.0"
+node = "22.23.5"
 bun = "1.4.4"
 # obsidian-headless CLI — must match Dockerfile ARG OBSIDIAN_HEADLESS_VERSION.
 "npm:obsidian-headless" = "0.0.8"
